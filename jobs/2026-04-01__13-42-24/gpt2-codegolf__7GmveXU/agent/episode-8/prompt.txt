@@ -1,0 +1,234 @@
+New Terminal Output:
+
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# cat > /tmp/ref.py << 'PYEOF'
+> import struct, math, mmap, sys
+>
+> V=50257; C=768; L=12; H=12; M=1024; HS=C//H
+>
+> f = open('gpt2-124M.ckpt','rb')
+> w = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def F(off, n):
+>     return struct.unpack_from(f'{n}f', w, off*4)
+>
+> # Offsets
+> WTE=0; WPE=V*C
+> o=WPE+M*C
+> LN1W=o; o+=L*C
+> LN1B=o; o+=L*C
+> QKVW=o; o+=L*3*C*C
+> QKVB=o; o+=L*3*C
+> APW=o; o+=L*C*C
+> APB=o; o+=L*C
+> LN2W=o; o+=L*C
+> LN2B=o; o+=L*C
+> FCW=o; o+=L*4*C*C
+> FCB=o; o+=L*4*C
+> FPW=o; o+=L*4*C*C
+> FPB=o; o+=L*C
+> LFW=o; o+=C
+> LFB=o
+>
+> def ln(x, woff, boff):
+>     n=len(x); mu=sum(x)/n
+>     v=sum((a-mu)**2 for a in x)/n; s=math.sqrt(v+1e-5)
+>     ww=F(woff,n); bb=F(boff,n)
+>     return [(x[i]-mu)/s*ww[i]+bb[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> def matmul(x, woff, boff, rows, cols):
+>     # x is [cols], w is [rows, cols] stored row-major, output is [rows]
+>     ww = F(woff, rows*cols)
+>     bb = F(boff, rows) if boff is not None else [0]*rows
+>     out = [0]*rows
+>     for i in range(rows):
+>         s = bb[i]
+>         for j in range(cols):
+>             s += x[j] * ww[i*cols+j]
+>         out[i] = s
+>     return out
+>
+> # KV cache: kv_cache[layer][pos] = (k, v) where k,v are [C]
+> kv_cache = [[None]*M for _ in range(L)]
+>
+> def forward(token, pos):
+>     # Embedding
+>     te = list(F(WTE + token*C, C))
+>     pe = list(F(WPE + pos*C, C))
+>     x = [te[i]+pe[i] for i in range(C)]
+>
+>     for l in range(L):
+>         # LN1
+>         xn = ln(x, LN1W+l*C, LN1B+l*C)
+>
+>         # QKV
+>         qkv = matmul(xn, QKVW+l*3*C*C, QKVB+l*3*C, 3*C, C)
+>         q = qkv[:C]; k = qkv[C:2*C]; v = qkv[2*C:3*C]
+>
+>         # Store KV cache
+>         kv_cache[l][pos] = (k, v)
+>
+>         # Multi-head attention
+>         attn_out = [0]*C
+>         for h in range(H):
+>             ho = h*HS
+>             # Compute attention scores for this head
+>             scores = []
+>             for p in range(pos+1):
+>                 kp = kv_cache[l][p][0]
+>                 score = sum(q[ho+i]*kp[ho+i] for i in range(HS)) / math.sqrt(HS)
+>                 scores.append(score)
+>             # Softmax
+>             mx = max(scores)
+>             exps = [math.exp(s-mx) for s in scores]
+>             sm = sum(exps)
+>             exps = [e/sm for e in exps]
+>             # Weighted sum of values
+>             for i in range(HS):
+>                 s = 0
+>                 for p in range(pos+1):
+>                     vp = kv_cache[l][p][1]
+>                     s += exps[p] * vp[ho+i]
+>                 attn_out[ho+i] = s
+>
+>         # Attention projection
+>         proj = matmul(attn_out, APW+l*C*C, APB+l*C, C, C)
+>
+>         # Residual
+>         x = [x[i]+proj[i] for i in range(C)]
+>
+>         # LN2
+>         xn = ln(x, LN2W+l*C, LN2B+l*C)
+>
+>         # MLP: fc -> gelu -> proj
+>         fc = matmul(xn, FCW+l*4*C*C, FCB+l*4*C, 4*C, C)
+>         fc = [gelu(a) for a in fc]
+>         mlp = matmul(fc, FPW+l*4*C*C, FPB+l*C, C, 4*C)
+>
+>         # Residual
+>         x = [x[i]+mlp[i] for i in range(C)]
+>
+>     # Final LN
+>     x = ln(x, LFW, LFB)
+>
+>     # Logits: multiply by wte^T
+>     logits = [0]*V
+>     for i in range(V):
+>         emb = F(WTE+i*C, C)
+>         logits[i] = sum(x[j]*emb[j] for j in range(C))
+>
+>     return logits
+>
+> # BPE tokenizer
+> def load_bpe(path):
+>     merges = []
+>     with open(path) as f:
+>         f.readline()  # skip header
+>         for line in f:
+>             parts = line.strip().split(' ')
+>             if len(parts) == 2:
+>                 merges.append((parts[0], parts[1]))
+>     return merges
+>
+> # GPT-2 byte encoder
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> byte_enc = bytes_to_unicode()
+> byte_dec = {v:k for k,v in byte_enc.items()}
+>
+> def bpe_encode(text, merges):
+>     # Convert text to unicode tokens
+>     tokens = [byte_enc[b] for b in text.encode('utf-8')]
+>
+>     # Build merge ranking
+>     merge_rank = {m:i for i,m in enumerate(merges)}
+>
+>     # Apply BPE
+>     while len(tokens) > 1:
+>         best = None
+>         best_idx = -1
+>         best_rank = len(merges)
+>         for i in range(len(tokens)-1):
+>             pair = (tokens[i], tokens[i+1])
+>             if pair in merge_rank and merge_rank[pair] < best_rank:
+>                 best_rank = merge_rank[pair]
+>                 best = pair
+>                 best_idx = i
+>         if best is None:
+>             break
+>         # Merge all occurrences of this pair
+>         new_tokens = []
+>         i = 0
+>         while i < len(tokens):
+>             if i < len(tokens)-1 and tokens[i] == best[0] and tokens[i+1] == best[1]:
+>                 new_tokens.append(best[0]+best[1])
+>                 i += 2
+>             else:
+>                 new_tokens.append(tokens[i])
+>                 i += 1
+>         tokens = new_tokens
+>
+>     # Build vocab: 256 byte tokens + merged tokens
+>     vocab = {}
+>     for i in range(256):
+>         vocab[byte_enc[i]] = i  # Wait, this isn't right
+>     # Actually the base vocab maps each unicode char to an id 0-255
+>     base_chars = list(bytes_to_unicode().values())
+>     for i, c in enumerate(base_chars):
+>         vocab[c] = i
+>     for i, (a,b) in enumerate(merges):
+>         vocab[a+b] = 256 + i
+>
+>     return [vocab[t] for t in tokens]
+>
+> def bpe_decode(token_ids, merges):
+>     # Build reverse vocab
+>     base_chars = list(bytes_to_unicode().values())
+>     id_to_str = {}
+>     for i in range(256):
+>         id_to_str[i] = base_chars[i]
+>     for i, (a,b) in enumerate(merges):
+>         id_to_str[256+i] = a+b
+>
+>     text = ''.join(id_to_str.get(t, '') for t in token_ids)
+>     # Decode from unicode representation back to bytes
+>     bs = bytearray([byte_dec[c] for c in text])
+>     return bs.decode('utf-8', errors='replace')
+>
+> merges = load_bpe('vocab.bpe')
+>
+> # Test tokenization
+> text = "Hello"
+> tokens = bpe_encode(text, merges)
+> print(f"Tokens for '{text}': {tokens}")
+> print(f"Decoded: {bpe_decode(tokens, merges)}")
+>
+> # Generate
+> print("Starting generation...")
+> for pos, tok in enumerate(tokens):
+>     logits = forward(tok, pos)
+>     top5 = sorted(range(V), key=lambda i: logits[i], reverse=True)[:5]
+>     print(f"Pos {pos}, token {tok}: top5 = {[(i, bpe_decode([i], merges), logits[i]) for i in top5]}")
+>
+> # Generate 5 more tokens
+> for step in range(5):
+>     next_tok = max(range(V), key=lambda i: logits[i])
+>     tokens.append(next_tok)
+>     print(f"Generated token {next_tok}: '{bpe_decode([next_tok], merges)}'")
+>     logits = forward(next_tok, len(tokens)-1)
+>
+> print(f"Full output: {bpe_decode(tokens, merges)}")
+> PYEOF
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# python3 /tmp/ref.py 2>&1 | head -30
+

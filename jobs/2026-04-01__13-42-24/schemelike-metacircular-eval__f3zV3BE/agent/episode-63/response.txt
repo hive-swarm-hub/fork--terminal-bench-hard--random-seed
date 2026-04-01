@@ -1,0 +1,50 @@
+Content: 
+
+Now I see the issue! `proc` is `#<procedure>` - which is a host-level `Procedure` object, not a Pair. This means the inner eval.scm's `mc-apply` is receiving a host Procedure object instead of a tagged pair `(mc-prim . something)`.
+
+This happens because when the inner eval.scm's `make-global-env` creates `(cons 'mc-prim 'mc-display)`, the outer eval.scm evaluates this. The outer looks up `cons` → `(mc-prim . mc-cons)` → calls host's `cons`. So `(cons 'mc-prim 'mc-display)` creates a host Pair `(mc-prim . mc-display)`. That's correct.
+
+But wait - the issue is that the inner eval.scm's `display` function... No, let me think again.
+
+The "Error: Not a proc atom:#<procedure>" means `proc` is a host `Procedure` object (not a Pair). The `#<procedure>` representation comes from interp.py's `Procedure.__repr__`. So somewhere, the inner eval.scm is getting a host Procedure object as the value of a function call.
+
+This could happen if the inner eval.scm looks up a function name and gets a host Procedure instead of a tagged pair. But the inner eval.scm's environment should only contain tagged pairs (`(mc-prim . ...)` or `(mc-proc . ...)`).
+
+Unless... the inner eval.scm's `define` with function shorthand creates a `(mc-proc ...)` tagged pair. But the outer eval.scm evaluates the inner's `(define (foo ...) ...)` form. The outer's `mc-eval-define` sees that `name-or-list` is a pair, creates a `(mc-proc params body env)` tagged pair, and defines it in the environment. So the inner eval.scm's functions ARE mc-proc tagged pairs.
+
+But when the inner eval.scm calls `mc-apply` on one of these, the `mc-apply` function itself is an mc-proc. The outer eval.scm calls the inner's `mc-apply` by creating a new environment, binding params, and evaluating the body. In the body, `(pair? proc)` is evaluated by the outer eval.scm. The outer's `pair?` primitive checks `(pair? x)` which calls the host's `pair?`. A host Pair IS a pair, so this should be true.
+
+Wait, but the error says "Not a proc atom:#<procedure>". This means `(pair? proc)` returned false for a Procedure object. The host's `pair?` is `lambda x: isinstance(x, Pair)`. A Procedure is NOT a Pair, so `(pair? proc)` returns false. That's the bug!
+
+The inner eval.scm defines functions using `(define (f ...) body)`. The outer eval.scm's `mc-eval-define` creates `(cons 'mc-proc (cons params (cons body (cons env '()))))`. This IS a Pair. So the inner eval.scm's functions should be Pairs.
+
+But the error shows `#<procedure>` which is a host Procedure. Where does this come from? It must be coming from the inner eval.scm's environment lookup. The inner eval.scm's `make-global-env` creates `(cons 'mc-prim 'mc-display)` etc. These are Pairs. But the inner eval.scm's user-defined functions...
+
+Oh! I think I understand now. The inner eval.scm reads the calculator's code and evaluates it. The calculator has `(display ...)`. The inner eval.scm looks up `display` in its mc-env and finds `(mc-prim . mc-display)`. Then `mc-apply` is called. `(pair? proc)` where proc is `(mc-prim . mc-display)` - this IS a Pair. Then `(eq? (car proc) 'mc-prim)` should be true. Then `apply-primitive` is called with `'mc-display` and the args.
+
+But `apply-primitive` calls `(prim-display (car args))` which calls `(display (car args))` - the `display` here is the outer eval.scm's `display` primitive which calls the host's `display`. This should work.
+
+Wait, but the error is "Not a proc atom:#<procedure>". The `#<procedure>` is the repr of a host Procedure. Where would a host Procedure enter the inner eval.scm's environment?
+
+OH! I think I see it now. The inner eval.scm's `mc-eval-define` with function shorthand creates `(cons 'mc-proc ...)`. But the `define` in the inner eval.scm is evaluated by the outer eval.scm's `mc-eval-define`. The outer creates an `(mc-proc params body env)` tagged pair and stores it. When the inner's code calls this function, the outer's `mc-apply` is invoked with this mc-proc. The outer creates a new environment and evaluates the body. The body of the inner's `mc-eval-define` includes creating another mc-proc for the inner's user-defined functions.
+
+But the problem is: when the inner eval.scm's `mc-eval-lambda` creates `(cons 'mc-proc ...)`, this is evaluated by the outer eval.scm. The `cons` is the outer's mc-prim which calls the host's `cons`. So it creates a host Pair tagged with `mc-proc`. This is correct.
+
+Hmm, let me check where the `#<procedure>` comes from. It must be from the inner eval.scm's `prim-display` function. When the inner's `prim-display` calls `(display val)`, the `display` here refers to... wait, `display` in the inner eval.scm's top-level scope is whatever is in the outer eval.scm's mc-env. The outer's mc-env has `display` → `(mc-prim . mc-display)`. So when the inner's `prim-display` calls `(display val)`, it's calling the outer's mc-display primitive.
+
+No wait, that's wrong. The inner eval.scm's `prim-display` function body has `(display val)`. When this is evaluated by the outer eval.scm, `display` is looked up in the inner function's closure environment. The closure env of `prim-display` is the inner eval.scm's top-level env. In that env, `display` was defined by the inner's `make-global-env` as `(mc-prim . mc-display)`. So `display` resolves to `(mc-prim . mc-display)`, which is a Pair, not a callable.
+
+The outer eval.scm then tries to apply `(mc-prim . mc-display)` with `val` as arg. The outer's `mc-apply` checks `(pair? proc)` → true. Then `(eq? (car proc) 'mc-prim)` → true. Then calls `apply-primitive 'mc-display (val)` → calls host's `display`. This should work!
+
+I'm confused. Let me just look at the actual output more carefully.
+
+Tool Calls: [
+  {
+    "id": "toolu_01LURq33b2aWiovQUNDM8mnV",
+    "type": "function",
+    "function": {
+      "name": "execute_commands",
+      "arguments": "{\"analysis\": \"Let me wait for the background process and check the full output.\", \"plan\": \"Check the full debug output.\", \"commands\": [{\"keystrokes\": \"\", \"duration\": 30}]}"
+    }
+  }
+]

@@ -1,0 +1,194 @@
+New Terminal Output:
+
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app# cat > /app/steal.py << 'PYEOF'
+ = compute_gradient(x0 + t_values[step] * d)
+            diff = curr_grad - prev_grad
+            diff_norm = np.linalg.norm(diff)
+
+            if diff_norm > 1e-6:
+                all_diffs.append(diff)
+
+            prev_grad = curr_grad
+
+        print(f"  Line {line_idx + 1}/{n_lines}, total diffs: {len(all_diffs)}")
+
+    print(f"\nPhase 2: Clustering {len(all_diffs)} gradient differences...")
+
+    # Cluster by direction (cosine similarity)
+    clusters = []  # list of lists
+    cluster_dirs = []  # representative normalized direction
+
+    for diff in all_diffs:
+        norm = np.linalg.norm(diff)
+        if norm < 1e-7:
+            continue
+        direction = diff / norm
+
+        assigned = False
+        best_sim = 0
+        best_ci = -1
+        for ci, cd in enumerate(cluster_dirs):
+            cos_sim = abs(np.dot(direction, cd))
+            if cos_sim > best_sim:
+                best_sim = cos_sim
+                best_ci = ci
+
+        if best_sim > 0.999:
+            clusters[best_ci].append(diff)
+        else:
+            clusters.append([diff])
+            cluster_dirs.append(direction)
+
+    print(f"Found {len(clusters)} clusters")
+
+    # Sort clusters by size (largest first)
+    cluster_sizes = [(len(c), i) for i, c in enumerate(clusters)]
+    cluster_sizes.sort(reverse=True)
+
+    print("Top 25 cluster sizes:", [s for s, _ in cluster_sizes[:25]])
+
+    # Take the top 20 clusters
+    recovered_rows = []
+    for rank, (size, ci) in enumerate(cluster_sizes[:20]):
+        cluster = clusters[ci]
+        # Use the diff with smallest magnitude (most likely single neuron flip)
+        mags = [np.linalg.norm(d) for d in cluster]
+        # Use median as representative
+        sorted_indices = np.argsort(mags)
+        median_idx = sorted_indices[len(sorted_indices)//2]
+        row = cluster[median_idx]
+
+        # Normalize sign: make the largest absolute component positive
+        max_comp_idx = np.argmax(np.abs(row))
+        if row[max_comp_idx] < 0:
+            row = -row
+
+        recovered_rows.append(row)
+        print(f"  Rank {rank}: cluster {ci}, size={size}, norm={np.linalg.norm(row):.6f}")
+
+    A1_stolen = np.array(recovered_rows)
+
+    print(f"\nRecovered A1 shape: {A1_stolen.shape}")
+    np.save('/app/stolen_A1.npy', A1_stolen)
+    print("Saved stolen A1 to /app/stolen_A1.npy")
+
+    return A1_stolen
+
+if __name__ == '__main__':
+    A1_stolen = steal_A1()
+    print("\nStolen A1 matrix:")
+    print(A1_stolen)
+PYEOF
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient of forward(x) via finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     all_diffs = []  # collect all gradient differences
+>
+>     n_lines = 30
+>     n_steps = 400  # very fine steps to ensure single neuron flips
+>     t_range = 5.0
+>
+>     print("Phase 1: Collecting gradient differences along random lines...")
+>     for line_idx in range(n_lines):
+>         x0 = np.random.randn(10) * 1.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         t_values = np.linspace(-t_range, t_range, n_steps)
+>         prev_grad = compute_gradient(x0 + t_values[0] * d)
+>
+>         for step in range(1, n_steps):
+>             curr_grad = compute_gradient(x0 + t_values[step] * d)
+>             diff = curr_grad - prev_grad
+>             diff_norm = np.linalg.norm(diff)
+>
+>             if diff_norm > 1e-6:
+>                 all_diffs.append(diff)
+>
+>             prev_grad = curr_grad
+>
+>         print(f"  Line {line_idx + 1}/{n_lines}, total diffs: {len(all_diffs)}")
+>
+>     print(f"\nPhase 2: Clustering {len(all_diffs)} gradient differences...")
+>
+>     # Cluster by direction (cosine similarity)
+>     clusters = []  # list of lists
+>     cluster_dirs = []  # representative normalized direction
+>
+>     for diff in all_diffs:
+>         norm = np.linalg.norm(diff)
+>         if norm < 1e-7:
+>             continue
+>         direction = diff / norm
+>
+>         assigned = False
+>         best_sim = 0
+>         best_ci = -1
+>         for ci, cd in enumerate(cluster_dirs):
+>             cos_sim = abs(np.dot(direction, cd))
+>             if cos_sim > best_sim:
+>                 best_sim = cos_sim
+>                 best_ci = ci
+>
+>         if best_sim > 0.999:
+>             clusters[best_ci].append(diff)
+>         else:
+>             clusters.append([diff])
+>             cluster_dirs.append(direction)
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # Sort clusters by size (largest first)
+>     cluster_sizes = [(len(c), i) for i, c in enumerate(clusters)]
+>     cluster_sizes.sort(reverse=True)
+>
+>     print("Top 25 cluster sizes:", [s for s, _ in cluster_sizes[:25]])
+>
+>     # Take the top 20 clusters
+>     recovered_rows = []
+>     for rank, (size, ci) in enumerate(cluster_sizes[:20]):
+>         cluster = clusters[ci]
+>         # Use the diff with smallest magnitude (most likely single neuron flip)
+>         mags = [np.linalg.norm(d) for d in cluster]
+>         # Use median as representative
+>         sorted_indices = np.argsort(mags)
+>         median_idx = sorted_indices[len(sorted_indices)//2]
+>         row = cluster[median_idx]
+>
+>         # Normalize sign: make the largest absolute component positive
+>         max_comp_idx = np.argmax(np.abs(row))
+>         if row[max_comp_idx] < 0:
+>             row = -row
+>
+>         recovered_rows.append(row)
+>         print(f"  Rank {rank}: cluster {ci}, size={size}, norm={np.linalg.norm(row):.6f}")
+>
+>     A1_stolen = np.array(recovered_rows)
+>
+>     print(f"\nRecovered A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>
+>     return A1_stolen
+>
+> if __name__ == '__main__':
+>     A1_stolen = steal_A1()
+>     print("\nStolen A1 matrix:")
+>     print(A1_stolen)
+> PYEOF
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app#

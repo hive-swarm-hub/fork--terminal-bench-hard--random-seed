@@ -1,0 +1,197 @@
+New Terminal Output:
+
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app# cat > /app/steal.py << 'PYEOF'
+_start = grad_mid
+        else:
+            t_end = t_mid
+            grad_end = grad_mid
+
+    # Now t_start and t_end bracket the kink very tightly
+    # Compute gradients at points offset from the kink
+    offset = 1e-4
+    t_kink = (t_start + t_end) / 2
+    g_before = compute_gradient(x0 + (t_kink - offset) * d)
+    g_after = compute_gradient(x0 + (t_kink + offset) * d)
+
+    return g_before, g_after
+
+def steal_A1():
+    np.random.seed(42)
+
+    recovered_rows = []  # list of (direction, raw_vector) tuples
+
+    n_lines = 200
+    n_steps = 50
+    t_range = 10.0
+
+    for line_idx in range(n_lines):
+        if len(recovered_rows) >= 20:
+            break
+
+        x0 = np.random.randn(10) * 2.0
+        d = np.random.randn(10)
+        d = d / np.linalg.norm(d)
+
+        t_values = np.linspace(-t_range, t_range, n_steps)
+        prev_grad = compute_gradient(x0 + t_values[0] * d)
+
+        for step in range(1, n_steps):
+            curr_grad = compute_gradient(x0 + t_values[step] * d)
+            diff = curr_grad - prev_grad
+            diff_norm = np.linalg.norm(diff)
+
+            if diff_norm > 1e-8:
+                # There's a kink between t_values[step-1] and t_values[step]
+                # Use binary search to find it, then get gradients on either side
+                g_before, g_after = find_kink_on_line(
+                    x0, d, t_values[step-1], t_values[step], prev_grad, curr_grad
+                )
+
+                single_diff = g_after - g_before
+                single_norm = np.linalg.norm(single_diff)
+
+                if single_norm > 1e-6:  # meaningful difference
+                    direction = single_diff / single_norm
+
+                    # Check if this direction is new
+                    is_new = True
+                    for existing_dir, _ in recovered_rows:
+                        cos_sim = abs(np.dot(direction, existing_dir))
+                        if cos_sim > 0.99:
+                            is_new = False
+                            break
+
+                    if is_new:
+                        recovered_rows.append((direction, single_diff))
+                        print(f"Found row {len(recovered_rows)} (line {line_idx}, step {step}), norm={single_norm:.6f}")
+
+            prev_grad = curr_grad
+
+    print(f"\nTotal recovered rows: {len(recovered_rows)}")
+
+    # Build the matrix from the raw vectors (A2[0,i]*A1[i,:])
+    # This gives A1 up to per-row scaling
+    A1_stolen = np.array([row for _, row in recovered_rows[:20]])
+
+    print(f"Recovered A1 shape: {A1_stolen.shape}")
+    np.save('/app/stolen_A1.npy', A1_stolen)
+    print("Saved stolen A1 to /app/stolen_A1.npy")
+
+    return A1_stolen
+
+if __name__ == '__main__':
+    A1_stolen = steal_A1()
+    print("\nStolen A1 matrix:")
+    print(A1_stolen)
+PYEOF
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) via finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def find_kink_on_line(x0, d, t_start, t_end, grad_start, grad_end):
+>     """Binary search for a kink (ReLU boundary crossing) on line x0 + t*d.
+>     Returns gradients on either side of the kink with some offset."""
+>     # Binary search to narrow down the kink location
+>     for _ in range(40):  # enough iterations to get close
+>         t_mid = (t_start + t_end) / 2
+>         if t_end - t_start < 1e-8:
+>             break
+>         grad_mid = compute_gradient(x0 + t_mid * d)
+>         # Check if gradient at mid matches start or end
+>         if np.linalg.norm(grad_mid - grad_start) < 1e-9:
+>             t_start = t_mid
+>             grad_start = grad_mid
+>         else:
+>             t_end = t_mid
+>             grad_end = grad_mid
+>
+>     # Now t_start and t_end bracket the kink very tightly
+>     # Compute gradients at points offset from the kink
+>     offset = 1e-4
+>     t_kink = (t_start + t_end) / 2
+>     g_before = compute_gradient(x0 + (t_kink - offset) * d)
+>     g_after = compute_gradient(x0 + (t_kink + offset) * d)
+>
+>     return g_before, g_after
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     recovered_rows = []  # list of (direction, raw_vector) tuples
+>
+>     n_lines = 200
+>     n_steps = 50
+>     t_range = 10.0
+>
+>     for line_idx in range(n_lines):
+>         if len(recovered_rows) >= 20:
+>             break
+>
+>         x0 = np.random.randn(10) * 2.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         t_values = np.linspace(-t_range, t_range, n_steps)
+>         prev_grad = compute_gradient(x0 + t_values[0] * d)
+>
+>         for step in range(1, n_steps):
+>             curr_grad = compute_gradient(x0 + t_values[step] * d)
+>             diff = curr_grad - prev_grad
+>             diff_norm = np.linalg.norm(diff)
+>
+>             if diff_norm > 1e-8:
+>                 # There's a kink between t_values[step-1] and t_values[step]
+>                 # Use binary search to find it, then get gradients on either side
+>                 g_before, g_after = find_kink_on_line(
+>                     x0, d, t_values[step-1], t_values[step], prev_grad, curr_grad
+>                 )
+>
+>                 single_diff = g_after - g_before
+>                 single_norm = np.linalg.norm(single_diff)
+>
+>                 if single_norm > 1e-6:  # meaningful difference
+>                     direction = single_diff / single_norm
+>
+>                     # Check if this direction is new
+>                     is_new = True
+>                     for existing_dir, _ in recovered_rows:
+>                         cos_sim = abs(np.dot(direction, existing_dir))
+>                         if cos_sim > 0.99:
+>                             is_new = False
+>                             break
+>
+>                     if is_new:
+>                         recovered_rows.append((direction, single_diff))
+>                         print(f"Found row {len(recovered_rows)} (line {line_idx}, step {step}), norm={single_norm:.6f}")
+>
+>             prev_grad = curr_grad
+>
+>     print(f"\nTotal recovered rows: {len(recovered_rows)}")
+>
+>     # Build the matrix from the raw vectors (A2[0,i]*A1[i,:])
+>     # This gives A1 up to per-row scaling
+>     A1_stolen = np.array([row for _, row in recovered_rows[:20]])
+>
+>     print(f"Recovered A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>
+>     return A1_stolen
+>
+> if __name__ == '__main__':
+>     A1_stolen = steal_A1()
+>     print("\nStolen A1 matrix:")
+>     print(A1_stolen)
+> PYEOF
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app#

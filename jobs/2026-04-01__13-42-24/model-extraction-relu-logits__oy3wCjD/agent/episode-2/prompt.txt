@@ -1,0 +1,155 @@
+New Terminal Output:
+
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) via finite differences."""
+>     grad = np.zeros(10)
+e>     f0 = forward(x)
+en>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+a>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     # Strategy: compute gradients at many random points.
+>     # The gradient at x is: sum over active neurons i of A2[0,i] * A1[i,:]
+>     # When we move slightly and cross a ReLU boundary, exactly one neuron
+>     # changes activation, so the gradient difference = +/- A2[0,i] * A1[i,:]
+=>     # This gives us A1[i,:] up to scaling by A2[0,i].
+>
+p.>     # Step 1: Collect many gradients at random points
+>     n_samples = 500
+>     points = np.random.randn(n_samples, 10) * 2.0
+>     gradients = np.array([compute_gradient(p) for p in points])
+x>
+>     # Step 2: For each pair of nearby gradients, compute differences
+>     # These differences should be proportional to rows of A1
+>     gradient_diffs = []
+s)>     for i in range(n_samples):
+>         for j in range(i+1, min(i+5, n_samples)):  # compare with a few neighbors
+>             diff = gradients[i] - gradients[j]
+ro>             norm = np.linalg.norm(diff)
+
+>             if norm > 1e-8:  # non-trivial difference
+>                 # Normalize to unit vector (we only care about direction)
+>                 gradient_diffs.append(diff / norm)
+ol>
+>     gradient_diffs = np.array(gradient_diffs)
+>     print(f"Collected {len(gradient_diffs)} gradient differences")
+r>
+>     # Step 3: Cluster the gradient differences to find unique rows of A1
+>     # Since A1 has 20 rows, we expect up to 20 unique directions (and their negatives)
+>     # Use a greedy clustering approach
+>
+>     found_directions = []
+>
+>     for diff in gradient_diffs:
+>         is_new = True
+>         for fd in found_directions:
+>             # Check if diff is parallel to fd (same or opposite direction)
+>             cos_sim = abs(np.dot(diff, fd))
+>             if cos_sim > 0.999:  # nearly parallel
+>                 is_new = False
+>                 break
+>         if is_new:
+>             found_directions.append(diff)
+>
+>     print(f"Found {len(found_directions)} unique directions")
+>
+>     # Step 4: Now we have directions of A1 rows (up to sign and scale).
+>     # We need to recover the actual scale. Since we know the gradient difference
+>     # is A2[0,i] * A1[i,:], the direction is A1[i,:]/||A1[i,:]|| and the
+>     # magnitude is |A2[0,i]| * ||A1[i,:]||.
+>     #
+>     # But the task says "up to permuting neurons and scaling", so we just need
+>     # directions that match A1 rows up to per-row scaling.
+>     #
+>     # However, we should try to recover the actual magnitudes if possible.
+>     # Let's go back to unnormalized differences.
+>
+>     # Redo: collect unnormalized gradient differences and cluster by direction
+>     raw_diffs = []
+>     for i in range(n_samples):
+>         for j in range(i+1, min(i+5, n_samples)):
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 raw_diffs.append(diff)
+>
+>     raw_diffs = np.array(raw_diffs)
+>
+>     # Cluster raw diffs by direction, keeping track of magnitudes
+>     clusters = []  # list of lists of raw diffs
+>     cluster_dirs = []  # normalized direction for each cluster
+>
+>     for rd in raw_diffs:
+>         norm = np.linalg.norm(rd)
+>         direction = rd / norm
+>         assigned = False
+>         for ci, cd in enumerate(cluster_dirs):
+>             cos_sim = abs(np.dot(direction, cd))
+>             if cos_sim > 0.999:
+>                 clusters[ci].append(rd)
+>                 assigned = True
+>                 break
+>         if not assigned:
+>             clusters.append([rd])
+>             cluster_dirs.append(direction)
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # For each cluster, the diffs are multiples of A2[0,i]*A1[i,:]
+>     # The smallest magnitude diff in each cluster corresponds to exactly
+>     # one neuron flipping, giving us A2[0,i]*A1[i,:]
+>     # Since we want A1 up to scaling, this is fine.
+>
+>     # But we might have diffs that correspond to multiple neurons flipping.
+>     # The single-neuron flips will have the smallest magnitude.
+>     # Actually, multi-neuron flips would generally not be parallel to single rows,
+>     # so our clustering should already filter those out.
+>
+>     # Take the representative (e.g., the one closest to median magnitude) from each cluster
+>     recovered_rows = []
+>     for ci, cluster in enumerate(clusters):
+>         # All diffs in this cluster should be +/- k * A2[0,i]*A1[i,:]
+>         # where k is an integer (number of times this neuron flipped)
+>         # The minimum magnitude corresponds to k=1
+>         mags = [np.linalg.norm(d) for d in cluster]
+>         min_idx = np.argmin(mags)
+>         row = cluster[min_idx]
+>         # Ensure consistent sign (make first large component positive)
+>         max_comp_idx = np.argmax(np.abs(row))
+>         if row[max_comp_idx] < 0:
+>             row = -row
+>         recovered_rows.append(row)
+>
+>     if len(recovered_rows) < 20:
+>         print(f"Warning: only found {len(recovered_rows)} rows, expected 20")
+>         print("Trying with more samples...")
+>
+>     # Build the matrix
+>     A1_stolen = np.array(recovered_rows[:20]) if len(recovered_rows) >= 20 else np.array(recovered_rows)
+>
+>     # The recovered rows are A2[0,i]*A1[i,:], which is A1[i,:] up to scaling.
+>     # This is acceptable per the task description.
+>
+>     print(f"Recovered A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>
+>     return A1_stolen
+>
+> if __name__ == '__main__':
+>     A1_stolen = steal_A1()
+>     print("\nStolen A1 matrix:")
+>     print(A1_stolen)
+> PYEOF
+root@02e31937-e115-4f8f-b7c9-3750b318605b:/app#

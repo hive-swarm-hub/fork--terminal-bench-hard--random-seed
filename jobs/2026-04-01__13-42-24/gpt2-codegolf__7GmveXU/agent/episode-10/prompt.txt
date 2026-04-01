@@ -1,0 +1,260 @@
+New Terminal Output:
+
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define HS 64
+> #define M 1024
+> #define FC (4*C)
+> float *W; // mmap'd weights
+> // Weight group offsets (in floats)
+> long O[16];
+> void init_offsets(){
+>     long o=0;
+>     O[0]=o; o+=V*C;    // wte
+>     O[1]=o; o+=M*C;    // wpe
+>     O[2]=o; o+=L*C;    // ln1w
+>     O[3]=o; o+=L*C;    // ln1b
+>     O[4]=o; o+=L*3*C*C;// qkvw
+>     O[5]=o; o+=L*3*C;  // qkvb
+>     O[6]=o; o+=L*C*C;  // apw
+>     O[7]=o; o+=L*C;    // apb
+>     O[8]=o; o+=L*C;    // ln2w
+>     O[9]=o; o+=L*C;    // ln2b
+>     O[10]=o;o+=L*FC*C; // fcw
+>     O[11]=o;o+=L*FC;   // fcb
+>     O[12]=o;o+=L*C*FC; // fpw
+>     O[13]=o;o+=L*C;    // fpb
+>     O[14]=o;o+=C;      // lnfw
+>     O[15]=o;            // lnfb
+> }
+>
+> float kv[L][M][2*C]; // KV cache
+> float x[C], xn[C], qkv[3*C], attn[C], fc[FC], sc[M];
+>
+> void layernorm(float*out,float*in,float*w,float*b){
+>     float mu=0,v=0;
+>     for(int i=0;i<C;i++) mu+=in[i];
+>     mu/=C;
+>     for(int i=0;i<C;i++) v+=(in[i]-mu)*(in[i]-mu);
+>     v=1.0f/sqrtf(v/C+1e-5f);
+>     for(int i=0;i<C;i++) out[i]=(in[i]-mu)*v*w[i]+b[i];
+> }
+>
+> float geluf(float x){return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+>
+> void forward(int tok, int pos){
+>     float*te=W+O[0]+tok*C, *pe=W+O[1]+pos*C;
+>     for(int i=0;i<C;i++) x[i]=te[i]+pe[i];
+>     for(int l=0;l<L;l++){
+>         layernorm(xn,x,W+O[2]+l*C,W+O[3]+l*C);
+>         // QKV matmul
+>         float*qw=W+O[4]+l*3*C*C, *qb=W+O[5]+l*3*C;
+>         for(int i=0;i<3*C;i++){
+>             float s=qb[i];
+>             for(int j=0;j<C;j++) s+=xn[j]*qw[i*C+j];
+>             qkv[i]=s;
+>         }
+>         // Store KV
+>         memcpy(kv[l][pos], qkv+C, 2*C*sizeof(float));
+>         // Attention per head
+>         for(int h=0;h<H;h++){
+>             int ho=h*HS;
+>             for(int p=0;p<=pos;p++){
+>                 float s=0;
+>                 for(int i=0;i<HS;i++) s+=qkv[ho+i]*kv[l][p][i];
+>                 sc[p]=s/sqrtf(HS);
+>             }
+>             float mx=sc[0];
+>             for(int p=1;p<=pos;p++) if(sc[p]>mx) mx=sc[p];
+>             float sm=0;
+>             for(int p=0;p<=pos;p++){sc[p]=expf(sc[p]-mx);sm+=sc[p];}
+>             for(int i=0;i<HS;i++){
+>                 float s=0;
+>                 for(int p=0;p<=pos;p++) s+=sc[p]*kv[l][p][C+ho+i];
+>                 attn[ho+i]=s/sm;
+>             }
+>         }
+>         // Attn projection
+>         float*aw=W+O[6]+l*C*C, *ab=W+O[7]+l*C;
+>         for(int i=0;i<C;i++){
+>             float s=ab[i];
+>             for(int j=0;j<C;j++) s+=attn[j]*aw[i*C+j];
+>             x[i]+=s;
+>         }
+>         // LN2 + MLP
+>         layernorm(xn,x,W+O[8]+l*C,W+O[9]+l*C);
+>         float*fw=W+O[10]+l*FC*C, *fb=W+O[11]+l*FC;
+>         for(int i=0;i<FC;i++){
+>             float s=fb[i];
+>             for(int j=0;j<C;j++) s+=xn[j]*fw[i*C+j];
+>             fc[i]=geluf(s);
+>         }
+>         float*pw=W+O[12]+l*C*FC, *pb=W+O[13]+l*C;
+>         for(int i=0;i<C;i++){
+>             float s=pb[i];
+>             for(int j=0;j<FC;j++) s+=fc[j]*pw[i*FC+j];
+>             x[i]+=s;
+>         }
+>     }
+>     layernorm(x,x,W+O[14],W+O[15]);
+> }
+>
+> int argmax(){
+>     float mx=-1e30f; int mi=0;
+>     float*wte=W+O[0];
+>     for(int i=0;i<V;i++){
+>         float s=0;
+>         for(int j=0;j<C;j++) s+=x[j]*wte[i*C+j];
+>         if(s>mx){mx=s;mi=i;}
+>     }
+>     return mi;
+> }
+>
+> // BPE
+> char vocab[V][128]; // token strings in GPT-2 unicode
+> int nvocab;
+>
+> // byte<->unicode mapping
+> char b2u[256][4]; // byte to utf8 of unicode char
+> int u2b[512]; // unicode codepoint -> byte value
+>
+> void init_b2u(){
+>     int bs[256],cs[256],n=0,cnt=0;
+>     for(int i=33;i<=126;i++){bs[cnt]=i;cs[cnt]=i;cnt++;}
+>     for(int i=161;i<=172;i++){bs[cnt]=i;cs[cnt]=i;cnt++;}
+>     for(int i=174;i<=255;i++){bs[cnt]=i;cs[cnt]=i;cnt++;}
+>     for(int i=0;i<256;i++){
+>         int found=0;
+>         for(int j=0;j<cnt;j++) if(bs[j]==i){found=1;break;}
+>         if(!found){bs[cnt]=i;cs[cnt]=256+n;n++;cnt++;}
+>     }
+>     memset(u2b,-1,sizeof(u2b));
+>     for(int i=0;i<256;i++){
+>         int c=cs[i];
+>         // encode unicode codepoint c as utf8 into b2u[bs[i]]
+>         if(c<128){b2u[bs[i]][0]=c;b2u[bs[i]][1]=0;}
+>         else if(c<2048){b2u[bs[i]][0]=0xC0|(c>>6);b2u[bs[i]][1]=0x80|(c&0x3F);b2u[bs[i]][2]=0;}
+>         u2b[c]=bs[i];
+>     }
+> }
+>
+> void load_bpe(char*path){
+>     // Base vocab: 256 single-char tokens
+>     for(int i=0;i<256;i++){
+>         strcpy(vocab[i], b2u[i]);
+>     }
+>     nvocab=256;
+>     FILE*f=fopen(path,"r");
+>     char line[512];
+>     fgets(line,sizeof(line),f); // skip header
+>     while(fgets(line,sizeof(line),f)){
+>         char a[256],b[256];
+>         if(sscanf(line,"%s %s",a,b)==2 && nvocab<V){
+>             snprintf(vocab[nvocab],128,"%s%s",a,b);
+>             nvocab++;
+>         }
+>     }
+>     fclose(f);
+> }
+>
+> int encode_buf[M];
+> char tok_strs[M][256];
+>
+> int bpe_encode(char*text, int*out){
+>     // Convert UTF-8 text to GPT-2 unicode representation per byte
+>     unsigned char*t=(unsigned char*)text;
+>     int n=0;
+>     while(*t){
+>         strcpy(tok_strs[n], b2u[*t]);
+>         n++; t++;
+>     }
+>     // Build merge rank lookup - we use vocab array
+>     // Apply BPE merges greedily
+>     while(n>1){
+>         int best=-1, best_rank=V;
+>         char merged[256];
+>         for(int i=0;i<n-1;i++){
+>             char tmp[256];
+>             snprintf(tmp,256,"%s%s",tok_strs[i],tok_strs[i+1]);
+>             // Find rank
+>             for(int r=256;r<nvocab;r++){
+>                 if(r>=best_rank) break;
+>                 if(strcmp(vocab[r],tmp)==0){best_rank=r;best=i;strcpy(merged,tmp);break;}
+>             }
+>         }
+>         if(best<0) break;
+>         // Merge all occurrences of this pair
+>         char a[256],b[256];
+>         strcpy(a,tok_strs[best]); strcpy(b,tok_strs[best+1]);
+>         int nn=0;
+>         for(int i=0;i<n;){
+>             if(i<n-1 && strcmp(tok_strs[i],a)==0 && strcmp(tok_strs[i+1],b)==0){
+>                 strcpy(tok_strs[nn],merged); nn++; i+=2;
+>             } else {
+>                 strcpy(tok_strs[nn],tok_strs[i]); nn++; i++;
+>             }
+>         }
+>         n=nn;
+>     }
+>     // Convert to token IDs
+>     for(int i=0;i<n;i++){
+>         out[i]=0;
+>         for(int j=0;j<nvocab;j++){
+>             if(strcmp(vocab[j],tok_strs[i])==0){out[i]=j;break;}
+>         }
+>     }
+>     return n;
+> }
+>
+> void decode_token(int id){
+>     char*s=vocab[id];
+>     // Convert GPT-2 unicode chars back to bytes
+>     unsigned char*p=(unsigned char*)s;
+>     while(*p){
+>         int cp;
+>         if(*p<0x80){cp=*p;p++;}
+>         else if((*p&0xE0)==0xC0){cp=((*p&0x1F)<<6)|(p[1]&0x3F);p+=2;}
+>         else if((*p&0xF0)==0xE0){cp=((*p&0xF)<<12)|((p[1]&0x3F)<<6)|(p[2]&0x3F);p+=3;}
+>         else{p++;continue;}
+>         if(u2b[cp]>=0) putchar(u2b[cp]);
+>     }
+> }
+>
+> int main(int argc,char**argv){
+>     if(argc<4){fprintf(stderr,"Usage: %s model.ckpt vocab.bpe \"prompt\"\n",argv[0]);return 1;}
+>     init_offsets();
+>     init_b2u();
+>     // mmap weights
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st; fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     load_bpe(argv[2]);
+>     // Tokenize
+>     int toks[M],ntok=bpe_encode(argv[3],toks);
+>     // Forward pass for prompt
+>     for(int i=0;i<ntok;i++) forward(toks[i],i);
+>     // Generate 20 tokens
+>     int pos=ntok;
+>     for(int i=0;i<20;i++){
+>         int t=argmax();
+>         decode_token(t);
+>         fflush(stdout);
+>         toks[pos]=t;
+>         forward(t,pos);
+>         pos++;
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app#

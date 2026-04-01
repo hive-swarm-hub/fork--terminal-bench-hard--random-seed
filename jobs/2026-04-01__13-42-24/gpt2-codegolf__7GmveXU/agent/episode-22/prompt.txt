@@ -1,0 +1,130 @@
+New Terminal Output:
+
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# python3 << 'EOF'
+> import numpy as np
+> import mmap, struct
+>
+> V=50257; C=768; L=12; H=12; M=1024; HS=C//H
+>
+> f=open('gpt2-124M.ckpt','rb')
+> data=np.fromfile(f,dtype=np.float32)
+> f.close()
+> print('Total params:',len(data))
+>
+> # Parse weights
+> o=0
+> def take(shape):
+>     global o
+>     n=1
+>     for s in shape: n*=s
+>     r=data[o:o+n].reshape(shape)
+>     o+=n
+>     return r
+>
+> wte=take((V,C))
+> wpe=take((M,C))
+> ln1w=take((L,C))
+> ln1b=take((L,C))
+> qkvw=take((L,3*C,C))
+> qkvb=take((L,3*C))
+> apw=take((L,C,C))
+> apb=take((L,C))
+> ln2w=take((L,C))
+> ln2b=take((L,C))
+> fcw=take((L,4*C,C))
+> fcb=take((L,4*C))
+> fpw=take((L,C,4*C))
+> fpb=take((L,C))
+> lnfw=take((C,))
+> lnfb=take((C,))
+> print('Offset after parse:',o)
+>
+> def layernorm(x,w,b):
+>     mu=x.mean()
+>     var=((x-mu)**2).mean()
+>     return (x-mu)/np.sqrt(var+1e-5)*w+b
+>
+> def gelu(x):
+>     return 0.5*x*(1+np.tanh(np.sqrt(2/np.pi)*(x+0.044715*x**3)))
+>
+> # Single token forward pass
+> tok=15496
+> pos=0
+> x=wte[tok]+wpe[pos]
+> print('Embedding first 5:',x[:5])
+>
+> for l in range(L):
+>     xn=layernorm(x,ln1w[l],ln1b[l])
+>     if l==0:
+>         print(f'LN1[{l}] first 5:',xn[:5])
+>
+>     # QKV
+>     qkv=qkvw[l]@xn+qkvb[l]  # [3*C]
+>     q,k,v=qkv[:C],qkv[C:2*C],qkv[2*C:]
+>     if l==0:
+>         print(f'Q[{l}] first 5:',q[:5])
+>
+>     # Attention (single position, so softmax is trivial - just v weighted by 1)
+>     # For single position, attention output = v for each head
+>     attn_out=v.copy()  # since softmax([score]) = [1.0]
+>
+>     # Attention projection
+>     proj=apw[l]@attn_out+apb[l]
+>     x=x+proj
+>     if l==0:
+>         print(f'After attn residual[{l}] first 5:',x[:5])
+>
+>     # MLP
+>     xn=layernorm(x,ln2w[l],ln2b[l])
+>     fc_out=gelu(fcw[l]@xn+fcb[l])
+>     mlp_out=fpw[l]@fc_out+fpb[l]
+>     x=x+mlp_out
+>     if l==0:
+>         print(f'After MLP residual[{l}] first 5:',x[:5])
+>
+> x=layernorm(x,lnfw,lnfb)
+> print('Final LN first 5:',x[:5])
+>
+> logits=wte@x
+> top5=np.argsort(logits)[-5:][::-1]
+> print('Top 5 tokens:',top5)
+> print('Top 5 logits:',logits[top5])
+>
+> # Decode top tokens
+> def bytes_to_unicode():
+>     bs=list(range(33,127))+list(range(161,173))+list(range(174,256))
+>     cs=bs[:]
+>     n=0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n+=1
+>     return dict(zip(bs,[chr(c) for c in cs]))
+>
+> byte_enc=bytes_to_unicode()
+> byte_dec={v:k for k,v in byte_enc.items()}
+>
+> merges=[]
+> with open('vocab.bpe') as ff:
+>     ff.readline()
+>     for line in ff:
+>         parts=line.strip().split(' ')
+>         if len(parts)==2:
+>             merges.append((parts[0],parts[1]))
+>
+> vocab_strs={}
+> for i in range(256):
+>     vocab_strs[i]=byte_enc[i]
+> for i,(a,b) in enumerate(merges):
+>     vocab_strs[256+i]=a+b
+>
+> for t in top5:
+>     s=vocab_strs.get(t,'')
+>     bs=bytearray([byte_dec[c] for c in s])
+>     print(f'  Token {t}: "{bs.decode("utf-8",errors="replace")}" logit={logits[t]:.4f}')
+> EOF
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ModuleNotFoundError: No module named 'numpy'
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app#

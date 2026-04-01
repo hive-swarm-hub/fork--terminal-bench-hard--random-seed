@@ -1,0 +1,113 @@
+New Terminal Output:
+
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# python3 << 'EOF'
+> import numpy as np
+>
+> V=50257; C=768; L=12; H=12; M=1024; HS=C//H
+>
+> f=open('gpt2-124M.ckpt','rb')
+> data=np.fromfile(f,dtype=np.float32)
+> f.close()
+>
+> o=0
+> def take(shape):
+>     global o
+>     n=1
+>     for s in shape: n*=s
+>     r=data[o:o+n].reshape(shape)
+>     o+=n
+>     return r
+>
+> wte=take((V,C));wpe=take((M,C))
+> ln1w=take((L,C));ln1b=take((L,C))
+> qkvw=take((L,3*C,C));qkvb=take((L,3*C))
+> apw=take((L,C,C));apb=take((L,C))
+> ln2w=take((L,C));ln2b=take((L,C))
+> fcw=take((L,4*C,C));fcb=take((L,4*C))
+> fpw=take((L,C,4*C));fpb=take((L,C))
+> lnfw=take((C,));lnfb=take((C,))
+>
+> def layernorm(x,w,b):
+>     mu=x.mean();var=((x-mu)**2).mean()
+>     return (x-mu)/np.sqrt(var+1e-5)*w+b
+>
+> def gelu(x):
+>     return 0.5*x*(1+np.tanh(np.sqrt(2/np.pi)*(x+0.044715*x**3)))
+>
+> kv_k=np.zeros((L,M,C),dtype=np.float32)
+> kv_v=np.zeros((L,M,C),dtype=np.float32)
+>
+> def forward(tok,pos):
+>     x=(wte[tok]+wpe[pos]).astype(np.float32)
+>     for l in range(L):
+>         xn=layernorm(x,ln1w[l],ln1b[l])
+>         qkv=qkvw[l]@xn+qkvb[l]
+>         q,k,v=qkv[:C],qkv[C:2*C],qkv[2*C:]
+>         kv_k[l,pos]=k; kv_v[l,pos]=v
+>         attn_out=np.zeros(C,dtype=np.float32)
+>         for h in range(H):
+>             ho=h*HS
+>             scores=np.array([q[ho:ho+HS]@kv_k[l,p,ho:ho+HS] for p in range(pos+1)])/np.sqrt(HS)
+>             scores=np.exp(scores-scores.max())
+>             scores/=scores.sum()
+>             for p in range(pos+1):
+>                 attn_out[ho:ho+HS]+=scores[p]*kv_v[l,p,ho:ho+HS]
+>         proj=apw[l]@attn_out+apb[l]
+>         x=x+proj
+>         xn=layernorm(x,ln2w[l],ln2b[l])
+>         fc_out=gelu(fcw[l]@xn+fcb[l])
+>         mlp_out=fpw[l]@fc_out+fpb[l]
+>         x=x+mlp_out
+>     x=layernorm(x,lnfw,lnfb)
+>     return x
+>
+> tokens=[15496]
+> for i,t in enumerate(tokens):
+>     x=forward(t,i)
+>
+> for step in range(20):
+>     logits=wte@x
+>     next_tok=int(np.argmax(logits))
+>     tokens.append(next_tok)
+>     x=forward(next_tok,len(tokens)-1)
+>
+> # Decode all generated tokens
+> def bytes_to_unicode():
+>     bs=list(range(33,127))+list(range(161,173))+list(range(174,256))
+>     cs=bs[:];n=0
+>     for b in range(256):
+>         if b not in bs: bs.append(b);cs.append(256+n);n+=1
+>     return dict(zip(bs,[chr(c) for c in cs]))
+> byte_enc=bytes_to_unicode()
+> byte_dec={v:k for k,v in byte_enc.items()}
+> merges=[]
+> with open('vocab.bpe') as f:
+>     f.readline()
+>     for line in f:
+>         parts=line.strip().split(' ')
+>         if len(parts)==2: merges.append((parts[0],parts[1]))
+> vocab={}
+> for i in range(256): vocab[i]=byte_enc[i]
+> for i,(a,b) in enumerate(merges): vocab[256+i]=a+b
+>
+> print('Token IDs:', tokens[1:])  # skip prompt
+> for t in tokens[1:]:
+>     s=vocab.get(t,'')
+>     bs2=bytearray([byte_dec[c] for c in s])
+>     print(f'  {t}: "{bs2.decode("utf-8",errors="replace")}"', end='')
+> print()
+>
+> # Full decoded output
+> full=''
+> for t in tokens[1:]:
+>     s=vocab.get(t,'')
+>     bs2=bytearray([byte_dec[c] for c in s])
+>     full+=bs2.decode('utf-8',errors='replace')
+> print('Full output:', repr(full))
+> EOF
+Token IDs: [43739, 46107, 1072, 46107, 43739, 46107, 43739, 46107, 43739, 46107, 1072, 46107, 43739, 46107, 43739, 46107, 1072, 46107, 1072, 46107]
+  43739: " wastes"  46107: " Damien"  1072: "ense"  46107: " Damien"  43739: " wastes"  46107: " Damien"  43739: " wastes"  46107: " Damien"  43739: " wastes"
+46107: " Damien"  1072: "ense"  46107: " Damien"  43739: " wastes"  46107: " Damien"  43739: " wastes"  46107: " Damien"  1072: "ense"  46107: " Damien"  1072:
+"ense"  46107: " Damien"
+Full output: ' wastes Damienense Damien wastes Damien wastes Damien wastes Damienense Damien wastes Damien wastes Damienense Damienense Damien'
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app#

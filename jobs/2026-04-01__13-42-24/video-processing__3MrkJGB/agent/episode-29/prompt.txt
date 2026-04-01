@@ -1,0 +1,121 @@
+New Terminal Output:
+
+root@b8954a9a-1fed-4e03-8f9a-9113533a6d61:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> ret, bg_frame = cap.read()
+> bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+> height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+> width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+> track_top = int(height * 0.25)
+> track_bottom = int(height * 0.80)
+>
+> cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+> frame_data = []
+> frame_idx = 0
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     diff = np.abs(gray - bg_gray)
+>     mask = (diff > 35).astype(np.uint8) * 255
+>     track_mask = np.zeros_like(mask)
+>     track_mask[track_top:track_bottom, :] = mask[track_top:track_bottom, :]
+>     kernel = np.ones((3, 3), np.uint8)
+>     track_mask = cv2.morphologyEx(track_mask, cv2.MORPH_OPEN, kernel)
+>     track_mask = cv2.morphologyEx(track_mask, cv2.MORPH_CLOSE, kernel)
+>     contours, _ = cv2.findContours(track_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     if contours:
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 200]
+>         if big_contours:
+>             all_pts = np.vstack(big_contours)
+>             x, y, w, h = cv2.boundingRect(all_pts)
+>             total_area = sum(cv2.contourArea(c) for c in big_contours)
+>             frame_data.append({'frame': frame_idx, 'top': y, 'bottom': y + h, 'left': x, 'right': x + w, 'area': total_area})
+>     frame_idx += 1
+> cap.release()
+>
+> runner_frames = [d for d in frame_data if d['area'] > 1500]
+> sequences = []
+> current_seq = [runner_frames[0]]
+> for i in range(1, len(runner_frames)):
+>     if runner_frames[i]['frame'] - runner_frames[i-1]['frame'] <= 3:
+>         current_seq.append(runner_frames[i])
+>     else:
+>         sequences.append(current_seq)
+>         current_seq = [runner_frames[i]]
+> sequences.append(current_seq)
+> main_seq = max(sequences, key=len)
+> print(f'Main sequence: {len(main_seq)} frames, {main_seq[0]["frame"]}-{main_seq[-1]["frame"]}')
+>
+> edge_margin = int(width * 0.05)
+> filtered_seq = [d for d in main_seq if d['left'] > edge_margin and d['right'] < (width - edge_margin)]
+> print(f'After edge filter: {len(filtered_seq)} frames')
+> for d in filtered_seq:
+>     print(f'  Frame {d["frame"]}: left={d["left"]}, right={d["right"]}, bottom={d["bottom"]}, area={d["area"]}')
+>
+> frames_arr = np.array([d['frame'] for d in filtered_seq])
+> bottoms_arr = np.array([d['bottom'] for d in filtered_seq])
+> sorted_bottoms = np.sort(bottoms_arr)[::-1]
+> n_ground = max(3, len(sorted_bottoms) // 3)
+> ground_level = np.median(sorted_bottoms[:n_ground])
+> print(f'\nGround level: {ground_level}')
+>
+> deviation = ground_level - bottoms_arr
+> jump_peak_idx = np.argmax(deviation)
+> max_dev = deviation[jump_peak_idx]
+> threshold = max_dev * 0.15
+> print(f'Peak: frame {frames_arr[jump_peak_idx]}, max_dev={max_dev}, threshold={threshold}')
+>
+> print('\nFrame | Bottom | Deviation | Status')
+> for i in range(len(filtered_seq)):
+>     status = 'IN AIR' if deviation[i] > threshold else 'GROUND'
+>     marker = ' <-- TAKEOFF' if i > 0 and deviation[i] > threshold and deviation[i-1] <= threshold else ''
+>     marker2 = ' <-- LANDING' if i > 0 and deviation[i] <= threshold and deviation[i-1] > threshold else ''
+>     print(f'{frames_arr[i]:5d} | {bottoms_arr[i]:6d} | {deviation[i]:9.1f} | {status}{marker}{marker2}')
+> PYEOF
+Main sequence: 23 frames, 49-71
+After edge filter: 17 frames
+  Frame 52: left=750, right=871, bottom=361, area=5152.0
+  Frame 53: left=705, right=854, bottom=359, area=4076.0
+  Frame 54: left=647, right=831, bottom=341, area=4594.0
+  Frame 55: left=554, right=811, bottom=310, area=3793.5
+  Frame 56: left=501, right=775, bottom=274, area=2799.0
+  Frame 57: left=432, right=729, bottom=240, area=3795.5
+  Frame 58: left=458, right=671, bottom=214, area=2750.5
+  Frame 59: left=380, right=588, bottom=271, area=2885.5
+  Frame 60: left=353, right=534, bottom=305, area=3865.5
+  Frame 61: left=353, right=478, bottom=338, area=3444.5
+  Frame 62: left=345, right=432, bottom=366, area=4112.0
+  Frame 63: left=276, right=387, bottom=365, area=3896.0
+  Frame 64: left=225, right=378, bottom=367, area=4726.5
+  Frame 65: left=153, right=347, bottom=356, area=3572.0
+  Frame 66: left=105, right=318, bottom=338, area=3998.5
+  Frame 67: left=84, right=272, bottom=346, area=4232.0
+  Frame 68: left=76, right=209, bottom=364, area=6903.5
+
+Ground level: 365.0
+Peak: frame 58, max_dev=151.0, threshold=22.65
+
+Frame | Bottom | Deviation | Status
+   52 |    361 |       4.0 | GROUND
+   53 |    359 |       6.0 | GROUND
+   54 |    341 |      24.0 | IN AIR <-- TAKEOFF
+   55 |    310 |      55.0 | IN AIR
+   56 |    274 |      91.0 | IN AIR
+   57 |    240 |     125.0 | IN AIR
+   58 |    214 |     151.0 | IN AIR
+   59 |    271 |      94.0 | IN AIR
+   60 |    305 |      60.0 | IN AIR
+   61 |    338 |      27.0 | IN AIR
+   62 |    366 |      -1.0 | GROUND <-- LANDING
+   63 |    365 |       0.0 | GROUND
+   64 |    367 |      -2.0 | GROUND
+   65 |    356 |       9.0 | GROUND
+   66 |    338 |      27.0 | IN AIR <-- TAKEOFF
+   67 |    346 |      19.0 | GROUND <-- LANDING
+   68 |    364 |       1.0 | GROUND
+root@b8954a9a-1fed-4e03-8f9a-9113533a6d61:/app#

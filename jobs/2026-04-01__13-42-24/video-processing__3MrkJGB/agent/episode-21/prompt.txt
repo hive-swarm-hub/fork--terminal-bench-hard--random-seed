@@ -1,0 +1,206 @@
+New Terminal Output:
+
+root@b8954a9a-1fed-4e03-8f9a-9113533a6d61:/app# cat > /app/jump_analyzer.py << 'SCRIPT'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path, output_path='/app/output.toml'):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (guaranteed no runner)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Define track region (where the runner's body will be)
+>     # Based on analysis: runner is visible roughly in rows 150-400
+>     track_top = int(height * 0.25)    # ~135 for 540
+>     track_bottom = int(height * 0.80)  # ~432 for 540
+>
+>     # First pass: collect runner position data for all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     frame_data = []  # (frame_idx, runner_bottom, runner_top, runner_cx, area)
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray - bg_gray)
+>
+>         # Threshold to create binary mask
+>         mask = (diff > 35).astype(np.uint8) * 255
+>
+>         # Focus on track region
+>         track_mask = np.zeros_like(mask)
+>         track_mask[track_top:track_bottom, :] = mask[track_top:track_bottom, :]
+>
+>         # Morphological cleanup
+>         kernel = np.ones((3, 3), np.uint8)
+>         track_mask = cv2.morphologyEx(track_mask, cv2.MORPH_OPEN, kernel)
+>         track_mask = cv2.morphologyEx(track_mask, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(track_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         if contours:
+>             # Filter by area - only keep significant contours
+>             big_contours = [c for c in contours if cv2.contourArea(c) > 200]
+>             if big_contours:
+>                 all_pts = np.vstack(big_contours)
+>                 x, y, w, h = cv2.boundingRect(all_pts)
+>                 total_area = sum(cv2.contourArea(c) for c in big_contours)
+>
+>                 # Compute centroid
+>                 M = cv2.moments(all_pts.reshape(-1, 1, 2))
+>                 if M['m00'] > 0:
+>                     cx = M['m10'] / M['m00']
+>                     cy = M['m01'] / M['m00']
+>                 else:
+=>                     cx = x + w / 2
+>                     cy = y + h / 2
+>
+>                 frame_data.append({
+>                     'frame': frame_idx,
+>                     'top': y,
+>                     'bottom': y + h,
+>                     'left': x,
+>                     'right': x + w,
+>                     'cx': cx,
+>                     'cy': cy,
+>                     'area': total_area
+>                 })
+>
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Now analyze the frame data to find the jump
+>     # The runner moves across the frame - we need to identify frames where the runner
+>     # is clearly visible (large area, consistent movement)
+>
+>     # Filter for frames with substantial runner presence
+>     # The runner should have area > 1000 and be moving consistently
+>     runner_frames = [d for d in frame_data if d['area'] > 1500]
+>
+>     if not runner_frames:
+>         # Fallback: use lower threshold
+>         runner_frames = [d for d in frame_data if d['area'] > 500]
+>
+>     if not runner_frames:
+>         raise ValueError("No runner detected in video")
+>
+>     # Find the main sequence of runner frames (consecutive or near-consecutive)
+>     # Group into sequences
+>     sequences = []
+>     current_seq = [runner_frames[0]]
+>     for i in range(1, len(runner_frames)):
+>         if runner_frames[i]['frame'] - runner_frames[i-1]['frame'] <= 3:
+>             current_seq.append(runner_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [runner_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # The main runner sequence is the longest one
+>     main_seq = max(sequences, key=len)
+>
+>     # Now analyze the bottom position (feet) in the main sequence
+>     # The ground level is the maximum bottom value when the runner is on the ground
+>     # During the jump, the bottom value decreases (feet go up)
+>
+>     frames = [d['frame'] for d in main_seq]
+>     bottoms = [d['bottom'] for d in main_seq]
+>
+>     # Find the ground level - it's approximately the maximum bottom value
+>     # Use the first few and last few frames of the sequence as ground reference
+>     n_ref = max(3, len(main_seq) // 5)
+>     ground_candidates = bottoms[:n_ref] + bottoms[-n_ref:]
+>     ground_level = np.median(ground_candidates)
+>
+>     # The jump is characterized by a significant dip in the bottom value
+>     # Find the minimum bottom value (peak of jump)
+>     bottoms_arr = np.array(bottoms)
+>     frames_arr = np.array(frames)
+>
+>     # Calculate deviation from ground level
+>     deviation = ground_level - bottoms_arr  # positive when feet are up
+>
+>     # Find the peak of the jump (maximum deviation)
+>     jump_peak_idx = np.argmax(deviation)
+>     jump_peak_frame = frames_arr[jump_peak_idx]
+>     max_deviation = deviation[jump_peak_idx]
+>
+>     if max_deviation < 20:  # No significant jump detected
+>         # Try alternative: look at the top of the bounding box
+>         tops = np.array([d['top'] for d in main_seq])
+>         # During jump, top goes higher (lower y value)
+>         top_baseline = np.median(tops[:n_ref])
+>         top_deviation = top_baseline - tops
+>         jump_peak_idx = np.argmax(top_deviation)
+>         jump_peak_frame = frames_arr[jump_peak_idx]
+>
+>     # Find takeoff: scan backward from peak to find where deviation starts
+>     # Takeoff is when the feet first leave the ground level significantly
+>     threshold = max_deviation * 0.15  # 15% of max deviation as threshold
+>
+>     takeoff_idx = jump_peak_idx
+>     for i in range(jump_peak_idx, -1, -1):
+>         if deviation[i] <= threshold:
+>             takeoff_idx = i + 1
+>             break
+>     else:
+>         takeoff_idx = 0
+>
+>     # Ensure takeoff_idx is valid
+>     takeoff_idx = max(0, min(takeoff_idx, len(frames_arr) - 1))
+>
+>     # Find landing: scan forward from peak to find where deviation returns to near ground
+>     land_idx = jump_peak_idx
+>     for i in range(jump_peak_idx, len(deviation)):
+>         if deviation[i] <= threshold:
+>             land_idx = i
+>             break
+>     else:
+>         land_idx = len(deviation) - 1
+>
+>     # Ensure land_idx is valid
+>     land_idx = max(0, min(land_idx, len(frames_arr) - 1))
+>
+>     takeoff_frame = int(frames_arr[takeoff_idx])
+>     land_frame = int(frames_arr[land_idx])
+>
+>     # Write output TOML
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     return output
+>
+>
+> if __name__ == '__main__':
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     result = analyze_jump(video_path)
+>     print(f"Takeoff frame: {result['jump_takeoff_frame_number']}")
+>     print(f"Landing frame: {result['jump_land_frame_number']}")
+> SCRIPT
+root@b8954a9a-1fed-4e03-8f9a-9113533a6d61:/app#

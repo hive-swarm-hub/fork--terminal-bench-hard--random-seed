@@ -1,0 +1,85 @@
+New Terminal Output:
+
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app# python3 << 'EOF'
+> import numpy as np
+>
+> V=50257; C=768; L=12; H=12; M=1024; HS=C//H
+>
+> f=open('gpt2-124M.ckpt','rb')
+> data=np.fromfile(f,dtype=np.float32)
+> f.close()
+>
+> o=0
+> def take(shape):
+>     global o
+>     n=1
+>     for s in shape: n*=s
+>     r=data[o:o+n].reshape(shape)
+>     o+=n
+>     return r
+>
+> wte=take((V,C));wpe=take((M,C))
+> ln1w=take((L,C));ln1b=take((L,C))
+> qkvw=take((L,3*C,C));qkvb=take((L,3*C))
+> apw=take((L,C,C));apb=take((L,C))
+> ln2w=take((L,C));ln2b=take((L,C))
+> fcw=take((L,4*C,C));fcb=take((L,4*C))
+> fpw=take((L,C,4*C));fpb=take((L,C))
+> lnfw=take((C,));lnfb=take((C,))
+>
+> def layernorm(x,w,b):
+>     mu=x.mean();var=((x-mu)**2).mean()
+>     return (x-mu)/np.sqrt(var+1e-5)*w+b
+>
+> def gelu(x):
+>     return 0.5*x*(1+np.tanh(np.sqrt(2/np.pi)*(x+0.044715*x**3)))
+>
+> # KV cache
+> kv_k=np.zeros((L,M,C),dtype=np.float32)
+> kv_v=np.zeros((L,M,C),dtype=np.float32)
+>
+> def forward(tok,pos):
+>     x=wte[tok]+wpe[pos]
+>     for l in range(L):
+>         xn=layernorm(x,ln1w[l],ln1b[l])
+>         qkv=qkvw[l]@xn+qkvb[l]
+>         q,k,v=qkv[:C],qkv[C:2*C],qkv[2*C:]
+>         kv_k[l,pos]=k; kv_v[l,pos]=v
+>         attn_out=np.zeros(C)
+>         for h in range(H):
+>             ho=h*HS
+>             scores=np.array([q[ho:ho+HS]@kv_k[l,p,ho:ho+HS] for p in range(pos+1)])/np.sqrt(HS)
+>             scores=np.exp(scores-scores.max())
+>             scores/=scores.sum()
+>             for p in range(pos+1):
+>                 attn_out[ho:ho+HS]+=scores[p]*kv_v[l,p,ho:ho+HS]
+>         proj=apw[l]@attn_out+apb[l]
+>         x=x+proj
+>         xn=layernorm(x,ln2w[l],ln2b[l])
+>         fc_out=gelu(fcw[l]@xn+fcb[l])
+>         mlp_out=fpw[l]@fc_out+fpb[l]
+>         x=x+mlp_out
+>     x=layernorm(x,lnfw,lnfb)
+>     return x
+>
+> # Generate from "Hello"
+> tokens=[15496]
+> for i,t in enumerate(tokens):
+>     x=forward(t,i)
+>
+> for step in range(5):
+>     logits=wte@x
+>     next_tok=int(np.argmax(logits))
+>     print(f'Step {step}: token {next_tok} logit={logits[next_tok]:.4f}')
+>     tokens.append(next_tok)
+>     x=forward(next_tok,len(tokens)-1)
+>
+> print('Generated tokens:',tokens)
+> EOF
+Step 0: token 43739 logit=10.9923
+Step 1: token 46107 logit=5.7417
+Step 2: token 1072 logit=4.7386
+Step 3: token 46107 logit=10.7766
+Step 4: token 43739 logit=5.3448
+Generated tokens: [15496, 43739, 46107, 1072, 46107, 43739]
+root@a6044d03-df04-45cf-a1d5-a7c688745d71:/app#

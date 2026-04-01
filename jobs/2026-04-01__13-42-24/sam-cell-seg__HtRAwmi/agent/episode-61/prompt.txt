@@ -1,0 +1,207 @@
+New Terminal Output:
+
+root@0517c2f3-279e-424e-a002-6b52ab924a1a:/app# cat > /app/convert_masks.py << 'SCRIPT_EOF'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> from PIL import Image
+> import torch
+> from tqdm import tqdm
+> from mobile_sam import sam_model_registry, SamPredictor
+>
+>
+> def parse_coords(coords_str):
+>     """Parse comma-separated coordinate string into list of ints."""
+>     return [int(float(x.strip())) for x in str(coords_str).split(',')]
+>
+>
+ssignment_map[update] = idx
+        score_map[update] = score
+
+    # Step 3: Extract final masks and convert to polylines
+    new_coords_x = []
+   > def mask_to_polyline(mask):
+>     """Convert a binary mask to a polyline (contour coordinates)."""
+>     mask_uint8 = (mask.astype(np.uint8)) * 255
+>     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>     if len(contours) == 0:
+>         return None, None, None, None, None, None
+>
+>     # Take the largest contour
+>     largest_contour = max(contours, key=cv2.contourArea)
+>
+>     if len(largest_contour) < 3:
+>         return None, None, None, None, None, None
+>
+>     # Extract x and y coordinates
+>     coords = largest_contour.squeeze()
+>     if coords.ndim == 1:
+>         return None, None, None, None, None, None
+>
+>     xs = coords[:, 0].tolist()
+>     ys = coords[:, 1].tolist()
+>
+>     # Close the polyline (first point = last point)
+>     if xs[0] != xs[-1] or ys[0] != ys[-1]:
+>         xs.append(xs[0])
+>         ys.append(ys[0])
+>
+>     xmin = min(xs)
+>     xmax = max(xs)
+>     ymin = min(ys)
+>     ymax = max(ys)
+>
+>     return xs, ys, xmin, xmax, ymin, ymax
+>
+>
+> def main():
+>     parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+>     parser.add_argument('output_path', type=str, help='Path to the output folder or file where the new masks will be saved')
+>     parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+>     parser.add_argument('csv_path', type=str, help='Path to metadata CSV')
+>     args = parser.parse_args()
+>
+>     # Determine output file path
+>     output_path = args.output_path
+>     # If output_path is a directory (exists as dir, or ends with / or has no extension),
+>     # save the CSV inside it with the same name as the input CSV
+>     if os.path.isdir(output_path) or (not output_path.endswith('.csv') and not os.path.splitext(output_path)[1]):
+>         os.makedirs(output_path, exist_ok=True)
+>         csv_basename = os.path.basename(args.csv_path)
+>         output_path = os.path.join(output_path, csv_basename)
+>     else:
+>         # Ensure parent directory exists
+>         output_dir = os.path.dirname(output_path)
+>         if output_dir:
+>             os.makedirs(output_dir, exist_ok=True)
+>
+>     # Load image
+>     image = np.array(Image.open(args.rgb_path).convert('RGB'))
+>     h, w = image.shape[:2]
+>
+>     # Load MobileSAM model
+>     device = 'cpu'
+>     model_type = 'vit_t'
+>     sam = sam_model_registry[model_type](checkpoint=args.weights_path)
+>     sam.to(device)
+>     sam.eval()
+>
+>     predictor = SamPredictor(sam)
+>     predictor.set_image(image)
+>
+>     # Read CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     num_masks = len(df)
+>
+>     # Step 1: Generate SAM masks and confidence scores for all cells
+>     all_masks = []
+>     all_scores = []
+>
+>     for idx in tqdm(range(num_masks), desc='Generating SAM masks'):
+>         row = df.iloc[idx]
+>         xmin = int(row['xmin'])
+>         ymin = int(row['ymin'])
+>         xmax = int(row['xmax'])
+>         ymax = int(row['ymax'])
+>
+>         # Use bounding box as prompt
+>         box = np.array([xmin, ymin, xmax, ymax])
+>
+>         with torch.no_grad():
+>             masks, scores, logits = predictor.predict(
+>                 box=box,
+>                 multimask_output=True
+>             )
+>
+>         # Select the mask with highest score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]
+>         best_score = scores[best_idx]
+>
+>         all_masks.append(best_mask)
+>         all_scores.append(best_score)
+>
+>     # Step 2: Resolve overlaps - each pixel goes to the highest-confidence mask
+>     # Create a score volume and an index map
+>     score_map = np.full((h, w), -1.0, dtype=np.float64)
+>     assignment_map = np.full((h, w), -1, dtype=np.int32)
+>
+>     # Sort by score (lowest first so highest overwrites)
+>     sorted_indices = np.argsort(all_scores)
+>
+>     for idx in sorted_indices:
+>         mask = all_masks[idx]
+>         score = all_scores[idx]
+>         # Where this mask is active and has higher score, assign it
+>         update = mask & (score > score_map)
+>         assignment_map[update] = idx
+>         score_map[update] = score
+>
+>     # Step 3: Extract final masks and convert to polylines
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_xmin = []
+>     new_xmax = []
+>     new_ymin = []
+>     new_ymax = []
+>     new_types = []
+>
+>     for idx in tqdm(range(num_masks), desc='Extracting contours'):
+>         # Get the final mask for this cell (after overlap resolution)
+>         final_mask = (assignment_map == idx)
+>
+>         # Ensure contiguous mask - keep only largest connected component
+>         mask_uint8 = final_mask.astype(np.uint8) * 255
+>         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+>
+>         if num_labels > 1:
+>             # Find largest component (skip background label 0)
+>             largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>             final_mask = (labels == largest_label)
+>
+>         # Convert to polyline
+>         xs, ys, xmin, xmax, ymin, ymax = mask_to_polyline(final_mask)
+>
+>         if xs is None:
+>             # Fallback: if SAM produced empty mask, keep original coords
+>             row = df.iloc[idx]
+>             xs = parse_coords(row['coords_x'])
+>             ys = parse_coords(row['coords_y'])
+>             xmin = int(row['xmin'])
+>             xmax = int(row['xmax'])
+>             ymin = int(row['ymin'])
+>             ymax = int(row['ymax'])
+>
+>         new_coords_x.append(','.join(str(x) for x in xs))
+>         new_coords_y.append(','.join(str(y) for y in ys))
+>         new_xmin.append(xmin)
+>         new_xmax.append(xmax)
+>         new_ymin.append(ymin)
+>         new_ymax.append(ymax)
+>         new_types.append('polyline')
+>
+>     # Update DataFrame
+>     df['xmin'] = new_xmin
+>     df['xmax'] = new_xmax
+>     df['ymin'] = new_ymin
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = new_types
+>
+>     # Save CSV
+>     df.to_csv(output_path, index=False)
+>     print(f'Saved output to {output_path}')
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT_EOF
+root@0517c2f3-279e-424e-a002-6b52ab924a1a:/app# echo 'Script updated'
+Script updated
+root@0517c2f3-279e-424e-a002-6b52ab924a1a:/app#
