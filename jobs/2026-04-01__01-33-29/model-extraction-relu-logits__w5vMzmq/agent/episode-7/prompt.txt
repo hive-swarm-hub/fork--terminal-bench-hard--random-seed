@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def collect_gradient_differences():
+>     """Collect gradient differences by finding ReLU boundaries along random lines."""
+>     diffs = []
+>     np.random.seed(42)
+>
+>     for trial in range(300):
+>         x = np.random.randn(10) * 3.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Sample gradients along the line at coarse intervals
+>         t_values = np.linspace(-5, 5, 100)
+>         prev_grad = compute_gradient(x + t_values[0] * direction)
+>
+>         for k in range(1, len(t_values)):
+>             curr_grad = compute_gradient(x + t_values[k] * direction)
+>             diff = curr_grad - prev_grad
+>             norm = np.linalg.norm(diff)
+>
+>             if norm > 1e-5:  # Significant gradient change
+>                 # Binary search to isolate a single neuron switch
+>                 lo_t, hi_t = t_values[k-1], t_values[k]
+>                 lo_grad = prev_grad.copy()
+>
+>                 for _ in range(50):
+>                     mid_t = (lo_t + hi_t) / 2.0
+>                     mid_grad = compute_gradient(x + mid_t * direction)
+>
+>                     if np.linalg.norm(mid_grad - lo_grad) > 1e-5:
+>                         hi_t = mid_t
+>                     else:
+>                         lo_t = mid_t
+>                         lo_grad = mid_grad.copy()
+>
+>                 # Now compute gradients at points clearly on each side
+>                 # Use a small but not too small offset from the boundary
+>                 boundary = (lo_t + hi_t) / 2.0
+>                 offset = max(abs(hi_t - lo_t) * 10, 1e-5)
+>
+>                 grad_left = compute_gradient(x + (boundary - offset) * direction)
+>                 grad_right = compute_gradient(x + (boundary + offset) * direction)
+>                 single_diff = grad_right - grad_left
+>
+>                 if np.linalg.norm(single_diff) > 1e-5:
+>                     diffs.append(single_diff)
+>
+>             prev_grad = curr_grad
+>
+>     return diffs
+>
+>
+> def cluster_rows(diffs, n_hidden=20):
+>     """Cluster gradient differences to find unique rows of A1 (up to scaling)."""
+>     if len(diffs) == 0:
+>         return np.zeros((0, 10))
+>
+>     # Normalize each diff to unit length and canonicalize sign
+>     normalized = []
+>     raw = []
+>     for d in diffs:
+>         norm = np.linalg.norm(d)
+>         if norm > 1e-5:
+>             d_norm = d / norm
+>             # Canonicalize sign: first significant element should be positive
+>             idx = np.argmax(np.abs(d_norm) > 0.01)
+>             if d_norm[idx] < 0:
+>                 d_norm = -d_norm
+>                 d = -d
+>             normalized.append(d_norm)
+>             raw.append(d)
+>
+>     if len(normalized) == 0:
+>         return np.zeros((0, 10))
+>
+>     normalized = np.array(normalized)
+>
+>     # Greedy clustering
+>     clusters = []  # cluster centroids (normalized)
+>     cluster_raws = []  # raw (unnormalized) members
+>
+>     for i in range(len(normalized)):
+>         v = normalized[i]
+>         found = False
+>         for j in range(len(clusters)):
+>             cos_sim = abs(np.dot(v, clusters[j]))
+>             if cos_sim > 0.99:
+>                 cluster_raws[j].append(raw[i])
+>                 # Update centroid
+>                 clusters[j] = np.mean([r / np.linalg.norm(r) * (1 if np.dot(r, clusters[j]) > 0 else -1)
+>                                        for r in cluster_raws[j]
+>                                        if np.linalg.norm(r) > 1e-8], axis=0)
+>                 clusters[j] = clusters[j] / np.linalg.norm(clusters[j])
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append(v.copy())
+>             cluster_raws.append([raw[i]])
+>
+>     print(f"Found {len(clusters)} unique directions (expected {n_hidden})")
+>
+>     # For each cluster, the representative is the gradient difference = A2[0,i] * A1[i,:]
+>     # We want A1 up to permutation and scaling, so this IS a scaled row of A1
+>     rows = []
+>     for members in cluster_raws:
+>         # Use median to be robust
+>         if len(members) >= 3:
+>             rep = np.median(members, axis=0)
+>         else:
+>             rep = np.mean(members, axis=0)
+>         rows.append(rep)
+>
+>     return np.array(rows)
+>
+>
+> if __name__ == '__main__':
+>     print("Collecting gradient differences...")
+>     diffs = collect_gradient_differences()
+>     print(f"Collected {len(diffs)} gradient differences")
+>
+>     print("Clustering to find A1 rows...")
+>     A1_stolen = cluster_rows(diffs)
+>
+>     print(f"Recovered matrix shape: {A1_stolen.shape}")
+>
+>     # Save the result
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>
+>     # Verify: compare with actual A1 if possible
+>     try:
+>         from forward import A1 as true_A1
+>         # Check if each row of true_A1 matches some row of A1_stolen (up to scaling)
+>         matched = 0
+>         for i in range(true_A1.shape[0]):
+>             true_row = true_A1[i]
+>             true_norm = true_row / np.linalg.norm(true_row)
+>             best_sim = 0
+>             for j in range(A1_stolen.shape[0]):
+>                 stolen_norm = A1_stolen[j] / np.linalg.norm(A1_stolen[j]) if np.linalg.norm(A1_stolen[j]) > 1e-8 else np.zeros(10)
+>                 sim = abs(np.dot(true_norm, stolen_norm))
+>                 best_sim = max(best_sim, sim)
+>             if best_sim > 0.99:
+>                 matched += 1
+>         print(f"Matched {matched}/{true_A1.shape[0]} rows of true A1")
+>     except:
+>         pass
+> ENDOFSCRIPT
+root@modal:/app#

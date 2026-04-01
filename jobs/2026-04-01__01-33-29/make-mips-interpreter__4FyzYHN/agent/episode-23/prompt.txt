@@ -1,0 +1,139 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import re
+> with open('/app/vm.js', 'r') as f:
+>     content = f.read()
+>
+> # Fix REGIMM - all branches should always execute delay slot
+> old_regimm = '''  // REGIMM instructions (opcode = 1)
+>   executeREGIMM(instr) {
+>     const rs = (instr >>> 21) & 0x1F;
+>     const rt = (instr >>> 16) & 0x1F;
+>     const offset = this.signExt16(instr & 0xFFFF);
+>
+>     switch (rt) {
+>       case 0x00: // BLTZ
+>         if (this.regs[rs] < 0) {
+>           const target = this.pc + (offset << 2);
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         } else {
+>           // Skip delay slot
+>           this.pc += 4;
+>         }
+>         break;
+>       case 0x01: // BGEZ
+>         if (this.regs[rs] >= 0) {
+>           const target = this.pc + (offset << 2);
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         } else {
+>           this.pc += 4;
+>         }
+>         break;
+>       case 0x10: // BLTZAL
+>         this.regs[31] = this.pc + 4;
+>         if (this.regs[rs] < 0) {
+>           const target = this.pc + (offset << 2);
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         } else {
+>           this.pc += 4;
+>         }
+>         break;
+>       case 0x11: // BGEZAL
+>         this.regs[31] = this.pc + 4;
+>         if (this.regs[rs] >= 0) {
+>           const target = this.pc + (offset << 2);
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         } else {
+>           this.pc += 4;
+>         }
+>         break;
+>       default:
+>         console.error(`Unknown REGIMM rt: ${rt} at PC=${(this.pc-4).toString(16)}`);
+>         this.running = false;
+>     }
+>   }'''
+>
+> new_regimm = '''  // REGIMM instructions (opcode = 1)
+>   executeREGIMM(instr) {
+>     const rs = (instr >>> 21) & 0x1F;
+>     const rt = (instr >>> 16) & 0x1F;
+>
+>     switch (rt) {
+>       case 0x00: // BLTZ
+>         this._doBranch(instr, this.regs[rs] < 0);
+>         break;
+>       case 0x01: // BGEZ
+>         this._doBranch(instr, this.regs[rs] >= 0);
+>         break;
+>       case 0x10: // BLTZAL
+>         this.regs[31] = this.pc + 4;
+>         this._doBranch(instr, this.regs[rs] < 0);
+>         break;
+>       case 0x11: // BGEZAL
+>         this.regs[31] = this.pc + 4;
+>         this._doBranch(instr, this.regs[rs] >= 0);
+>         break;
+>       default:
+>         console.error(`Unknown REGIMM rt: ${rt} at PC=${(this.pc-4).toString(16)}`);
+>         this.running = false;
+>     }
+>   }'''
+>
+> content = content.replace(old_regimm, new_regimm)
+>
+> # Fix JALR - return address should be PC+4 (after delay slot)
+> # Current code: this.regs[rd || 31] = this.pc + 4;
+> # But at this point PC points to delay slot, so return = delay slot + 4 = PC + 4
+> # That's correct. But rd || 31 is wrong - if rd=0, it should still use 0?
+> # Actually JALR: rd defaults to 31, but if rd=0 it means $zero which is always 0
+> # The encoding is: if rd field is 0, convention is rd=31
+> old_jalr = '''      case 0x09: // JALR
+>         {
+>           const target = this.regs[rs] >>> 0;
+>           this.regs[rd || 31] = this.pc + 4; // Save return address (after delay slot)
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         }
+>         break;'''
+>
+> new_jalr = '''      case 0x09: // JALR
+>         {
+>           const target = this.regs[rs] >>> 0;
+>           if (rd !== 0) this.regs[rd] = this.pc + 4; // Save return address (after delay slot)
+>           const delayInstr = this.mem.readU32(this.pc);
+>           this.pc += 4;
+>           this.executeInstruction(delayInstr);
+>           this.regs[0] = 0;
+>           this.pc = target;
+>         }
+>         break;'''
+>
+> content = content.replace(old_jalr, new_jalr)
+>
+> with open('/app/vm.js', 'w') as f:
+>     f.write(content)
+>
+> print('Fixed REGIMM and JALR')
+> PYEOF
+Fixed REGIMM and JALR
+root@modal:/app#

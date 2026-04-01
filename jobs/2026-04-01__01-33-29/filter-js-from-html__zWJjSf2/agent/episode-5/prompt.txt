@@ -1,0 +1,248 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+> import html
+>
+> def decode_and_normalize(value):
+>     """Decode HTML entities and remove control characters to detect obfuscated javascript: URLs."""
+>     # Decode HTML entities (may need multiple passes for double-encoding)
+>     decoded = value
+>     for _ in range(3):
+>         prev = decoded
+>         # Handle numeric entities (decimal and hex) including zero-padded
+>         decoded = re.sub(r'&#[xX]0*([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)), decoded)
+>         decoded = re.sub(r'&#0*(\d+);?', lambda m: chr(int(m.group(1))), decoded)
+>         # Handle named entities
+>         try:
+>             decoded = html.unescape(decoded)
+>         except:
+>             pass
+>         if decoded == prev:
+>             break
+>     # Remove whitespace, control chars, null bytes (used for evasion)
+>     normalized = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower()
+>     return normalized
+>
+> def is_dangerous_url(value):
+>     """Check if a URL value contains javascript:, vbscript:, data: with script, etc."""
+>     normalized = decode_and_normalize(value)
+>     # Check for dangerous protocols
+>     if re.match(r'^javascript:', normalized):
+>         return True
+>     if re.match(r'^vbscript:', normalized):
+>         return True
+>     if re.match(r'^data:', normalized):
+>         # data: URIs with text/html or script content are dangerous
+>         if re.search(r'text/html|<script|javascript:|vbscript:', normalized):
+>             return True
+>     return False
+>
+> def is_event_handler(attr_name):
+>     """Check if an attribute name is an event handler (on*)."""
+>     return re.match(r'^on\w+$', attr_name.strip(), re.IGNORECASE) is not None
+>
+> def is_url_attribute(attr_name):
+>     """Check if an attribute typically holds a URL."""
+>     url_attrs = {
+>         'href', 'src', 'action', 'formaction', 'data', 'dynsrc', 'lowsrc',
+>         'background', 'poster', 'codebase', 'cite', 'usemap', 'longdesc',
+>         'xlink:href', 'xmlns', 'from', 'to', 'values',
+>     }
+>     return attr_name.strip().lower() in url_attrs
+>
+> def has_dangerous_style(value):
+>     """Check if a style value contains dangerous expressions."""
+>     normalized = decode_and_normalize(value)
+>     if re.search(r'expression\s*\(', normalized):
+>         return True
+>     if re.search(r'javascript:', normalized):
+>         return True
+>     if re.search(r'vbscript:', normalized):
+>         return True
+>     if re.search(r'\burl\s*\(\s*["\']?\s*javascript:', normalized):
+>         return True
+>     return False
+>
+> def clean_style_value(value):
+>     """Remove dangerous parts from style attribute value while preserving the rest."""
+>     # Remove expression(...)
+>     cleaned = re.sub(r'expression\s*\([^)]*\)', '', value, flags=re.IGNORECASE)
+>     # Remove javascript: and vbscript:
+>     cleaned = re.sub(r'javascript\s*:', '', cleaned, flags=re.IGNORECASE)
+>     cleaned = re.sub(r'vbscript\s*:', '', cleaned, flags=re.IGNORECASE)
+>     return cleaned
+>
+> def process_tag(match):
+>     """Process an HTML tag to remove dangerous attributes."""
+>     tag = match.group(0)
+>
+>     # Don't process comments, doctype, CDATA, closing tags
+>     if tag.startswith('<!--') or tag.startswith('<!') or tag.startswith('</') or tag.startswith('<?'):
+>         return tag
+>
+>     # Parse the tag to find attributes
+>     # Strategy: find each attribute and check if it's dangerous
+>     # We need to be careful to preserve exact formatting
+>
+>     # Match tag name
+>     tag_name_match = re.match(r'<\s*(\w[\w:-]*)', tag)
+>     if not tag_name_match:
+>         return tag
+>
+>     tag_name = tag_name_match.group(1)
+>     rest = tag[tag_name_match.end():]
+>     result = tag[:tag_name_match.end()]
+>
+>     # Parse attributes from rest
+>     # Attribute patterns:
+>     # attr="value"
+>     # attr='value'
+>     # attr=value
+>     # attr (boolean)
+>     # Also need to handle the closing > or />
+>
+>     pos = 0
+>     while pos < len(rest):
+>         # Skip whitespace
+>         ws_match = re.match(r'(\s+)', rest[pos:])
+>         if ws_match:
+>             ws = ws_match.group(1)
+>             remaining = rest[pos + len(ws):]
+>         else:
+>             ws = ''
+>             remaining = rest[pos:]
+>
+>         # Check for end of tag
+>         if remaining.startswith('>') or remaining.startswith('/>'):
+>             result += rest[pos:]
+>             break
+>
+>         if not remaining or not ws_match:
+>             result += rest[pos:]
+>             break
+>
+>         # Try to match an attribute
+>         # attr="value"
+>         attr_match = re.match(r'([\w:.-]+)\s*=\s*"([^"]*)"', remaining)
+>         if not attr_match:
+>             # attr='value'
+>             attr_match = re.match(r"([\w:.-]+)\s*=\s*'([^']*)'", remaining)
+>
+>         if attr_match:
+>             attr_name = attr_match.group(1)
+>             attr_value = attr_match.group(2)
+>             full_attr = ws + attr_match.group(0)
+>
+>             if is_event_handler(attr_name):
+>                 # Remove this attribute entirely
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             elif is_url_attribute(attr_name) and is_dangerous_url(attr_value):
+>                 # Replace value with empty string, preserve quoting
+>                 quote_char = remaining[attr_match.start(2) - 1] if attr_match.start(2) > 0 else '"'
+>                 # Find the quote character used
+>                 eq_and_quote = remaining[len(attr_name):attr_match.start(2)]
+>                 result += ws + attr_name + eq_and_quote + remaining[attr_match.end(2):attr_match.end()]
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             elif attr_name.lower() == 'style' and has_dangerous_style(attr_value):
+>                 # Clean the style value
+>                 cleaned_value = clean_style_value(attr_value)
+>                 eq_and_quote = remaining[len(attr_name):attr_match.start(2)]
+>                 result += ws + attr_name + eq_and_quote + cleaned_value + remaining[attr_match.end(2):attr_match.end()]
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             else:
+>                 result += full_attr
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>
+>         # attr=value (unquoted)
+>         attr_match = re.match(r'([\w:.-]+)\s*=\s*([^\s\'">=]+)', remaining)
+>         if attr_match:
+>             attr_name = attr_match.group(1)
+>             attr_value = attr_match.group(2)
+>             full_attr = ws + attr_match.group(0)
+>
+>             if is_event_handler(attr_name):
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             elif is_url_attribute(attr_name) and is_dangerous_url(attr_value):
+>                 result += ws + attr_name + '=""'
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             elif attr_name.lower() == 'style' and has_dangerous_style(attr_value):
+>                 cleaned_value = clean_style_value(attr_value)
+>                 result += ws + attr_name + '=' + cleaned_value
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             else:
+>                 result += full_attr
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>
+>         # Boolean attribute (just a name)
+>         attr_match = re.match(r'([\w:.-]+)', remaining)
+>         if attr_match:
+>             attr_name = attr_match.group(1)
+>             if is_event_handler(attr_name):
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>             else:
+>                 result += ws + attr_match.group(0)
+>                 pos += len(ws) + attr_match.end()
+>                 continue
+>
+>         # Fallback: just add the character
+>         result += rest[pos]
+>         pos += 1
+>
+>     return result
+>
+> def remove_javascript(html_content):
+>     # Remove <script> tags and their contents (case-insensitive, handles attributes)
+>     html_content = re.sub(
+>         r'<\s*script\b[^>]*>.*?<\s*/\s*script\s*>',
+>         '', html_content, flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Remove any remaining unclosed/self-closing <script> tags
+>     html_content = re.sub(
+>         r'<\s*script\b[^>]*/\s*>',
+>         '', html_content, flags=re.IGNORECASE
+>     )
+>     html_content = re.sub(
+>         r'<\s*script\b[^>]*>',
+>         '', html_content, flags=re.IGNORECASE
+>     )
+>     html_content = re.sub(
+>         r'<\s*/\s*script\s*>',
+>         '', html_content, flags=re.IGNORECASE
+>     )
+>
+>     # Process all HTML tags to remove dangerous attributes
+>     # Match tags including comments
+>     html_content = re.sub(r'<[^>]+>', process_tag, html_content)
+>
+>     return html_content
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@modal:/app#

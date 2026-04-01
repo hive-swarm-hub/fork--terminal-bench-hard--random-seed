@@ -1,0 +1,165 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def find_critical_direction(x, direction, lo=-10.0, hi=10.0, tol=1e-10):
+>     """Find a point along x + t*direction where a ReLU switches, using binary search."""
+>     # Compute gradients at endpoints
+>     grad_lo = compute_gradient(x + lo * direction)
+>     grad_hi = compute_gradient(x + hi * direction)
+>
+>     # If gradients are the same, no critical point in this interval
+>     if np.allclose(grad_lo, grad_hi, atol=1e-8):
+>         return None, None
+>
+>     # Binary search for the critical point
+>     for _ in range(80):
+>         mid = (lo + hi) / 2.0
+>         grad_mid = compute_gradient(x + mid * direction)
+>
+>         if np.allclose(grad_mid, grad_lo, atol=1e-8):
+>             lo = mid
+>         else:
+>             hi = mid
+>
+>         if hi - lo < tol:
+>             break
+>
+>     # The gradient difference gives us a scaled row of A1
+>     grad_diff = grad_hi - grad_lo
+>     # But there might be multiple switches. Let's check more carefully.
+>     # Actually, we found the boundary precisely, so it should be a single switch.
+>     grad_left = compute_gradient(x + lo * direction)
+>     grad_right = compute_gradient(x + hi * direction)
+>     diff = grad_right - grad_left
+>
+>     return (lo + hi) / 2.0, diff
+>
+>
+> def collect_gradient_differences():
+>     """Collect gradient differences by probing along random directions."""
+>     diffs = []
+>     np.random.seed(42)
+>
+>     # Strategy: pick random base points and random directions,
+>     # find all critical points along each line
+>     for trial in range(200):
+>         x = np.random.randn(10) * 2.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Find all critical points along this line by subdividing
+>         t_range = np.linspace(-5, 5, 50)
+>         grads = [compute_gradient(x + t * direction) for t in t_range]
+>
+>         for i in range(len(grads) - 1):
+>             if not np.allclose(grads[i], grads[i+1], atol=1e-8):
+>                 # There's a switch between t_range[i] and t_range[i+1]
+>                 # Binary search to find exact point
+>                 lo, hi = t_range[i], t_range[i+1]
+>                 grad_lo = grads[i]
+>
+>                 for _ in range(80):
+>                     mid = (lo + hi) / 2.0
+>                     grad_mid = compute_gradient(x + mid * direction)
+>                     if np.allclose(grad_mid, grad_lo, atol=1e-8):
+>                         lo = mid
+>                         grad_lo = grad_mid
+>                     else:
+>                         hi = mid
+>
+>                 grad_left = compute_gradient(x + lo * direction)
+>                 grad_right = compute_gradient(x + hi * direction)
+>                 diff = grad_right - grad_left
+>
+>                 if np.linalg.norm(diff) > 1e-10:
+>                     diffs.append(diff)
+>
+>     return diffs
+>
+>
+> def cluster_rows(diffs, n_hidden=20):
+>     """Cluster gradient differences to find unique rows of A1 (up to scaling)."""
+>     if len(diffs) == 0:
+>         return np.zeros((0, 10))
+>
+>     # Normalize each diff to unit length (direction only)
+>     normalized = []
+>     for d in diffs:
+>         norm = np.linalg.norm(d)
+>         if norm > 1e-10:
+>             # Canonicalize sign: first nonzero element should be positive
+>             d_norm = d / norm
+>             # Find first significant element
+>             idx = np.argmax(np.abs(d_norm) > 1e-6)
+>             if d_norm[idx] < 0:
+>                 d_norm = -d_norm
+>             normalized.append(d_norm)
+>
+>     if len(normalized) == 0:
+>         return np.zeros((0, 10))
+>
+>     normalized = np.array(normalized)
+>
+>     # Greedy clustering: group vectors that are parallel (same direction up to sign)
+>     clusters = []
+>     cluster_members = []
+>
+>     for i, v in enumerate(normalized):
+>         found = False
+>         for j, c in enumerate(clusters):
+>             # Check if v is parallel to c (cosine similarity close to 1)
+>             cos_sim = abs(np.dot(v, c))
+>             if cos_sim > 0.999:
+>                 cluster_members[j].append(diffs[i])
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append(v.copy())
+>             cluster_members.append([diffs[i]])
+>
+>     print(f"Found {len(clusters)} unique directions (expected {n_hidden})")
+>
+>     # For each cluster, compute the representative row
+>     # The gradient difference is A2[0,i] * A1[i,:] for neuron i
+>     # We want A1[i,:], so we need to extract it up to scaling
+>     rows = []
+>     for members in cluster_members:
+>         # Average the members (they should all be scalar multiples of each other)
+>         # Use the one with largest norm as representative
+>         best = max(members, key=lambda m: np.linalg.norm(m))
+>         rows.append(best)
+>
+>     return np.array(rows)
+>
+>
+> if __name__ == '__main__':
+>     print("Collecting gradient differences...")
+>     diffs = collect_gradient_differences()
+>     print(f"Collected {len(diffs)} gradient differences")
+>
+>     print("Clustering to find A1 rows...")
+>     A1_stolen = cluster_rows(diffs)
+>
+>     print(f"Recovered matrix shape: {A1_stolen.shape}")
+>
+>     # Save the result
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>     print(A1_stolen)
+> ENDOFSCRIPT
+root@modal:/app#

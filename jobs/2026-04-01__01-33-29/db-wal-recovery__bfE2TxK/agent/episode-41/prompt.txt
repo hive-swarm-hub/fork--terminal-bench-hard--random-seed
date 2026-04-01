@@ -1,0 +1,94 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import os, struct
+>
+> # PID 811 was the previous python process, let's search current process
+> # Actually, let me search ALL processes and get the full WAL data
+>
+> for pid_dir in sorted(os.listdir('/proc')):
+>     if not pid_dir.isdigit():
+>         continue
+>     maps_file = f'/proc/{pid_dir}/maps'
+>     mem_file = f'/proc/{pid_dir}/mem'
+>     try:
+>         with open(maps_file) as f:
+>             maps = f.readlines()
+>         fd = os.open(mem_file, os.O_RDONLY)
+>         for line in maps:
+>             parts = line.split()
+>             if len(parts) < 2:
+>                 continue
+>             perms = parts[1]
+>             if 'r' not in perms:
+>                 continue
+>             addr_range = parts[0]
+>             start, end = addr_range.split('-')
+>             start = int(start, 16)
+>             end = int(end, 16)
+>             size = end - start
+>             if size > 50 * 1024 * 1024:
+>                 continue
+>             try:
+>                 os.lseek(fd, start, os.SEEK_SET)
+>                 data = os.read(fd, min(size, 4*1024*1024))
+>                 for magic in [b'\x37\x7f\x06\x82', b'\x37\x7f\x06\x83']:
+>                     idx = 0
+>                     while True:
+>                         idx = data.find(magic, idx)
+>                         if idx == -1:
+>                             break
+>                         # Check if this looks like a real WAL header
+>                         # WAL header: magic(4) + format_version(4) + page_size(4) + ...
+>                         if idx + 32 <= len(data):
+>                             hdr = data[idx:idx+32]
+>                             m = struct.unpack('>I', hdr[0:4])[0]
+>                             ver = struct.unpack('>I', hdr[4:8])[0]
+>                             page_sz = struct.unpack('>I', hdr[8:12])[0]
+>                             ckpt_seq = struct.unpack('>I', hdr[12:16])[0]
+>                             salt1 = struct.unpack('>I', hdr[16:20])[0]
+>                             salt2 = struct.unpack('>I', hdr[20:24])[0]
+>                             ck1 = struct.unpack('>I', hdr[24:28])[0]
+>                             ck2 = struct.unpack('>I', hdr[28:32])[0]
+>
+>                             if page_sz in [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]:
+>                                 print(f'\nPOTENTIAL REAL WAL HEADER in PID {pid_dir} at {addr_range} offset {idx}')
+>                                 print(f'  Magic: 0x{m:08x}')
+>                                 print(f'  Format version: {ver}')
+>                                 print(f'  Page size: {page_sz}')
+>                                 print(f'  Checkpoint seq: {ckpt_seq}')
+>                                 print(f'  Salt1: {salt1}, Salt2: {salt2}')
+>                                 print(f'  Checksum: {ck1}, {ck2}')
+>                                 print(f'  Full header hex: {hdr.hex()}')
+>
+>                                 # If this looks real, try to read the full WAL
+>                                 # WAL = 32 byte header + N * (24 + page_size) frames
+>                                 # For 16512 bytes: N = (16512-32)/4120 = 4 frames
+>                                 wal_size = 16512
+>                                 if idx + wal_size <= len(data):
+>                                     wal_data = data[idx:idx+wal_size]
+>                                     print(f'  Got {len(wal_data)} bytes of potential WAL data')
+>                                     # Save it
+>                                     with open('/tmp/recovered_wal.bin', 'wb') as wf:
+>                                         wf.write(wal_data)
+>                                     print(f'  Saved to /tmp/recovered_wal.bin')
+>
+>                                     # Try to parse frame headers
+>                                     for frame_idx in range(4):
+>                                         frame_offset = 32 + frame_idx * (24 + page_sz)
+>                                         if frame_offset + 24 <= len(wal_data):
+>                                             fhdr = wal_data[frame_offset:frame_offset+24]
+>                                             pg_num = struct.unpack('>I', fhdr[0:4])[0]
+>                                             commit_sz = struct.unpack('>I', fhdr[4:8])[0]
+>                                             print(f'  Frame {frame_idx}: page={pg_num}, commit_size={commit_sz}')
+>                         idx += 1
+>             except:
+>                 pass
+>         os.close(fd)
+>     except:
+>         pass
+> print('\nDone')
+> PYEOF
+
+Done
+root@modal:/app#

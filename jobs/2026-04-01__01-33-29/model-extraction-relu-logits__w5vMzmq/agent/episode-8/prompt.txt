@@ -1,0 +1,178 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def collect_gradient_differences():
+>     """Collect gradient differences by finding ReLU boundaries along random lines."""
+>     diffs = []
+>     np.random.seed(42)
+>
+>     for trial in range(100):
+>         x = np.random.randn(10) * 2.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Sample gradients along the line at coarse intervals
+>         n_samples = 40
+>         t_values = np.linspace(-5, 5, n_samples)
+>         grads = [compute_gradient(x + t * direction) for t in t_values]
+>
+>         for k in range(1, n_samples):
+>             diff = grads[k] - grads[k-1]
+>             norm = np.linalg.norm(diff)
+>
+>             if norm > 1e-4:
+>                 # There's at least one neuron switch between t_values[k-1] and t_values[k]
+>                 # Binary search to isolate a single switch
+>                 lo_t, hi_t = t_values[k-1], t_values[k]
+>                 lo_grad = grads[k-1].copy()
+>
+>                 for _ in range(40):
+>                     mid_t = (lo_t + hi_t) / 2.0
+>                     mid_grad = compute_gradient(x + mid_t * direction)
+>                     if np.linalg.norm(mid_grad - lo_grad) > 1e-4:
+>                         hi_t = mid_t
+>                     else:
+>                         lo_t = mid_t
+>                         lo_grad = mid_grad.copy()
+>                     if hi_t - lo_t < 1e-12:
+>                         break
+>
+>                 # Compute gradient difference using points offset from boundary
+>                 # The boundary is between lo_t and hi_t
+>                 # Use offset = 1e-4 to stay clearly on each side
+>                 boundary = (lo_t + hi_t) / 2.0
+>                 offset = 1e-4
+>
+>                 g_left = compute_gradient(x + (boundary - offset) * direction)
+>                 g_right = compute_gradient(x + (boundary + offset) * direction)
+>                 single_diff = g_right - g_left
+>
+>                 if np.linalg.norm(single_diff) > 1e-4:
+>                     diffs.append(single_diff)
+>
+>     return diffs
+>
+>
+> def cluster_rows(diffs, n_hidden=20):
+>     """Cluster gradient differences to find unique rows of A1 (up to scaling)."""
+>     if len(diffs) == 0:
+>         return np.zeros((0, 10))
+>
+>     # Normalize and canonicalize
+>     items = []  # (normalized, raw)
+>     for d in diffs:
+>         norm = np.linalg.norm(d)
+>         if norm > 1e-4:
+>             d_norm = d / norm
+>             # Canonicalize: first large element positive
+>             idx = np.argmax(np.abs(d_norm))
+>             if d_norm[idx] < 0:
+>                 d_norm = -d_norm
+>                 d = -d.copy()
+>             items.append((d_norm, d.copy()))
+>
+>     # Greedy clustering
+>     clusters = []  # (centroid_normalized, [raw_members])
+>
+>     for d_norm, d_raw in items:
+>         found = False
+>         for c in clusters:
+>             cos_sim = abs(np.dot(d_norm, c[0]))
+>             if cos_sim > 0.995:
+>                 c[1].append(d_raw)
+>                 # Update centroid
+>                 all_norms = []
+>                 for m in c[1]:
+>                     mn = m / np.linalg.norm(m)
+>                     if np.dot(mn, c[0]) < 0:
+>                         mn = -mn
+>                     all_norms.append(mn)
+>                 new_centroid = np.mean(all_norms, axis=0)
+>                 c[0] = new_centroid / np.linalg.norm(new_centroid)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append([d_norm.copy(), [d_raw.copy()]])
+>
+>     print(f"Found {len(clusters)} unique directions (expected {n_hidden})")
+>
+>     rows = []
+>     for centroid, members in clusters:
+>         # Use median for robustness
+>         # Align signs first
+>         aligned = []
+>         for m in members:
+>             if np.dot(m, centroid) < 0:
+>                 aligned.append(-m)
+>             else:
+>                 aligned.append(m)
+>         if len(aligned) >= 3:
+>             rep = np.median(aligned, axis=0)
+>         else:
+>             rep = np.mean(aligned, axis=0)
+>         rows.append(rep)
+>
+>     return np.array(rows)
+>
+>
+> if __name__ == '__main__':
+>     print("Collecting gradient differences...")
+>     diffs = collect_gradient_differences()
+>     print(f"Collected {len(diffs)} gradient differences")
+>
+>     print("Clustering to find A1 rows...")
+>     A1_stolen = cluster_rows(diffs)
+>
+>     print(f"Recovered matrix shape: {A1_stolen.shape}")
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved stolen A1 to /app/stolen_A1.npy")
+>
+>     # Verify
+>     try:
+>         from forward import A1 as true_A1, A2 as true_A2
+>         print(f"\nTrue A1 shape: {true_A1.shape}")
+>         print(f"True A2 shape: {true_A2.shape}")
+>
+>         # Each gradient diff should be A2[0,i] * A1[i,:]
+>         # So stolen rows are scaled versions of A1 rows
+>         matched = 0
+>         for i in range(true_A1.shape[0]):
+>             true_row = true_A1[i]
+>             true_norm = true_row / np.linalg.norm(true_row)
+>             best_sim = 0
+>             best_j = -1
+>             for j in range(A1_stolen.shape[0]):
+>                 sn = np.linalg.norm(A1_stolen[j])
+>                 if sn > 1e-8:
+>                     stolen_norm = A1_stolen[j] / sn
+>                     sim = abs(np.dot(true_norm, stolen_norm))
+>                     if sim > best_sim:
+>                         best_sim = sim
+>                         best_j = j
+>             if best_sim > 0.99:
+>                 matched += 1
+>                 print(f"  Row {i}: matched stolen row {best_j} (sim={best_sim:.6f})")
+>             else:
+>                 print(f"  Row {i}: NO MATCH (best sim={best_sim:.6f})")
+>         print(f"\nMatched {matched}/{true_A1.shape[0]} rows of true A1")
+>     except Exception as e:
+>         print(f"Verification error: {e}")
+> ENDOFSCRIPT
+root@modal:/app#

@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@modal:/app# cat primers.fasta
+>forward_primer
+TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+>reverse_primer
+CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+root@modal:/app# cat > /app/verify.py << 'PYEOF'
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('primers.fasta')
+> fwd = primers['forward_primer'].upper()
+> rev = primers['reverse_primer'].upper()
+>
+> print(f"Forward primer: {fwd}")
+> print(f"Reverse primer: {rev}")
+>
+> # The forward primer has a 5' tail (insertion) + annealing region
+> # The annealing region of the forward primer binds at position 215 of input
+> fwd_anneal = fwd[39:]  # last 18bp
+> print(f"Fwd annealing: {fwd_anneal}")
+> print(f"Input[215:233]: {input_seq[215:233]}")
+> assert fwd_anneal == input_seq[215:233], "Forward annealing mismatch!"
+>
+> # The reverse primer is entirely annealing, binding upstream of position 215
+> # It's the reverse complement of input[170:215]
+> rev_rc = reverse_complement(rev)
+> print(f"Rev RC: {rev_rc}")
+> print(f"Input[170:215]: {input_seq[170:215]}")
+> assert rev_rc == input_seq[170:215], "Reverse annealing mismatch!"
+>
+> # Simulate Q5 SDM:
+> # The PCR amplifies the entire plasmid linearly:
+> # The product (before ligation) is:
+> # fwd_primer + input[233:] + input[0:170] + reverse_complement(rev_primer)
+> # Wait, that's not right. Let me think again.
+> #
+> # In Q5 SDM, the primers are back-to-back on the template.
+> # Forward primer anneals at position 215-233 (top strand, extends rightward)
+> # Reverse primer anneals at position 170-215 (bottom strand, extends leftward)
+> #
+> # The PCR product is a linear molecule:
+> # 5'---fwd_primer---[input 233 to end + input 0 to 170]---rev_complement(rev_primer)---3'
+> #
+> # After KLD (kinase, ligase, DpnI) treatment, the linear product is:
+> # phosphorylated, ligated into a circle, and template is digested.
+> #
+> # The resulting circular plasmid sequence (reading from the fwd primer start):
+> # fwd_tail + fwd_anneal + input[233:] + input[0:170] + rev_rc
+> # = inserted_seq + input[215:233] + input[233:] + input[0:170] + input[170:215]
+> # = inserted_seq + input[215:] + input[0:215]
+> #
+> # As a circular molecule starting from position 0 of input:
+> # input[0:215] + inserted_seq + input[215:]
+> # Which should equal the output!
+>
+> product_linear = input_seq[0:215] + fwd[0:39] + input_seq[215:]
+> print(f"\nProduct length: {len(product_linear)}")
+> print(f"Output length: {len(output_seq)}")
+>
+> if product_linear == output_seq:
+>     print("SUCCESS: Product matches output plasmid!")
+> else:
+>     print("MISMATCH!")
+>     # Find where they differ
+>     for i in range(min(len(product_linear), len(output_seq))):
+>         if product_linear[i] != output_seq[i]:
+>             print(f"First diff at pos {i}")
+>             print(f"Product: {product_linear[i-5:i+10]}")
+>             print(f"Output:  {output_seq[i-5:i+10]}")
+>             break
+>
+> print("\n--- Summary ---")
+> print(f"Number of primer pairs: 1")
+> print(f"Forward primer length: {len(fwd)}bp")
+> print(f"Reverse primer length: {len(rev)}bp")
+> print(f"Fwd annealing length: {len(fwd_anneal)}bp (15-45 range: OK)")
+> print(f"Rev annealing length: {len(rev)}bp (15-45 range: OK)")
+>
+> PYEOF
+root@modal:/app# python3 /app/verify.py
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+Fwd annealing: CAAGGGCGAGGAGCTGTT
+Input[215:233]: CAAGGGCGAGGAGCTGTT
+Rev RC: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Input[170:215]: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+
+Product length: 3630
+Output length: 3630
+SUCCESS: Product matches output plasmid!
+
+--- Summary ---
+Number of primer pairs: 1
+Forward primer length: 57bp
+Reverse primer length: 45bp
+Fwd annealing length: 18bp (15-45 range: OK)
+Rev annealing length: 45bp (15-45 range: OK)
+root@modal:/app#

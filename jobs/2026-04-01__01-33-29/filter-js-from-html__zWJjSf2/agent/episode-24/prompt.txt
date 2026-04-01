@@ -1,0 +1,229 @@
+New Terminal Output:
+
+root@modal:/app# cat /app/filter.py
+import sys
+import re
+import html as html_module
+
+def decode_and_normalize(value):
+    """Decode HTML entities and remove control characters to detect obfuscated javascript: URLs."""
+    decoded = value
+    for _ in range(3):
+        prev = decoded
+        decoded = re.sub(r'&#[xX]0*([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)) if int(m.group(1), 16) < 0x110000 else m.group(0), decoded)
+        decoded = re.sub(r'&#0*(\d+);?', lambda m: chr(int(m.group(1))) if int(m.group(1)) < 0x110000 else m.group(0), decoded)
+        try:
+            decoded = html_module.unescape(decoded)
+        except:
+            pass
+        if decoded == prev:
+            break
+    normalized = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower()
+    return normalized
+
+def is_dangerous_url(value):
+    """Check if a URL value contains javascript:, vbscript:, etc."""
+    normalized = decode_and_normalize(value)
+    if re.match(r'^javascript:', normalized):
+        return True
+    if re.match(r'^vbscript:', normalized):
+        return True
+    if re.match(r'^data:', normalized):
+        if re.search(r'text/html|<script|javascript:|vbscript:', normalized):
+            return True
+    return False
+
+def contains_dangerous_url(value):
+    """Check if a value contains a javascript: URL anywhere (for meta refresh content, etc)."""
+    normalized = decode_and_normalize(value)
+    if re.search(r'javascript:', normalized):
+        return True
+    if re.search(r'vbscript:', normalized):
+        return True
+    return False
+
+def has_dangerous_style(value):
+    """Check if a style value contains dangerous expressions."""
+    normalized = decode_and_normalize(value)
+    if 'expression(' in normalized:
+        return True
+    if 'javascript:' in normalized:
+        return True
+    if 'vbscript:' in normalized:
+        return True
+    return False
+
+def clean_style_value(value):
+    """Remove dangerous parts from style attribute value."""
+    cleaned = re.sub(r'expression\s*\([^)]*\)', '', value, flags=re.IGNORECASE)
+    cleaned = re.sub(r'javascript\s*:', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'vbscript\s*:', '', cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+def clean_style_content(value):
+    """Remove dangerous parts from <style> tag content."""
+    cleaned = re.sub(r'expression\s*\([^)]*\)', '', value, flags=re.IGNORECASE)
+    cleaned = re.sub(r'javascript\s*:', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'vbscript\s*:', '', cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+URL_ATTRS = {
+    'href', 'src', 'action', 'formaction', 'data', 'dynsrc', 'lowsrc',
+    'background', 'poster', 'codebase', 'cite', 'usemap', 'longdesc',
+    'xlink:href',
+}
+
+def process_tag(match):
+    """Process an HTML tag to remove dangerous attributes."""
+    tag = match.group(0)
+
+    # Don't process comments, doctype, CDATA, closing tags, processing instructions
+    if tag.startswith('<!--') or tag.startswith('<!') or tag.startswith('</') or tag.startswith('<?'):
+        return tag
+
+    # Remove on* event handler attributes (case-insensitive)
+    # Double-quoted values
+    tag = re.sub(r'(?i)\s+on\w+\s*=\s*"[^"]*"', '', tag)
+    # Single-quoted values
+    tag = re.sub(r"(?i)\s+on\w+\s*=\s*'[^']*'", '', tag)
+    # Unquoted values
+    tag = re.sub(r'(?i)\s+on\w+\s*=\s*[^\s\'">=]+', '', tag)
+    # Boolean on* attributes (no value)
+    tag = re.sub(r'(?i)\s+on\w+(?=\s|/?>)', '', tag)
+
+    # Handle URL attributes with javascript:/vbscript:/dangerous data: URIs
+    def check_url_dq(m):
+        pre = m.group(1)
+        attr_name = m.group(2)
+        value = m.group(3)
+        if attr_name.lower() in URL_ATTRS and is_dangerous_url(value):
+            return pre + '"'
+        return m.group(0)
+
+    tag = re.sub(
+        r'(\s+([\w:.-]+)\s*=\s*")([^"]*)"',
+        check_url_dq, tag
+    )
+
+    def check_url_sq(m):
+        pre = m.group(1)
+        attr_name = m.group(2)
+        value = m.group(3)
+        if attr_name.lower() in URL_ATTRS and is_dangerous_url(value):
+            return pre + "'"
+        return m.group(0)
+
+    tag = re.sub(
+        r"(\s+([\w:.-]+)\s*=\s*')([^']*)'",
+        check_url_sq, tag
+    )
+
+    def check_url_uq(m):
+        ws_and_name = m.group(1)
+        attr_name = m.group(2)
+        value = m.group(3)
+        if attr_name.lower() in URL_ATTRS and is_dangerous_url(value):
+            return ws_and_name + '""'
+        return m.group(0)
+
+    tag = re.sub(
+        r'(\s+([\w:.-]+)\s*=\s*)([^\s\'">=]+)',
+        check_url_uq, tag
+    )
+
+    # Handle style attributes with dangerous content
+    def check_style_dq(m):
+        pre = m.group(1)
+        value = m.group(2)
+        if has_dangerous_style(value):
+            return pre + clean_style_value(value) + '"'
+        return m.group(0)
+
+    tag = re.sub(
+        r'(?i)(\s+style\s*=\s*")([^"]*)"',
+        check_style_dq, tag
+    )
+
+    def check_style_sq(m):
+        pre = m.group(1)
+        value = m.group(2)
+        if has_dangerous_style(value):
+            return pre + clean_style_value(value) + "'"
+        return m.group(0)
+
+    tag = re.sub(
+        r"(?i)(\s+style\s*=\s*')([^']*)",
+        check_style_sq, tag
+    )
+
+    # Handle meta http-equiv="refresh" with javascript: in content
+    # Check if this is a meta tag with content containing javascript:
+    tag_name_match = re.match(r'<\s*(\w+)', tag)
+    if tag_name_match and tag_name_match.group(1).lower() == 'meta':
+        # Check if it has http-equiv="refresh" or similar
+        if re.search(r'(?i)http-equiv\s*=\s*["\']?refresh', tag):
+            # Check content attribute for javascript:
+            content_match = re.search(r'(?i)(content\s*=\s*")([^"]*)"', tag)
+            if content_match and contains_dangerous_url(content_match.group(2)):
+                tag = tag[:content_match.start()] + content_match.group(1) + '"' + tag[content_match.end():]
+            content_match = re.search(r"(?i)(content\s*=\s*')([^']*)", tag)
+            if content_match and contains_dangerous_url(content_match.group(2)):
+                tag = tag[:content_match.start()] + content_match.group(1) + "'" + tag[content_match.end():]
+
+    return tag
+
+def remove_javascript(html_content):
+    # Remove <script> tags and their contents
+    html_content = re.sub(
+        r'<\s*script\b[^>]*>.*?<\s*/\s*script\s*>',
+        '', html_content, flags=re.IGNORECASE | re.DOTALL
+    )
+    html_content = re.sub(
+        r'<\s*script\b[^>]*/\s*>',
+        '', html_content, flags=re.IGNORECASE
+    )
+    html_content = re.sub(
+        r'<\s*script\b[^>]*>',
+        '', html_content, flags=re.IGNORECASE
+    )
+    html_content = re.sub(
+        r'<\s*/\s*script\s*>',
+        '', html_content, flags=re.IGNORECASE
+    )
+
+    # Clean <style> tag contents (remove expression(), javascript:, etc.)
+    def clean_style_tag(m):
+        open_tag = m.group(1)
+        content = m.group(2)
+        close_tag = m.group(3)
+        cleaned = clean_style_content(content)
+        return open_tag + cleaned + close_tag
+
+    html_content = re.sub(
+        r'(<\s*style\b[^>]*>)(.*?)(<\s*/\s*style\s*>)',
+        clean_style_tag, html_content, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # Process all HTML tags to remove dangerous attributes
+    html_content = re.sub(r'<[^>]+>', process_tag, html_content)
+
+    return html_content
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python filter.py <html_file>", file=sys.stderr)
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+
+    cleaned = remove_javascript(content)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(cleaned)
+
+if __name__ == '__main__':
+    main()
+root@modal:/app#

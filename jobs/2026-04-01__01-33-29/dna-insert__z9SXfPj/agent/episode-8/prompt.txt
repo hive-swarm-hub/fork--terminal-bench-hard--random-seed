@@ -1,0 +1,195 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/design_final.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Insertion of 39bp at position 215
+> insertion_point = 215
+> inserted_seq = output_seq[215:254]  # "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+>
+> print(f"Insertion point: {insertion_point}")
+> print(f"Inserted sequence ({len(inserted_seq)}bp): {inserted_seq}")
+> print(f"Input before insertion: ...{input_seq[insertion_point-10:insertion_point]}")
+> print(f"Input after insertion: {input_seq[insertion_point:insertion_point+10]}...")
+>
+> # For Q5 SDM insertion:
+> # Forward primer = inserted_seq (5' tail) + annealing region downstream
+> # Reverse primer = reverse complement of upstream region (anneals back-to-back)
+>
+> # Calculate Tm for all possible annealing lengths (15-45)
+> print("\n--- Forward primer annealing options ---")
+> fwd_options = []
+> for length in range(15, 46):
+>     anneal_seq = input_seq[insertion_point:insertion_point + length]
+>     if len(anneal_seq) < length:
+>         # wrap around for circular plasmid
+>         anneal_seq = input_seq[insertion_point:] + input_seq[:length - len(anneal_seq)]
+>     tm = get_tm(anneal_seq)
+>     if 58 <= tm <= 72:
+>         fwd_options.append((length, tm, anneal_seq))
+>         print(f"  Length {length}: Tm={tm:.1f}°C, seq={anneal_seq}")
+>
+> print("\n--- Reverse primer annealing options ---")
+> rev_options = []
+> for length in range(15, 46):
+>     # Reverse primer anneals to the region just upstream of insertion point
+>     # It anneals to the bottom strand, so we take the region ending at insertion_point
+>     anneal_region = input_seq[insertion_point - length:insertion_point]
+>     rev_anneal_seq = reverse_complement(anneal_region)
+>     tm = get_tm(rev_anneal_seq)
+>     if 58 <= tm <= 72:
+>         rev_options.append((length, tm, rev_anneal_seq, anneal_region))
+>         print(f"  Length {length}: Tm={tm:.1f}°C, seq={rev_anneal_seq}")
+>
+> # Find best pair with Tm difference <= 5°C
+> print("\n--- Finding best primer pair ---")
+> best_pair = None
+> best_tm_diff = float('inf')
+>
+> for fwd_len, fwd_tm, fwd_anneal in fwd_options:
+>     for rev_len, rev_tm, rev_seq, rev_anneal_region in rev_options:
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff <= 5.0:
+>             if tm_diff < best_tm_diff:
+>                 best_tm_diff = tm_diff
+>                 best_pair = (fwd_len, fwd_tm, fwd_anneal, rev_len, rev_tm, rev_seq)
+>
+> if best_pair:
+>     fwd_len, fwd_tm, fwd_anneal, rev_len, rev_tm, rev_seq = best_pair
+>
+>     # Full forward primer = insertion + annealing region
+>     fwd_primer = inserted_seq + fwd_anneal
+>     rev_primer = rev_seq
+>
+>     print(f"\nForward primer:")
+>     print(f"  Full sequence: {fwd_primer}")
+>     print(f"  5' tail (insertion, {len(inserted_seq)}bp): {inserted_seq}")
+>     print(f"  Annealing region ({fwd_len}bp): {fwd_anneal}")
+>     print(f"  Annealing Tm: {fwd_tm:.1f}°C")
+>     print(f"  Total length: {len(fwd_primer)}bp")
+>
+>     print(f"\nReverse primer:")
+>     print(f"  Full sequence: {rev_primer}")
+>     print(f"  Annealing region ({rev_len}bp): {rev_seq}")
+>     print(f"  Annealing Tm: {rev_tm:.1f}°C")
+>     print(f"  Total length: {len(rev_primer)}bp")
+>
+>     print(f"\nTm difference: {abs(fwd_tm - rev_tm):.1f}°C")
+>
+>     # Write output FASTA
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>
+>     print("\nPrimers written to primers.fasta")
+>
+>     # Verify the primers would produce the correct output
+>     # Forward primer introduces the insertion and anneals downstream
+>     # Reverse primer anneals upstream, back-to-back
+>     # PCR amplifies the whole plasmid with the insertion added
+>     print("\n--- Verification ---")
+>     # The product after PCR + ligation would be:
+>     # reverse_complement(rev_primer) + inserted_seq + fwd_anneal + rest of plasmid
+>     # Actually for Q5 SDM, the KLD enzyme ligates the blunt ends
+>     # The product is the full plasmid with the insertion
+>
+>     # Verify Tm values
+>     print(f"Fwd annealing Tm (verify): {get_tm(fwd_anneal):.1f}°C")
+>     print(f"Rev annealing Tm (verify): {get_tm(rev_seq):.1f}°C")
+> else:
+>     print("ERROR: No valid primer pair found!")
+>
+> PYEOF
+root@modal:/app# python3 /app/design_final.py
+Insertion point: 215
+Inserted sequence (39bp): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+Input before insertion: ...TACATATGAG
+Input after insertion: CAAGGGCGAG...
+
+--- Forward primer annealing options ---
+  Length 15: Tm=59.5°C, seq=CAAGGGCGAGGAGCT
+  Length 16: Tm=61.2°C, seq=CAAGGGCGAGGAGCTG
+  Length 17: Tm=63.3°C, seq=CAAGGGCGAGGAGCTGT
+  Length 18: Tm=63.8°C, seq=CAAGGGCGAGGAGCTGTT
+  Length 19: Tm=64.7°C, seq=CAAGGGCGAGGAGCTGTTC
+  Length 20: Tm=66.3°C, seq=CAAGGGCGAGGAGCTGTTCA
+  Length 21: Tm=67.2°C, seq=CAAGGGCGAGGAGCTGTTCAC
+  Length 22: Tm=69.2°C, seq=CAAGGGCGAGGAGCTGTTCACC
+  Length 23: Tm=71.1°C, seq=CAAGGGCGAGGAGCTGTTCACCG
+
+--- Reverse primer annealing options ---
+  Length 28: Tm=58.0°C, seq=CTCATATGTATATCTCCTTCTTAAAGTT
+  Length 30: Tm=58.5°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAA
+  Length 31: Tm=58.9°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAA
+  Length 32: Tm=59.8°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAAC
+  Length 33: Tm=61.0°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACA
+  Length 34: Tm=61.3°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+  Length 35: Tm=61.6°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  Length 36: Tm=62.0°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  Length 37: Tm=62.1°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  Length 38: Tm=62.4°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  Length 39: Tm=62.3°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  Length 40: Tm=62.4°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  Length 41: Tm=62.7°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  Length 42: Tm=62.9°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  Length 43: Tm=63.3°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  Length 44: Tm=64.0°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  Length 45: Tm=63.8°C, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+
+--- Finding best primer pair ---
+
+Forward primer:
+  Full sequence: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+  5' tail (insertion, 39bp): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+  Annealing region (18bp): CAAGGGCGAGGAGCTGTT
+  Annealing Tm: 63.8°C
+  Total length: 57bp
+
+Reverse primer:
+  Full sequence: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Annealing region (45bp): CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Annealing Tm: 63.8°C
+  Total length: 45bp
+
+Tm difference: 0.0°C
+
+Primers written to primers.fasta
+
+--- Verification ---
+Fwd annealing Tm (verify): 63.8°C
+Rev annealing Tm (verify): 63.8°C
+root@modal:/app#

@@ -1,0 +1,246 @@
+New Terminal Output:
+
+root@modal:/app# grep -n 'syscall\|SYS_\|handleSyscall\|sys_' /app/vm.js | head -40
+39:    // File descriptors for syscalls
+422:  syscall(code) {
+424:    return this.handleSyscall();
+769:handleSyscall() {
+773:  // Get syscall number from $v0 (register 2)
+774:  const syscallNum = this.registers[2];
+782:  if (syscallNum === 0) {  // SYS_read
+830:      console.error(`SYS_read error: ${error.message}`);
+834:  } else if (syscallNum === 1) {  // SYS_write
+878:      console.error(`SYS_write error: ${error.message}`);
+882:  } else if (syscallNum === 2) {  // SYS_open
+980:      console.error(`SYS_open error: ${error.message}`);
+984:  } else if (syscallNum === 3) {  // SYS_close
+1017:      console.error(`SYS_close error: ${error.message}`);
+1021:  } else if (syscallNum === 8) {  // SYS_lseek
+1088:      console.error(`SYS_lseek error: ${error}`);
+1092:  } else if (syscallNum === 201) {  // SYS_time
+1116:  } else if (syscallNum === 4) {  // SYS_stat
+1117:    // TODO: Implement stat syscall
+1118:    console.warn("SYS_stat not implemented");
+1121:  } else if (syscallNum === 5) {  // SYS_fstat
+1122:    // TODO: Implement fstat syscall
+1123:    console.warn("SYS_fstat not implemented");
+1126:  } else if (syscallNum === 6) {  // SYS_lstat
+1127:    // TODO: Implement lstat syscall
+1128:    console.warn("SYS_lstat not implemented");
+1131:  } else if (syscallNum === 9) {  // SYS_mmap
+1133:    console.warn("SYS_mmap not implemented");
+1136:  } else if (syscallNum === 10) {  // SYS_mprotect
+1138:    console.warn("SYS_mprotect not implemented");
+1141:  } else if (syscallNum === 11) {  // SYS_munmap
+1143:    console.warn("SYS_munmap not implemented");
+1146:  } else if (syscallNum === 38) {  // SYS_rename
+1174:      console.error(`SYS_rename error: ${error.message}`);
+1178:  } else if (syscallNum === 39) {  // SYS_mkdir
+1198:      console.error(`SYS_mkdir error: ${error.message}`);
+1202:  } else if (syscallNum === 40) {  // SYS_rmdir
+1221:      console.error(`SYS_rmdir error: ${error.message}`);
+1225:  } else if (syscallNum === 92) {  // SYS_fcntl
+1232:    console.warn(`SYS_fcntl not fully implemented (fd=${fd}, cmd=${cmd}, arg=${arg})`);
+root@modal:/app# sed -n '700,900p' /app/vm.js
+seb(rd, rt) {
+  // Sign-Extend Byte
+  // Extract the least significant byte from rt
+  const byte = this.registers[rt] & 0xFF;
+
+  // Sign-extend the byte to 32 bits
+  // If the most significant bit of the byte is 1, extend with 1s, otherwise with 0s
+  this.registers[rd] = (byte & 0x80) ? (byte | 0xFFFFFF00) : byte;
+}
+
+seh(rd, rt) {
+  // Sign-Extend Halfword
+  // Extract the least significant halfword from rt
+  const halfword = this.registers[rt] & 0xFFFF;
+
+  // Sign-extend the halfword to 32 bits
+  // If the most significant bit of the halfword is 1, extend with 1s, otherwise with 0s
+  this.registers[rd] = (halfword & 0x8000) ? (halfword | 0xFFFF0000) : halfword;
+}
+
+  wsbh(rt, rd) {
+    // WSBH rd,rt - Word Swap Bytes within Halfwords
+    const value = this.registers[rt];
+
+    // Extract each byte
+    const byte0 = value & 0xFF;
+    const byte1 = (value >> 8) & 0xFF;
+    const byte2 = (value >> 16) & 0xFF;
+    const byte3 = (value >> 24) & 0xFF;
+
+    // Swap bytes within each halfword
+    // First halfword: byte0 and byte1 are swapped
+    // Second halfword: byte2 and byte3 are swapped
+    this.registers[rd] = (byte0 << 8) | byte1 | (byte2 << 24) | (byte3 << 16);
+  }
+
+  // ---- Special2 Instructions ----
+
+  mul(rs, rt, rd) {
+    // MUL rd,rs,rt - Multiply (without storing to HI/LO)
+    // Perform signed multiplication and keep only lower 32 bits
+    const result = ((this.registers[rs] | 0) * (this.registers[rt] | 0)) | 0;
+    this.registers[rd] = result;
+  }
+
+    clz(rs, rd) {
+  // CLZ rd,rs - Count Leading Zeros
+  let value = this.registers[rs] >>> 0; // Force to unsigned 32-bit
+  let count = 0;
+
+  // Count leading zeros using bit manipulation
+  if (value === 0) {
+    count = 32; // Special case: if value is 0, result is 32
+  } else {
+    // Count leading zeros by checking bit positions from MSB to LSB
+    for (let i = 31; i >= 0; i--) {
+      if ((value & (1 << i)) === 0) {
+        count++;
+      } else {
+        break; // Stop counting once we find first '1' bit
+      }
+    }
+  }
+
+  this.registers[rd] = count;
+}
+
+  // ---- System Call Handler ----
+
+handleSyscall() {
+  // Store the address of the current instruction in case we need it
+  this.epc = this.pc - 4;
+
+  // Get syscall number from $v0 (register 2)
+  const syscallNum = this.registers[2];
+
+  // Ensure Node.js fs and process modules are available
+  // This assumes the code is running in a Node.js environment
+  const fs = require('fs');
+  const process = require('process');
+
+  // Initialize file descriptors tracking if not already done
+  if (syscallNum === 0) {  // SYS_read
+    // Get arguments from registers
+    const fd = this.fileDescriptors[this.registers[4]];            // File descriptor
+    const bufferAddr = this.registers[5];    // Buffer address in MIPS memory
+    const count = this.registers[6];         // Number of bytes to read
+
+    try {
+      // Check if we're reading from stdin
+      if (fd === 0) {
+        // Reading from stdin is blocking in a real implementation
+        // This is a simplification - in a real VM you'd need to handle this asynchronously
+        console.log("Reading from stdin not fully implemented in this example");
+        const testInput = "Test input\n";
+        const bytesRead = Math.min(testInput.length, count);
+
+        for (let i = 0; i < bytesRead; i++) {
+          this.writeMemoryByte(bufferAddr + i, testInput.charCodeAt(i));
+        }
+
+        this.registers[2] = bytesRead;
+      } else {
+          // For regular files, read from our cached file data
+          //console.log(this.fileCache, fd)
+        if (!this.fileCache[fd]) {
+          this.registers[2] = -1;  // Error: file not in cache
+          return;
+        }
+
+        const fileInfo = this.fileCache[fd];
+        const fileData = fileInfo.data;
+        const position = fileInfo.position;
+
+        // Calculate how many bytes we can actually read
+        const bytesAvailable = fileData.length - position;
+        const bytesRead = Math.min(count, bytesAvailable);
+
+        // Copy data from file cache to MIPS memory
+        for (let i = 0; i < bytesRead; i++) {
+          this.writeMemoryByte(bufferAddr + i, fileData[position + i]);
+        }
+
+        // Update file position
+        fileInfo.position += bytesRead;
+
+        // Return number of bytes read
+        this.registers[2] = bytesRead;
+      }
+    } catch (error) {
+      console.error(`SYS_read error: ${error.message}`);
+      this.registers[2] = -1;  // Error code
+    }
+
+  } else if (syscallNum === 1) {  // SYS_write
+    // Get arguments from registers
+    const fd = this.fileDescriptors[this.registers[4]];           // File descriptor
+    const bufferAddr = this.registers[5];   // Buffer address in MIPS memory
+    const count = this.registers[6];        // Number of bytes to write
+
+    try {
+      // Create a buffer to hold the data to write
+      const buffer = Buffer.alloc(count);
+
+      // Read data from MIPS VM memory into the buffer
+      for (let i = 0; i < count; i++) {
+        buffer[i] = this.readMemoryByte(bufferAddr + i);
+      }
+
+      // For files opened for writing, we'll buffer the data and write on close
+      if (this.fileCache[fd] && this.fileCache[fd].mode.includes('w')) {
+        const fileInfo = this.fileCache[fd];
+
+        // If the file was opened in append mode, move position to end
+        if (fileInfo.mode.includes('a')) {
+          fileInfo.position = fileInfo.data.length;
+        }
+
+        // Ensure the data buffer is large enough
+        const newSize = Math.max(fileInfo.position + count, fileInfo.data.length);
+        if (newSize > fileInfo.data.length) {
+          const newData = Buffer.alloc(newSize);
+          fileInfo.data.copy(newData, 0, 0, fileInfo.data.length);
+          fileInfo.data = newData;
+        }
+
+        // Copy the new data into the buffer at the current position
+        buffer.copy(fileInfo.data, fileInfo.position, 0, count);
+        fileInfo.position += count;
+        fileInfo.modified = true;
+
+        this.registers[2] = count;  // Return bytes written
+      } else {
+        // For stdout, stderr, or other uncached files, use direct write
+        const bytesWritten = fs.writeSync(fd, buffer, 0, count, null);
+        this.registers[2] = bytesWritten;
+      }
+    } catch (error) {
+      console.error(`SYS_write error: ${error.message}`);
+      this.registers[2] = -1;  // Error code
+    }
+
+  } else if (syscallNum === 2) {  // SYS_open
+      console.log("Open!");
+    // Get arguments from registers
+    const pathnameAddr = this.registers[4];   // Pathname address in MIPS memory
+    const flags = this.registers[5];          // Open flags
+    const mode = this.registers[6];           // File permissions mode
+
+    // Read the null-terminated pathname string from MIPS memory
+    let pathname = "";
+    let i = 0;
+    let byte;
+    while ((byte = this.readMemoryByte(pathnameAddr + i)) !== 0) {
+      pathname += String.fromCharCode(byte);
+      i++;
+      if (i > 10240) break;  // Safety limit
+    }
+
+    try {
+      // Define constants for the flags (Linux/MIPS values)
+root@modal:/app#

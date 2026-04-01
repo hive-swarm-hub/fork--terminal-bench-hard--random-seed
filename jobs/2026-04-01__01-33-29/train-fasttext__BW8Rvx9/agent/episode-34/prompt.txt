@@ -1,0 +1,83 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train_model3.py << 'PYEOF'
+> import pandas as pd
+> import fasttext
+> import os
+> import re
+>
+> # Load training data
+> print("Loading training data...")
+> train = pd.read_parquet('data/train-00000-of-00001.parquet')
+>
+> def preprocess(text):
+>     text = text.lower()
+>     text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+>     text = re.sub(r'[^a-z0-9\s]', ' ', text)
+>     text = re.sub(r'\s+', ' ', text).strip()
+>     return text
+>
+> # Convert to fasttext format
+> print("Converting to fasttext format...")
+> with open('/tmp/train.txt', 'w') as f:
+>     for _, row in train.iterrows():
+>         label = row['label']
+>         text = preprocess(row['text'])
+>         f.write(f'__label__{label} {text}\n')
+>
+> print("Training fasttext model...")
+> # Train with good params, then use quantize without cutoff
+> model = fasttext.train_supervised(
+>     input='/tmp/train.txt',
+>     epoch=25,
+>     lr=0.5,
+>     dim=100,
+>     wordNgrams=2,
+>     minCount=5,
+>     loss='softmax',
+>     thread=4,
+>     bucket=2000000
+> )
+>
+> # Save the full model first
+> model.save_model('/tmp/model_full3.bin')
+> full_size = os.path.getsize('/tmp/model_full3.bin') / (1024*1024)
+> print(f"Full model size: {full_size:.1f} MB")
+>
+> # Test on test set before quantization
+> print("\nPreparing test set...")
+> test = pd.read_parquet('data/test-00000-of-00001.parquet')
+> with open('/tmp/test.txt', 'w') as f:
+>     for _, row in test.iterrows():
+>         label = row['label']
+>         text = preprocess(row['text'])
+>         f.write(f'__label__{label} {text}\n')
+>
+> result = model.test('/tmp/test.txt')
+> print(f"Before quantization - Precision@1: {result[1]:.4f}")
+>
+> # Quantize without cutoff to preserve accuracy
+> print("\nQuantizing (no cutoff)...")
+> model.quantize(input='/tmp/train.txt', retrain=False)
+> model.save_model('/app/model.bin')
+>
+> final_size = os.path.getsize('/app/model.bin') / (1024*1024)
+> print(f"Final model size: {final_size:.1f} MB")
+>
+> result = model.test('/tmp/test.txt')
+> print(f"After quantization - Precision@1: {result[1]:.4f}")
+>
+> if final_size > 150:
+>     print("Still too large! Trying with cutoff...")
+>     # Reload and try with cutoff
+>     model2 = fasttext.load_model('/tmp/model_full3.bin')
+>     model2.quantize(input='/tmp/train.txt', retrain=False, cutoff=200000)
+>     model2.save_model('/app/model.bin')
+>     final_size = os.path.getsize('/app/model.bin') / (1024*1024)
+>     print(f"Final model size with cutoff: {final_size:.1f} MB")
+>     result = model2.test('/tmp/test.txt')
+>     print(f"After quantization with cutoff - Precision@1: {result[1]:.4f}")
+>
+> print("\nDone!")
+> PYEOF
+root@modal:/app#

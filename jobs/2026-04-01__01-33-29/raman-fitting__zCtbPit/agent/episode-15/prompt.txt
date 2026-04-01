@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/fit_peaks.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.ndimage import uniform_filter1d
+> import json
+>
+> # Read data
+> wavelengths = []
+> intensities = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         wavelengths.append(x)
+>         intensities.append(y)
+>
+> wavelengths = np.array(wavelengths)
+> intensities = np.array(intensities)
+>
+> # Sort by wavelength
+> sort_idx = np.argsort(wavelengths)
+> wavelengths = wavelengths[sort_idx]
+> intensities = intensities[sort_idx]
+>
+> # Convert wavelength (nm) to wavenumber (cm-1)
+> wavenumbers = 1e7 / wavelengths
+> # Reverse so wavenumbers are in increasing order
+> wavenumbers = wavenumbers[::-1]
+> intensities = intensities[::-1]
+>
+> print(f"Wavenumber range: {wavenumbers.min():.2f} to {wavenumbers.max():.2f} cm-1")
+> print(f"Number of points: {len(wavenumbers)}")
+>
+> # Lorentzian function
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> def fit_peak(wavenumbers, intensities, center_guess, window=150, name=""):
+>     mask = (wavenumbers > center_guess - window) & (wavenumbers < center_guess + window)
+>     x_region = wavenumbers[mask]
+>     y_region = intensities[mask]
+>
+>     if len(x_region) == 0:
+>         print(f"No data in region {center_guess-window} to {center_guess+window}")
+>         return None
+>
+>     print(f"\nFitting {name} peak:")
+>     print(f"  Region: {x_region.min():.1f} to {x_region.max():.1f}, {len(x_region)} points")
+>
+>     # Use smoothed data to find better initial guess
+>     smoothed = uniform_filter1d(y_region, size=min(20, len(y_region)//3))
+>     idx_max = np.argmax(smoothed)
+>     x0_guess = x_region[idx_max]
+>     amp_guess = smoothed.max() - smoothed.min()
+>     offset_guess = smoothed.min()
+>     gamma_guess = 15.0
+>
+>     print(f"  Initial guesses: x0={x0_guess:.1f}, gamma={gamma_guess}, amp={amp_guess:.1f}, offset={offset_guess:.1f}")
+>
+>     try:
+>         popt, pcov = curve_fit(
+>             lorentzian, x_region, y_region,
+>             p0=[x0_guess, gamma_guess, amp_guess, offset_guess],
+>             maxfev=100000,
+>             bounds=([center_guess-window, 0.1, 0, -np.inf],
+>                     [center_guess+window, 200, np.inf, np.inf])
+>         )
+>         print(f"  Fit results: x0={popt[0]:.4f}, gamma={popt[1]:.4f}, amplitude={popt[2]:.4f}, offset={popt[3]:.4f}")
+>
+>         # Calculate R-squared
+>         y_fit = lorentzian(x_region, *popt)
+>         ss_res = np.sum((y_region - y_fit)**2)
+>         ss_tot = np.sum((y_region - np.mean(y_region))**2)
+>         r_squared = 1 - ss_res/ss_tot
+>         print(f"  R-squared: {r_squared:.6f}")
+>
+>         return {
+>             'x0': float(popt[0]),
+>             'gamma': float(abs(popt[1])),
+>             'amplitude': float(popt[2]),
+>             'offset': float(popt[3])
+>         }
+>     except Exception as e:
+>         print(f"  Fit failed: {e}")
+>         return None
+>
+> # Fit G peak (~1580 cm-1, found at ~1548)
+> g_result = fit_peak(wavenumbers, intensities, 1548, window=150, name="G")
+>
+> # Fit 2D peak (~2700 cm-1, found at ~2670)
+> td_result = fit_peak(wavenumbers, intensities, 2670, window=200, name="2D")
+>
+> if g_result and td_result:
+>     results = {
+>         "G": {
+>             "x0": round(g_result['x0'], 6),
+>             "gamma": round(g_result['gamma'], 6),
+>             "amplitude": round(g_result['amplitude'], 6),
+>             "offset": round(g_result['offset'], 6)
+>         },
+>         "2D": {
+>             "x0": round(td_result['x0'], 6),
+>             "gamma": round(td_result['gamma'], 6),
+>             "amplitude": round(td_result['amplitude'], 6),
+>             "offset": round(td_result['offset'], 6)
+>         }
+>     }
+>
+>     with open('/app/results.json', 'w') as f:
+>         json.dump(results, f, indent=2)
+>
+>     print("\nResults written to /app/results.json")
+>     print(json.dumps(results, indent=2))
+> else:
+>     print("Fitting failed!")
+> PYEOF
+root@modal:/app#

@@ -1,0 +1,88 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> # Let me verify the forward pass with the correct token IDs using Python
+> import struct, math
+>
+> V,C,E,L,H,D = 50257, 1024, 768, 12, 12, 64
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+> W = struct.unpack(f'<{len(data)//4}f', data)
+>
+> # Grouped format offsets
+> o = 0
+> O = []
+> O.append(o); o+=V*E      # 0: wte
+> O.append(o); o+=C*E      # 1: wpe
+> O.append(o); o+=L*E      # 2: ln1w
+> O.append(o); o+=L*E      # 3: ln1b
+> O.append(o); o+=L*3*E*E  # 4: qkvw
+> O.append(o); o+=L*3*E    # 5: qkvb
+> O.append(o); o+=L*E*E    # 6: attpw
+> O.append(o); o+=L*E      # 7: attpb
+> O.append(o); o+=L*E      # 8: ln2w
+> O.append(o); o+=L*E      # 9: ln2b
+> O.append(o); o+=L*4*E*E  # 10: fcw
+> O.append(o); o+=L*4*E    # 11: fcb
+> O.append(o); o+=L*4*E*E  # 12: fcpw
+> O.append(o); o+=L*E      # 13: fcpb
+> O.append(o); o+=E        # 14: lnfw
+> O.append(o); o+=E        # 15: lnfb
+>
+> def layernorm(x, goff, boff):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     return [(x[i]-m)*s*W[goff+i] + W[boff+i] for i in range(n)]
+>
+> def matmul(x, woff, rows, cols):
+>     out = [0.0]*cols
+>     for j in range(cols):
+>         s = 0.0
+>         for i in range(rows):
+>             s += x[i] * W[woff + i*cols + j]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> # Single token forward pass for token 464 at position 0
+> # Just through layer 0
+> tk = 464
+> pos = 0
+>
+> # Embedding
+> x = [W[O[0]+tk*E+i]+W[O[1]+pos*E+i] for i in range(E)]
+> print(f'Embed first 5: {[f"{v:.6f}" for v in x[:5]]}')
+>
+> # LN1 layer 0
+> xn = layernorm(x, O[2], O[3])
+> print(f'LN1 first 5: {[f"{v:.6f}" for v in xn[:5]]}')
+>
+> # QKV
+> qkv = matmul(xn, O[4], E, 3*E)
+> for i in range(3*E):
+>     qkv[i] += W[O[5]+i]
+> print(f'QKV first 5: {[f"{v:.6f}" for v in qkv[:5]]}')
+>
+> # For a single token at position 0, attention is trivial (just self-attend)
+> # Q = qkv[:E], K = qkv[E:2E], V = qkv[2E:3E]
+> # For each head, attn = softmax(Q.K^T / sqrt(D)) = softmax(score) where score is a scalar
+> # Since pos=0, the attention is just [1.0] for each head
+> # So output = V
+> tmp = list(qkv[2*E:3*E])  # attention output = V (since single token)
+> print(f'Attn out first 5: {[f"{v:.6f}" for v in tmp[:5]]}')
+>
+> # Attn proj
+> xn2 = matmul(tmp, O[6], E, E)
+> for i in range(E):
+>     x[i] += xn2[i] + W[O[7]+i]
+> print(f'After attn+res first 5: {[f"{v:.6f}" for v in x[:5]]}')
+>
+> print('Done layer 0 partial')
+> PYEOF
+

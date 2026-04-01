@@ -1,0 +1,86 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'VERIFY_EOF'
+> import pandas as pd
+> import numpy as np
+> from PIL import Image
+> import cv2
+>
+> # Check original CSV format
+> df_orig = pd.read_csv('/app/demo_metadata.csv')
+> print('=== Original CSV ===')
+> print('Columns:', df_orig.columns.tolist())
+> print('Shape:', df_orig.shape)
+> print('Types:', df_orig['type'].value_counts().to_dict())
+> print('First row coords_x:', df_orig.iloc[0]['coords_x'])
+> print()
+>
+> # Run the script
+> import subprocess
+> result = subprocess.run([
+>     'python3', '/app/convert_masks.py',
+>     '/tmp/MobileSAM/weights/mobile_sam.pt',
+>     '/tmp/test_output.csv',
+>     '/app/demo_rgb.png',
+>     '/app/demo_metadata.csv'
+> ], capture_output=True, text=True)
+> print('STDOUT:', result.stdout)
+> if result.returncode != 0:
+>     print('STDERR:', result.stderr)
+>     exit(1)
+>
+> # Verify output
+> df_out = pd.read_csv('/tmp/test_output.csv')
+> print('=== Output CSV ===')
+> print('Columns:', df_out.columns.tolist())
+> print('Shape:', df_out.shape)
+> print('Types:', df_out['type'].value_counts().to_dict())
+> print('First row coords_x:', str(df_out.iloc[0]['coords_x'])[:100])
+> print()
+>
+> # Check columns match
+> assert df_orig.columns.tolist() == df_out.columns.tolist(), 'Columns mismatch!'
+> assert len(df_orig) == len(df_out), 'Row count mismatch!'
+> assert (df_out['type'] == 'polyline').all(), 'Not all polyline!'
+>
+> # Check no overlaps
+> image = np.array(Image.open('/app/demo_rgb.png').convert('RGB'))
+> h, w = image.shape[:2]
+> mask_sum = np.zeros((h, w), dtype=np.int32)
+> for idx, row in df_out.iterrows():
+>     coords_x = list(map(int, str(row['coords_x']).split(',')))
+>     coords_y = list(map(int, str(row['coords_y']).split(',')))
+>     pts = np.array(list(zip(coords_x, coords_y)), dtype=np.int32)
+>     mask = np.zeros((h, w), dtype=np.uint8)
+>     cv2.fillPoly(mask, [pts], 1)
+>     mask_sum += mask
+>
+> overlap = np.sum(mask_sum > 1)
+> print(f'Overlap pixels: {overlap}')
+> assert overlap == 0, f'Found {overlap} overlap pixels!'
+>
+> # Check each mask has > 4 unique points (not rectangular)
+> for idx, row in df_out.iterrows():
+>     coords_x = list(map(int, str(row['coords_x']).split(',')))
+>     coords_y = list(map(int, str(row['coords_y']).split(',')))
+>     unique_pts = set(zip(coords_x, coords_y))
+>     if len(unique_pts) <= 4:
+>         print(f'WARNING: Row {idx} has only {len(unique_pts)} unique points')
+>
+> # Check non-modified columns are preserved
+> for col in ['raw_classification', 'main_classification', 'super_classification']:
+>     assert (df_orig[col] == df_out[col]).all(), f'Column {col} was modified!'
+>
+> print('\n=== ALL CHECKS PASSED ===')
+>
+> # Cleanup
+> import os
+> os.remove('/tmp/test_output.csv')
+> VERIFY_EOF
+=== Original CSV ===
+Columns: ['Unnamed: 0', 'raw_classification', 'main_classification', 'super_classification', 'type', 'xmin', 'ymin', 'xmax', 'ymax', 'coords_x', 'coords_y']
+Shape: (48, 11)
+Types: {'polyline': 29, 'rectangle': 19}
+First row coords_x: 43,139,139,43,43
+
+

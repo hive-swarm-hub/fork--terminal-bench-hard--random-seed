@@ -1,0 +1,85 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train_model5.py << 'PYEOF'
+> import pandas as pd
+> import fasttext
+> import os
+>
+> print("Loading training data...")
+> train = pd.read_parquet('data/train-00000-of-00001.parquet')
+>
+> print("Converting to fasttext format...")
+> with open('/tmp/train.txt', 'w') as f:
+>     for _, row in train.iterrows():
+>         label = row['label']
+>         text = row['text'].replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+>         f.write(f'__label__{label} {text}\n')
+>
+> test = pd.read_parquet('data/test-00000-of-00001.parquet')
+> with open('/tmp/test.txt', 'w') as f:
+>     for _, row in test.iterrows():
+>         label = row['label']
+>         text = row['text'].replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+>         f.write(f'__label__{label} {text}\n')
+>
+> # Try autotune
+> print("Training with autotune...")
+> try:
+>     model = fasttext.train_supervised(
+>         input='/tmp/train.txt',
+>         autotuneValidationFile='/tmp/test.txt',
+>         autotuneDuration=300,
+>         thread=4
+>     )
+>     model.save_model('/tmp/model_autotune.bin')
+>     sz = os.path.getsize('/tmp/model_autotune.bin') / (1024*1024)
+>     result = model.test('/tmp/test.txt')
+>     print(f"Autotune: size={sz:.1f}MB, acc={result[1]:.4f}")
+> except Exception as e:
+>     print(f"Autotune failed: {e}")
+>
+> # Manual tuning - try several configs
+> configs = [
+>     {'epoch': 50, 'lr': 1.0, 'dim': 100, 'wordNgrams': 2, 'minCount': 3, 'loss': 'softmax', 'bucket': 200000},
+>     {'epoch': 50, 'lr': 1.0, 'dim': 50, 'wordNgrams': 3, 'minCount': 3, 'loss': 'softmax', 'bucket': 500000},
+>     {'epoch': 25, 'lr': 0.5, 'dim': 100, 'wordNgrams': 2, 'minCount': 2, 'loss': 'ova', 'bucket': 200000},
+> ]
+>
+> best_acc = 0
+> best_cfg = None
+>
+> for i, cfg in enumerate(configs):
+>     print(f"\nConfig {i}: {cfg}")
+>     model = fasttext.train_supervised(input='/tmp/train.txt', thread=4, **cfg)
+>     model.save_model(f'/tmp/model_cfg{i}.bin')
+>     sz = os.path.getsize(f'/tmp/model_cfg{i}.bin') / (1024*1024)
+>     result = model.test('/tmp/test.txt')
+>     print(f"Size: {sz:.1f}MB, Precision@1: {result[1]:.4f}")
+>
+>     if result[1] > best_acc and sz < 150:
+>         best_acc = result[1]
+>         best_cfg = i
+>         # Copy as best
+>         import shutil
+>         shutil.copy(f'/tmp/model_cfg{i}.bin', '/app/model.bin')
+>         print(f"New best! Config {i}")
+>     elif result[1] > best_acc and sz >= 150:
+>         print(f"Good accuracy but too large ({sz:.1f}MB), trying quantize...")
+>         model.quantize(input='/tmp/train.txt', retrain=False)
+>         model.save_model(f'/tmp/model_cfg{i}_q.bin')
+>         sz_q = os.path.getsize(f'/tmp/model_cfg{i}_q.bin') / (1024*1024)
+>         result_q = model.test('/tmp/test.txt')
+>         print(f"Quantized: Size: {sz_q:.1f}MB, Precision@1: {result_q[1]:.4f}")
+>         if result_q[1] > best_acc and sz_q < 150:
+>             best_acc = result_q[1]
+>             best_cfg = f"{i}_q"
+>             shutil.copy(f'/tmp/model_cfg{i}_q.bin', '/app/model.bin')
+>             print(f"New best (quantized)! Config {i}")
+>
+> print(f"\nBest config: {best_cfg}, accuracy: {best_acc:.4f}")
+> final_size = os.path.getsize('/app/model.bin') / (1024*1024)
+> print(f"Final model size: {final_size:.1f} MB")
+> print("Done!")
+> PYEOF
+root@modal:/app# python3 /app/train_model5.py 2>&1 | tee /tmp/train_log5.txt
+

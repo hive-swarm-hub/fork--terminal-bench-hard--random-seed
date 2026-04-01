@@ -1,0 +1,111 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct
+> import os
+>
+> # Read original database header
+> with open('main.db', 'rb') as f:
+>     header = f.read(100)
+>
+> # The key fields for WAL:
+> # Offset 92-95: version-valid-for number (should match change counter)
+> # Offset 96-99: SQLite version number
+> version_valid = struct.unpack('>I', header[92:96])[0]
+> sqlite_version = struct.unpack('>I', header[96:100])[0]
+> change_counter = struct.unpack('>I', header[24:28])[0]
+>
+> print(f'Change counter: {change_counter}')
+> print(f'Version valid for: {version_valid}')
+> print(f'SQLite version: {sqlite_version}')
+>
+> # In WAL mode, the change counter and version-valid-for fields
+> # in the database file are NOT updated (they remain at their pre-WAL values)
+> # The WAL file has its own salt values
+>
+> # The issue is that SQLite checks the WAL header checksum
+> # Let me verify my checksum implementation is correct
+>
+> # Let me create a proper test: make a database with WAL, and compare
+> db_path = '/tmp/test_wal_check.db'
+> for f_name in [db_path, f'{db_path}-wal', f'{db_path}-shm']:
+>     if os.path.exists(f_name):
+>         os.remove(f_name)
+>
+> import sqlite3
+> conn = sqlite3.connect(db_path)
+> cursor = conn.cursor()
+> cursor.execute('PRAGMA journal_mode=WAL')
+> cursor.execute('''CREATE TABLE items (
+>     id INTEGER PRIMARY KEY,
+>     name TEXT,
+>     value INTEGER
+> )''')
+> for r in [(1, 'apple', 100), (2, 'banana', 200)]:
+>     cursor.execute('INSERT INTO items VALUES (?, ?, ?)', r)
+> conn.commit()
+>
+> # Keep connection open to preserve WAL
+> # Read the WAL file
+> wal_path = f'{db_path}-wal'
+> with open(wal_path, 'rb') as f:
+>     wal = f.read()
+>
+> print(f'\nTest WAL file size: {len(wal)}')
+> print(f'Test WAL header: {wal[:32].hex()}')
+>
+> # Parse WAL header
+> magic = struct.unpack('>I', wal[0:4])[0]
+> fmt_ver = struct.unpack('>I', wal[4:8])[0]
+> pg_size = struct.unpack('>I', wal[8:12])[0]
+> ckpt_seq = struct.unpack('>I', wal[12:16])[0]
+> salt1 = struct.unpack('>I', wal[16:20])[0]
+> salt2 = struct.unpack('>I', wal[20:24])[0]
+> ck1 = struct.unpack('>I', wal[24:28])[0]
+> ck2 = struct.unpack('>I', wal[28:32])[0]
+>
+> print(f'Magic: 0x{magic:08x}')
+> print(f'Format version: {fmt_ver}')
+> print(f'Page size: {pg_size}')
+> print(f'Checkpoint seq: {ckpt_seq}')
+> print(f'Salt1: {salt1} (0x{salt1:08x})')
+> print(f'Salt2: {salt2} (0x{salt2:08x})')
+> print(f'Checksum: {ck1}, {ck2}')
+>
+> # Verify checksum
+> def wal_checksum(data, s0=0, s1=0, big_endian=True):
+>     assert len(data) % 8 == 0
+>     fmt = '>II' if big_endian else '<II'
+>     for i in range(0, len(data), 8):
+>         d0, d1 = struct.unpack(fmt, data[i:i+8])
+>         s0 = (s0 + d0 + s1) & 0xFFFFFFFF
+>         s1 = (s1 + d1 + s0) & 0xFFFFFFFF
+>     return s0, s1
+>
+> # For big-endian magic (0x377f0682), use big-endian checksum
+> is_big_endian = (magic == 0x377f0682)
+> computed_ck1, computed_ck2 = wal_checksum(wal[:24], big_endian=is_big_endian)
+> print(f'\nComputed checksum: {computed_ck1}, {computed_ck2}')
+> print(f'Stored checksum: {ck1}, {ck2}')
+> print(f'Match: {computed_ck1 == ck1 and computed_ck2 == ck2}')
+>
+> conn.close()
+> PYEOF
+Change counter: 3
+Version valid for: 3
+SQLite version: 3043002
+
+Test WAL file size: 12392
+Test WAL header: 377f0682002de218000010000000000069ebfe1318a64303e8e5ee7ca4116c39
+Magic: 0x377f0682
+Format version: 3007000
+Page size: 4096
+Checkpoint seq: 0
+Salt1: 1777073683 (0x69ebfe13)
+Salt2: 413549315 (0x18a64303)
+Checksum: 3907382908, 2752605241
+
+Computed checksum: 2146493669, 1064308638
+Stored checksum: 3907382908, 2752605241
+Match: False
+root@modal:/app#

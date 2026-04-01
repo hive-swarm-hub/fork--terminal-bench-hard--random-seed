@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Read first frame as background (guaranteed no runner)
+>     ret, bg = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_blur = cv2.GaussianBlur(bg, (21, 21), 0)
+>     bg_gray = cv2.cvtColor(bg_blur, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>     kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51))
+>
+>     # Track the runner across frames
+>     frame_data = {}  # frame_num -> data dict
+>
+>     for i in range(1, total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_blur = cv2.GaussianBlur(frame, (21, 21), 0)
+>         gray = cv2.cvtColor(frame_blur, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray - bg_gray)
+>         mask = (diff > 20).astype(np.uint8) * 255
+>
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+>
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Find the contour that most likely represents the runner
+>         # Runner should be a compact, tall blob
+>         runner_contour = None
+>         runner_area = 0
+>         for c in contours:
+>             area = cv2.contourArea(c)
+>             x, y, w, h = cv2.boundingRect(c)
+>             # Runner should be a compact blob, not spanning entire frame width
+>             if area > 500 and w < 400 and h > 30:
+>                 if area > runner_area:
+>                     runner_area = area
+>                     runner_contour = c
+>
+>         if runner_contour is not None:
+>             x, y, w, h = cv2.boundingRect(runner_contour)
+>             frame_data[i] = {
+>                 'frame': i,
+>                 'top_y': int(y),
+>                 'bottom_y': int(y + h),
+>                 'left_x': int(x),
+>                 'right_x': int(x + w),
+>                 'area': float(runner_area),
+>                 'width': int(w),
+>                 'height': int(h)
+>             }
+>
+>     cap.release()
+>
+>     if not frame_data:
+>         raise ValueError("No runner detected in video")
+>
+>     # Find the longest continuous sequence of detected frames
+>     # Allow small gaps (up to 2 frames) in detection
+>     detected_frames = sorted(frame_data.keys())
+>
+>     # Group into continuous sequences (allowing gap of up to 3 frames)
+>     sequences = []
+>     current_seq = [detected_frames[0]]
+>     for i in range(1, len(detected_frames)):
+>         if detected_frames[i] - detected_frames[i - 1] <= 3:
+>             current_seq.append(detected_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [detected_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # Find the sequence with the most frames - this is the runner
+>     best_seq = max(sequences, key=lambda s: len(s))
+>
+>     # Filter frame_data to only include the best sequence
+>     runner_frames = [frame_data[f] for f in best_seq if f in frame_data]
+>
+>     # Further filter to frames with substantial area
+>     areas = [d['area'] for d in runner_frames]
+>     max_area = max(areas)
+>     runner_frames = [d for d in runner_frames if d['area'] > max_area * 0.3]
+>
+>     if len(runner_frames) < 5:
+>         raise ValueError("Not enough runner frames detected")
+>
+>     # Get bottom_y values (feet position - higher value = lower on screen = on ground)
+>     bottom_ys = [d['bottom_y'] for d in runner_frames]
+>
+>     # The running baseline is the typical bottom_y when on the ground
+>     # Use the median of the highest bottom_y values
+>     sorted_bottoms = sorted(bottom_ys, reverse=True)
+>     n_baseline = max(3, len(sorted_bottoms) // 3)
+>     baseline_bottom = float(np.median(sorted_bottoms[:n_baseline]))
+>
+>     # Find the frame with minimum bottom_y (peak of jump - feet highest off ground)
+>     min_bottom_idx = int(np.argmin(bottom_ys))
+>     min_bottom_y = bottom_ys[min_bottom_idx]
+>
+>     # The jump height in pixels
+>     jump_height = baseline_bottom - min_bottom_y
+>     if jump_height < 20:
+>         raise ValueError("No significant jump detected")
+>
+>     # Threshold: 30% of the way from baseline toward peak
+>     # When bottom_y drops below this, the runner is considered airborne
+>     threshold = baseline_bottom - jump_height * 0.3
+>
+>     # Find takeoff: scan backwards from peak to find last frame at/above threshold
+>     takeoff_frame = runner_frames[0]['frame']
+>     for idx in range(min_bottom_idx, -1, -1):
+>         if runner_frames[idx]['bottom_y'] >= threshold:
+>             takeoff_frame = runner_frames[idx]['frame']
+>             break
+>
+>     # Find landing: scan forward from peak to find first frame at/above threshold
+>     land_frame = runner_frames[-1]['frame']
+>     for idx in range(min_bottom_idx, len(runner_frames)):
+>         if runner_frames[idx]['bottom_y'] >= threshold:
+>             land_frame = runner_frames[idx]['frame']
+>             break
+>
+>     return int(takeoff_frame), int(land_frame)
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

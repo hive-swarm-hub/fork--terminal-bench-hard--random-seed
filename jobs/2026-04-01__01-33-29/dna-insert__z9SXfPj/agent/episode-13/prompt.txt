@@ -1,0 +1,196 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/verify_final.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('/app/primers.fasta')
+> fwd = primers['forward_primer'].upper()
+> rev = primers['reverse_primer'].upper()
+>
+> print("=== PRIMER VERIFICATION ===")
+> print(f"Forward primer: {fwd} ({len(fwd)}bp)")
+> print(f"Reverse primer: {rev} ({len(rev)}bp)")
+>
+> # Identify the insertion
+> print("\n=== MUTATION ANALYSIS ===")
+> # The insertion is 39bp at position 215
+> insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+> print(f"Insertion: {insertion} ({len(insertion)}bp)")
+> print(f"Insertion point: position 215 in input")
+>
+> # Check forward primer structure
+> print("\n=== FORWARD PRIMER ===")
+> # The 5' tail should be the insertion sequence
+> fwd_tail = fwd[:39]
+> fwd_anneal = fwd[39:]
+> print(f"5' tail (insertion): {fwd_tail} ({len(fwd_tail)}bp)")
+> print(f"Annealing region: {fwd_anneal} ({len(fwd_anneal)}bp)")
+>
+> # Verify the tail matches the insertion
+> assert fwd_tail == insertion, f"Tail mismatch! {fwd_tail} != {insertion}"
+> print("  ✓ Tail matches insertion sequence")
+>
+> # Verify the annealing region matches input at position 215
+> assert fwd_anneal == input_seq[215:215+len(fwd_anneal)], "Fwd annealing mismatch!"
+> print(f"  ✓ Annealing matches input[215:{215+len(fwd_anneal)}]")
+>
+> # Check annealing length
+> assert 15 <= len(fwd_anneal) <= 45, f"Fwd annealing length {len(fwd_anneal)} out of range!"
+> print(f"  ✓ Annealing length {len(fwd_anneal)} in [15,45]")
+>
+> # Check Tm
+> fwd_tm = get_tm(fwd_anneal)
+> print(f"  Tm of annealing region: {fwd_tm}°C")
+> assert 58 <= fwd_tm <= 72, f"Fwd Tm {fwd_tm} out of range!"
+> print(f"  ✓ Tm {fwd_tm} in [58,72]")
+>
+> # Check reverse primer structure
+> print("\n=== REVERSE PRIMER ===")
+> # For Q5 SDM, the reverse primer anneals entirely to the input template
+> # It's the reverse complement of a region ending at position 215 (upstream)
+> rev_anneal = rev  # entire reverse primer anneals
+> rev_rc = reverse_complement(rev)
+> print(f"Reverse primer: {rev} ({len(rev)}bp)")
+> print(f"RC of reverse: {rev_rc}")
+>
+> # Find where the RC matches in the input
+> if rev_rc in input_seq:
+>     pos = input_seq.index(rev_rc)
+>     print(f"  RC found in input at position {pos}-{pos+len(rev_rc)}")
+>     assert pos + len(rev_rc) == 215, f"Rev primer doesn't end at insertion point! Ends at {pos+len(rev_rc)}"
+>     print(f"  ✓ Reverse primer anneals just upstream of insertion point")
+> else:
+>     # Check circular
+>     doubled = input_seq + input_seq
+>     if rev_rc in doubled:
+>         pos = doubled.index(rev_rc)
+>         print(f"  RC found in doubled input at position {pos}")
+>     else:
+>         print("  ERROR: RC not found in input!")
+>
+> # Check annealing length
+> assert 15 <= len(rev_anneal) <= 45, f"Rev annealing length {len(rev_anneal)} out of range!"
+> print(f"  ✓ Annealing length {len(rev_anneal)} in [15,45]")
+>
+> # Check Tm
+> rev_tm = get_tm(rev_anneal)
+> print(f"  Tm of annealing region: {rev_tm}°C")
+> assert 58 <= rev_tm <= 72, f"Rev Tm {rev_tm} out of range!"
+> print(f"  ✓ Tm {rev_tm} in [58,72]")
+>
+> # Check Tm difference
+> print(f"\n=== TM DIFFERENCE ===")
+> tm_diff = abs(fwd_tm - rev_tm)
+> print(f"  |{fwd_tm} - {rev_tm}| = {tm_diff}°C")
+> assert tm_diff <= 5.0, f"Tm difference {tm_diff} > 5!"
+> print(f"  ✓ Tm difference {tm_diff} ≤ 5°C")
+>
+> # Simulate Q5 SDM product
+> print("\n=== PRODUCT VERIFICATION ===")
+> # Q5 SDM: PCR amplifies the whole plasmid with primers back-to-back
+> # Forward primer anneals at 215, extends through the plasmid clockwise
+> # Reverse primer anneals at 170-215, extends counter-clockwise
+> # Product after KLD: circular plasmid = input[0:215] + insertion + input[215:]
+> product = input_seq[0:215] + insertion + input_seq[215:]
+> print(f"Product length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> assert len(product) == len(output_seq), "Length mismatch!"
+> assert product == output_seq, "Sequence mismatch!"
+> print("  ✓ Product matches output plasmid exactly!")
+>
+> # Check minimum primer pairs
+> print("\n=== MINIMUM PAIRS CHECK ===")
+> print("  Single insertion mutation → 1 primer pair is sufficient")
+> print("  ✓ Minimum number of primer pairs: 1")
+>
+> # Check FASTA format
+> print("\n=== FASTA FORMAT CHECK ===")
+> with open('/app/primers.fasta') as f:
+>     content = f.read()
+> lines = content.strip().split('\n')
+> assert lines[0].startswith('>'), "First line should be header"
+> assert 'forward' in lines[0].lower() or 'fwd' in lines[0].lower(), "First primer should be forward"
+> print(f"  ✓ Forward primer listed first")
+> print(f"  ✓ FASTA format correct")
+>
+> print("\n=== ALL CHECKS PASSED ===")
+> PYEOF
+root@modal:/app# python3 /tmp/verify_final.py
+=== PRIMER VERIFICATION ===
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT (57bp)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45bp)
+
+=== MUTATION ANALYSIS ===
+Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39bp)
+Insertion point: position 215 in input
+
+=== FORWARD PRIMER ===
+5' tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39bp)
+Annealing region: CAAGGGCGAGGAGCTGTT (18bp)
+  ✓ Tail matches insertion sequence
+  ✓ Annealing matches input[215:233]
+  ✓ Annealing length 18 in [15,45]
+  Tm of annealing region: 63.809573°C
+  ✓ Tm 63.809573 in [58,72]
+
+=== REVERSE PRIMER ===
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45bp)
+RC of reverse: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+  RC found in input at position 170-215
+  ✓ Reverse primer anneals just upstream of insertion point
+  ✓ Annealing length 45 in [15,45]
+  Tm of annealing region: 63.806617°C
+  ✓ Tm 63.806617 in [58,72]
+
+=== TM DIFFERENCE ===
+  |63.809573 - 63.806617| = 0.002955999999997516°C
+  ✓ Tm difference 0.002955999999997516 ≤ 5°C
+
+=== PRODUCT VERIFICATION ===
+Product length: 3630
+Output length: 3630
+  ✓ Product matches output plasmid exactly!
+
+=== MINIMUM PAIRS CHECK ===
+  Single insertion mutation → 1 primer pair is sufficient
+  ✓ Minimum number of primer pairs: 1
+
+=== FASTA FORMAT CHECK ===
+  ✓ Forward primer listed first
+  ✓ FASTA format correct
+
+=== ALL CHECKS PASSED ===
+root@modal:/app#

@@ -1,0 +1,108 @@
+New Terminal Output:
+79__
+root@modal:/app# cat > /tmp/compute_final2.py << 'ENDSCRIPT'
+> import mteb
+> import os
+> import json
+> from collections import defaultdict
+>
+> # Get benchmark task info
+> bench = mteb.get_benchmark('MTEB(Scandinavian, v1)')
+>
+> task_configs = []
+> for t in bench.tasks:
+>     name = t.metadata.name
+>     main_score = t.metadata.main_score
+>     eval_langs = t.metadata.eval_langs
+>     eval_splits = t.metadata.eval_splits
+>
+>     if isinstance(eval_langs, dict):
+>         subsets = list(eval_langs.keys())
+>     else:
+>         subsets = None  # single subset, use default/first
+>
+>     task_configs.append({
+>         'name': name,
+>         'main_score': main_score,
+>         'subsets': subsets,
+>         'splits': eval_splits,
+>         'multi_subset': isinstance(eval_langs, dict)
+>     })
+>
+> results_base = '/root/.cache/mteb/results/results'
+> model_dirs = [d for d in os.listdir(results_base) if os.path.isdir(os.path.join(results_base, d))]
+>
+> model_scores = {}
+> for model_dir in model_dirs:
+>     model_path = os.path.join(results_base, model_dir)
+>     subdirs = [d for d in os.listdir(model_path) if os.path.isdir(os.path.join(model_path, d))]
+>     if not subdirs:
+>         continue
+>     hash_dir = os.path.join(model_path, subdirs[0])
+>
+>     task_means = {}
+>
+>     for tc in task_configs:
+>         json_file = os.path.join(hash_dir, f'{tc["name"]}.json')
+>         if not os.path.exists(json_file):
+>             continue
+>
+>         try:
+>             with open(json_file) as f:
+>                 data = json.load(f)
+>             scores = data.get('scores', {})
+>
+>             # Collect scores across all eval_splits
+>             split_scores = []
+>             for split in tc['splits']:
+>                 if split not in scores:
+>                     continue
+>                 split_data = scores[split]
+>
+>                 if tc['multi_subset']:
+>                     # Average across required subsets within this split
+>                     subset_scores = []
+>                     for entry in split_data:
+>                         subset = entry.get('hf_subset', '')
+>                         if subset in tc['subsets']:
+>                             ms = entry.get('main_score')
+>                             if ms is not None:
+>                                 subset_scores.append(ms)
+>                     if len(subset_scores) == len(tc['subsets']):
+>                         split_scores.append(sum(subset_scores) / len(subset_scores))
+>                 else:
+>                     # Single subset
+>                     if split_data and len(split_data) > 0:
+>                         ms = split_data[0].get('main_score')
+>                         if ms is not None:
+>                             split_scores.append(ms)
+>
+>             # Average across splits
+>             if len(split_scores) == len(tc['splits']):
+>                 task_means[tc['name']] = sum(split_scores) / len(split_scores)
+>         except Exception as e:
+>             pass
+>
+>     if len(task_means) == len(task_configs):
+>         model_name = model_dir.replace('__', '/')
+>         mean_task = sum(task_means.values()) / len(task_means)
+>         model_scores[model_name] = {
+>             'mean': mean_task,
+>             'tasks': task_means
+>         }
+>
+> # Sort by mean score
+> sorted_models = sorted(model_scores.items(), key=lambda x: -x[1]['mean'])
+>
+> print(f'Models with all {len(task_configs)} Scandinavian tasks: {len(model_scores)}')
+> print(f'\n=== Top 20 models by Mean (Task) ===')
+> for i, (name, info) in enumerate(sorted_models[:20]):
+>     print(f'{i+1}. {name}: {info["mean"]:.6f}')
+>
+> if sorted_models:
+>     print(f'\n=== BEST MODEL ===')
+>     print(f'{sorted_models[0][0]}')
+>     print(f'Mean (Task): {sorted_models[0][1]["mean"]:.6f}')
+> ENDSCRIPT
+root@modal:/app# python3 /tmp/compute_final2.py 2>&1
+

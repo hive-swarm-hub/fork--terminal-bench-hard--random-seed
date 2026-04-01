@@ -1,0 +1,291 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define L 12
+> #define H 12
+> #define D 64
+> float *W;
+> int off[16];
+> char *tok[V];
+> int ntok;
+>
+> void init_off(){
+>     int o=0,i=0;
+>     off[i++]=o; o+=V*E;   // wte
+>     off[i++]=o; o+=C*E;   // wpe
+>     off[i++]=o; o+=L*E;   // ln1w
+>     off[i++]=o; o+=L*E;   // ln1b
+>     off[i++]=o; o+=L*3*E*E; // qkvw
+>     off[i++]=o; o+=L*3*E;   // qkvb
+>     off[i++]=o; o+=L*E*E;   // attpw
+>     off[i++]=o; o+=L*E;     // attpb
+>     off[i++]=o; o+=L*E;     // ln2w
+>     off[i++]=o; o+=L*E;     // ln2b
+>     off[i++]=o; o+=L*4*E*E; // fcw
+>     off[i++]=o; o+=L*4*E;   // fcb
+>     off[i++]=o; o+=L*4*E*E; // fcpw
+>     off[i++]=o; o+=L*E;     // fcpb
+>     off[i++]=o; o+=E;       // lnfw
+>     off[i++]=o; o+=E;       // lnfb
+> }
+>
+> void ln(float *o, float *x, int goff, int boff){
+>     float m=0,v=0;
+>     for(int i=0;i<E;i++) m+=x[i];
+>     m/=E;
+>     for(int i=0;i<E;i++) v+=(x[i]-m)*(x[i]-m);
+>     v=1.0f/sqrtf(v/E+1e-5f);
+>     for(int i=0;i<E;i++) o[i]=(x[i]-m)*v*W[goff+i]+W[boff+i];
+> }
+>
+> void matmul(float *o, float *x, int woff, int r, int c){
+>     for(int j=0;j<c;j++){
+>         float s=0;
+>         for(int i=0;i<r;i++) s+=x[i]*W[woff+i*c+j];
+>         o[j]=s;
+>     }
+> }
+>
+> float gelu(float x){
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> float *att_cache; // [L][C][E] - KV cache
+>
+> void forward(int token, int pos, float *out){
+>     float x[E], xn[E], qkv[3*E], q[E], att[C], fc1[4*E], fc2[E], tmp[E];
+>     // embedding
+>     for(int i=0;i<E;i++) x[i]=W[off[0]+token*E+i]+W[off[1]+pos*E+i];
+>
+>     for(int l=0;l<L;l++){
+>         // ln1
+>         ln(xn, x, off[2]+l*E, off[3]+l*E);
+>         // qkv
+>         matmul(qkv, xn, off[4]+l*3*E*E, E, 3*E);
+>         for(int i=0;i<3*E;i++) qkv[i]+=W[off[5]+l*3*E+i];
+>         // store K,V in cache
+>         float *kc = att_cache + (l*C+pos)*E;
+>         float *vc = att_cache + (L*C*E + l*C*E + pos*E);
+>         for(int i=0;i<E;i++) { kc[i]=qkv[E+i]; vc[i]=qkv[2*E+i]; }
+>         // multi-head attention
+>         for(int i=0;i<E;i++) tmp[i]=0;
+>         for(int h=0;h<H;h++){
+>             // compute attention scores
+>             for(int t=0;t<=pos;t++){
+>                 float *kt = att_cache + (l*C+t)*E + h*D;
+>                 float s=0;
+>                 for(int d=0;d<D;d++) s+=qkv[h*D+d]*kt[d];
+>                 att[t]=s/sqrtf(D);
+>             }
+>             // softmax
+>             float mx=-1e30;
+>             for(int t=0;t<=pos;t++) if(att[t]>mx) mx=att[t];
+>             float sm=0;
+>             for(int t=0;t<=pos;t++){ att[t]=expf(att[t]-mx); sm+=att[t]; }
+>             for(int t=0;t<=pos;t++) att[t]/=sm;
+>             // weighted sum of values
+>             for(int t=0;t<=pos;t++){
+>                 float *vt = att_cache + (L*C*E + l*C*E + t*E) + h*D;
+>                 for(int d=0;d<D;d++) tmp[h*D+d]+=att[t]*vt[d];
+>             }
+>         }
+>         // attn proj
+>         matmul(xn, tmp, off[6]+l*E*E, E, E);
+>         for(int i=0;i<E;i++) x[i]+=xn[i]+W[off[7]+l*E+i];
+>         // ln2
+>         ln(xn, x, off[8]+l*E, off[9]+l*E);
+>         // mlp fc
+>         matmul(fc1, xn, off[10]+l*4*E*E, E, 4*E);
+>         for(int i=0;i<4*E;i++) fc1[i]=gelu(fc1[i]+W[off[11]+l*4*E+i]);
+>         // mlp proj
+>         matmul(fc2, fc1, off[12]+l*4*E*E, 4*E, E);
+>         for(int i=0;i<E;i++) x[i]+=fc2[i]+W[off[13]+l*E+i];
+>     }
+>     // final layer norm
+>     ln(x, x, off[14], off[15]);
+>     // logits = x @ wte^T
+>     for(int i=0;i<V;i++){
+>         float s=0;
+>         for(int j=0;j<E;j++) s+=x[j]*W[off[0]+i*E+j];
+>         out[i]=s;
+>     }
+> }
+>
+> // BPE
+> unsigned char b2u[256]; // byte -> base token id mapping
+>
+> void init_b2u(){
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>             b2u[i]=i; // identity mapped chars have same codepoint
+>         else
+>             b2u[i]=0; // will fill below
+>     }
+>     // Actually need proper mapping: byte->token_id
+>     // Token IDs 0-255 correspond to the 256 unicode chars in order
+>     // The order is: printable ASCII first, then Latin supplement, then remaining bytes
+>     int id=0;
+>     for(int i=33;i<=126;i++) b2u[i]=id++;
+>     for(int i=161;i<=172;i++) b2u[i]=id++;
+>     for(int i=174;i<=255;i++) b2u[i]=id++;
+>     for(int i=0;i<=32;i++) b2u[i]=id++;
+>     b2u[127]=id++;
+>     for(int i=128;i<=160;i++) b2u[i]=id++;
+>     b2u[173]=id++;
+> }
+>
+> int merge_a[50000], merge_b[50000];
+> int nmerge;
+>
+> void load_bpe(const char *fn){
+>     FILE *f=fopen(fn,"r");
+>     char line[1024];
+>     fgets(line,sizeof(line),f); // skip header
+>     // Build token strings for base vocab (single bytes)
+>     // Token strings stored as byte sequences
+>     for(int i=0;i<256;i++){
+>         tok[i]=malloc(2);
+>         // Find which byte maps to token i
+>         for(int b=0;b<256;b++) if(b2u[b]==i){ tok[i][0]=b; tok[i][1]=0; break; }
+>     }
+>     ntok=256;
+>     nmerge=0;
+>     while(fgets(line,sizeof(line),f)){
+>         // Parse merge: two space-separated unicode token strings
+>         // Need to find the two tokens and record their IDs
+>         char *sp=NULL;
+>         int len=strlen(line);
+>         if(line[len-1]=='\n') line[--len]=0;
+>         // Find the space separator (last space that separates two tokens)
+>         // The merge line format is: token1 token2
+>         // We need to find these in our vocabulary
+>         // For simplicity, just build the merged token string
+>         // and find the component token IDs
+>         sp=strrchr(line,' ');
+>         if(!sp) continue;
+>         *sp=0;
+>         char *s1=line, *s2=sp+1;
+>         // Convert unicode strings to byte strings
+>         // Find token IDs for s1 and s2
+>         int id1=-1, id2=-1;
+>         // Build merged byte string
+>         // First decode s1 and s2 from UTF-8 unicode to bytes
+>         // Then concatenate
+>         // For now, store the merged token
+>         char buf1[256], buf2[256];
+>         int l1=0, l2=0;
+>         // Decode UTF-8 to GPT-2 bytes
+>         unsigned char *p=(unsigned char*)s1;
+>         while(*p){
+>             int cp;
+>             if(*p<0x80) cp=*p++;
+>             else if(*p<0xe0){ cp=((*p&0x1f)<<6)|(p[1]&0x3f); p+=2; }
+>             else { cp=((*p&0xf)<<12)|((p[1]&0x3f)<<6)|(p[2]&0x3f); p+=3; }
+>             // Convert codepoint to byte
+>             if(cp>=33&&cp<=126) buf1[l1++]=cp;
+>             else if(cp>=161&&cp<=172) buf1[l1++]=cp;
+>             else if(cp>=174&&cp<=255) buf1[l1++]=cp;
+>             else if(cp>=0x100&&cp<=0x120) buf1[l1++]=cp-0x100;
+>             else if(cp==0x121) buf1[l1++]=127;
+>             else if(cp>=0x122&&cp<=0x143) buf1[l1++]=cp-0x122+128;
+>             // 0x143 -> 173? Let me check: 0x143-0x122=0x21=33, 128+33=161, but 173 is at 0x143
+>             // Actually the mapping: after 127 (0x121), bytes 128-160 map to 0x122-0x142, byte 173 maps to 0x143
+>         }
+>         buf1[l1]=0;
+>         p=(unsigned char*)s2;
+>         while(*p){
+>             int cp;
+>             if(*p<0x80) cp=*p++;
+>             else if(*p<0xe0){ cp=((*p&0x1f)<<6)|(p[1]&0x3f); p+=2; }
+>             else { cp=((*p&0xf)<<12)|((p[1]&0x3f)<<6)|(p[2]&0x3f); p+=3; }
+>             if(cp>=33&&cp<=126) buf2[l2++]=cp;
+>             else if(cp>=161&&cp<=172) buf2[l2++]=cp;
+>             else if(cp>=174&&cp<=255) buf2[l2++]=cp;
+>             else if(cp>=0x100&&cp<=0x120) buf2[l2++]=cp-0x100;
+>             else if(cp==0x121) buf2[l2++]=127;
+>             else if(cp>=0x122&&cp<=0x143) buf2[l2++]=cp-0x122+128;
+>         }
+>         buf2[l2]=0;
+>         // Find token IDs
+>         for(int i=0;i<ntok;i++){
+>             if(id1<0 && strlen(tok[i])==l1 && memcmp(tok[i],buf1,l1)==0) id1=i;
+>             if(id2<0 && strlen(tok[i])==l2 && memcmp(tok[i],buf2,l2)==0) id2=i;
+>             if(id1>=0&&id2>=0) break;
+>         }
+>         merge_a[nmerge]=id1;
+>         merge_b[nmerge]=id2;
+>         // Create merged token
+>         tok[ntok]=malloc(l1+l2+1);
+>         memcpy(tok[ntok],buf1,l1);
+>         memcpy(tok[ntok]+l1,buf2,l2);
+>         tok[ntok][l1+l2]=0;
+>         ntok++;
+>         nmerge++;
+>     }
+>     fclose(f);
+> }
+>
+> int encode(const char *text, int *tokens){
+>     int n=0;
+>     // Convert each byte to its base token
+>     for(int i=0;text[i];i++) tokens[n++]=b2u[(unsigned char)text[i]];
+>     // Apply merges
+>     for(int m=0;m<nmerge;m++){
+>         for(int i=0;i<n-1;i++){
+>             if(tokens[i]==merge_a[m] && tokens[i+1]==merge_b[m]){
+>                 tokens[i]=256+m;
+>                 for(int j=i+1;j<n-1;j++) tokens[j]=tokens[j+1];
+>                 n--;
+>                 i--; // recheck this position
+>             }
+>         }
+>     }
+>     return n;
+> }
+>
+> int main(int argc, char **argv){
+>     if(argc<4){ printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]); return 1; }
+>     init_off();
+>     // mmap weights
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st; fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     // load BPE
+>     init_b2u();
+>     load_bpe(argv[2]);
+>     // encode input
+>     int tokens[C], n;
+>     n=encode(argv[3],tokens);
+>     // allocate KV cache
+>     att_cache=calloc(2*L*C*E,sizeof(float));
+>     float logits[V];
+>     // process input tokens
+>     for(int i=0;i<n;i++) forward(tokens[i],i,logits);
+>     // generate 20 tokens
+>     for(int g=0;g<20;g++){
+>         // argmax
+>         int best=0;
+>         for(int i=1;i<V;i++) if(logits[i]>logits[best]) best=i;
+>         // print token
+>         printf("%s",tok[best]);
+>         fflush(stdout);
+>         tokens[n]=best;
+>         forward(best,n,logits);
+>         n++;
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@modal:/app#

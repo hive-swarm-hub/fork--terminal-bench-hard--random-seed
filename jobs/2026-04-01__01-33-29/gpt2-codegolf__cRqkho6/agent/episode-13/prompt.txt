@@ -1,0 +1,70 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt','rb')
+>
+> # The file is 497759232 bytes
+> # 497759232 / 4 = 124439808
+> # GPT-2 124M has 124439808 params - exact match with NO header
+> # So there's definitely no header
+>
+> # Let me try a completely different ordering
+> # TF GPT-2 variables in alphabetical order:
+> # model/h0/attn/c_attn/w [1, 768, 2304]
+> # model/h0/attn/c_attn/b [2304]
+> # model/h0/attn/c_proj/w [1, 768, 768]
+> # model/h0/attn/c_proj/b [768]
+> # model/h0/ln_1/b [768]
+> # model/h0/ln_1/g [768]
+> # model/h0/ln_2/b [768]
+> # model/h0/ln_2/g [768]
+> # model/h0/mlp/c_fc/w [1, 768, 3072]
+> # model/h0/mlp/c_fc/b [3072]
+> # model/h0/mlp/c_proj/w [1, 3072, 768]
+> # model/h0/mlp/c_proj/b [768]
+> # ... (repeat for h1..h11)
+> # model/ln_f/b [768]
+> # model/ln_f/g [768]
+> # model/wpe [1024, 768]
+> # model/wte [50257, 768]
+>
+> # In alphabetical order by TF variable name:
+> # h0/attn/c_attn/b, h0/attn/c_attn/w, h0/attn/c_proj/b, h0/attn/c_proj/w,
+> # h0/ln_1/b, h0/ln_1/g, h0/ln_2/b, h0/ln_2/g,
+> # h0/mlp/c_fc/b, h0/mlp/c_fc/w, h0/mlp/c_proj/b, h0/mlp/c_proj/w
+> # ... repeat h1-h11 (but h1 < h10 < h11 < h2 in alpha order? No, h0,h1,h10,h11,h2,...)
+> # Actually alphabetically: h0, h1, h10, h11, h2, h3, h4, h5, h6, h7, h8, h9
+>
+> # Let me try: first block is h0/attn/c_attn/b [2304]
+> f.seek(0)
+> data = f.read(2304*4)
+> vals = struct.unpack('<2304f', data)
+> m = sum(vals)/len(vals)
+> print(f'If c_attn/b first: mean={m:.4f} first 5: {[f"{v:.4f}" for v in vals[:5]]}')
+>
+> # Or maybe the order starts with wte?
+> # Let me try: wte first, then wpe, then per-layer in interleaved order
+> # Actually, the file size exactly matches, so let me try the per-layer interleaved order
+>
+> # Per-layer interleaved: wte, wpe, then for each layer: ln1g, ln1b, attnW, attnB, projW, projB, ln2g, ln2b, fcW, fcB, fc2W, fc2B
+> # We already tested this and ln1g had mean 0.01 - not 1.0
+>
+> # Let me try: wte, wpe, then for each layer: attnW, attnB, projW, projB, ln1g, ln1b, fcW, fcB, fc2W, fc2B, ln2g, ln2b
+> E = 768
+> off = (50257*768 + 1024*768)  # after wte, wpe
+> f.seek(off * 4)
+>
+> # Skip attn_w, attn_b, proj_w, proj_b
+> f.seek((off + 768*2304 + 2304 + 768*768 + 768) * 4)
+> data = f.read(768*4)
+> vals = struct.unpack('<768f', data)
+> m = sum(vals)/len(vals)
+> print(f'After attn block: mean={m:.4f} first 5: {[f"{v:.4f}" for v in vals[:5]]}')
+>
+> f.close()
+> PYEOF
+If c_attn/b first: mean=-0.0007 first 5: ['0.4803', '-0.5254', '-0.4293', '-0.2060', '-0.1277']
+After attn block: mean=0.0006 first 5: ['0.0159', '-0.0224', '0.0363', '0.0607', '-0.0126']
+root@modal:/app#
