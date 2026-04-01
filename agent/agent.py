@@ -420,12 +420,33 @@ class AgentHarness(Terminus2):
         lines = [line for line in lines if not any(m in line for m in all_markers)]
         output = "\n".join(lines)
 
-        # Track consecutive stalls and suggest reset_terminal
+        # Track consecutive stalls and suggest/force reset_terminal
         if not found_last:
             self._consecutive_stalls += 1
             stall_cmds = [c.keystrokes.strip()[:80] for c in commands[completed:]]
 
-            if self._consecutive_stalls >= 3:
+            if self._consecutive_stalls >= 5:
+                # Auto-reset: model has ignored CRITICAL warnings for too long
+                self.logger.warning(
+                    f"[auto-reset] {self._consecutive_stalls} consecutive stalls — "
+                    f"forcing terminal reset"
+                )
+                try:
+                    reset_output = await self._reset_terminal(session)
+                    output = (
+                        f"{output}\n\n"
+                        f"[AUTO-RESET: Terminal was stuck for {self._consecutive_stalls} "
+                        f"consecutive commands. Automatic reset performed. "
+                        f"All processes killed, fresh shell ready.]\n\n"
+                        f"{reset_output}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Auto-reset failed: {e}")
+                    output += (
+                        f"\n\n[AUTO-RESET FAILED: Terminal stuck for "
+                        f"{self._consecutive_stalls} stalls. Error: {e}]"
+                    )
+            elif self._consecutive_stalls >= 3:
                 output += (
                     f"\n\n[CRITICAL: Terminal has been stuck for {self._consecutive_stalls} "
                     f"consecutive commands. Stalled on: {'; '.join(stall_cmds)}. "
