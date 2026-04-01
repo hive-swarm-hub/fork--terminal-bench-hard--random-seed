@@ -260,9 +260,9 @@ class AgentHarness(Terminus2):
 
         # Step 1: Kill all user processes via environment.exec (bypasses tmux)
         try:
-            await env.exec(
-                command="pkill -9 -u $(whoami) || true",
-                user="root",
+            await asyncio.wait_for(
+                env.exec(command="pkill -9 -u $(whoami) || true", user="root"),
+                timeout=15,
             )
         except Exception:
             pass
@@ -270,9 +270,12 @@ class AgentHarness(Terminus2):
 
         # Step 2: Kill the old tmux session
         try:
-            await env.exec(
-                command=f"tmux kill-session -t {session_name} 2>/dev/null || true",
-                user=session._user,
+            await asyncio.wait_for(
+                env.exec(
+                    command=f"tmux kill-session -t {session_name} 2>/dev/null || true",
+                    user=session._user,
+                ),
+                timeout=15,
             )
         except Exception:
             pass
@@ -287,7 +290,10 @@ class AgentHarness(Terminus2):
                 f"-d -s {session_name} 'bash --login'"
                 f'" /dev/null'
             )
-            result = await env.exec(command=start_cmd, user=session._user)
+            result = await asyncio.wait_for(
+                env.exec(command=start_cmd, user=session._user),
+                timeout=15,
+            )
             if result.return_code != 0:
                 self.logger.error(f"Failed to restart tmux session: {result.stderr}")
         except Exception as e:
@@ -1320,10 +1326,20 @@ class AgentHarness(Terminus2):
             if reset_terminal:
                 # Terminal reset path — kill everything and get a fresh shell
                 self.logger.info("Agent requested terminal reset")
-                reset_output = await self._with_block_timeout(
-                    self._reset_terminal(self._session)
-                )
-                observation = reset_output
+                try:
+                    reset_output = await asyncio.wait_for(
+                        self._reset_terminal(self._session),
+                        timeout=60,  # 60s should be plenty for a reset
+                    )
+                    observation = reset_output
+                except (asyncio.TimeoutError, Exception) as e:
+                    self.logger.error(f"Terminal reset failed: {e}")
+                    self._consecutive_stalls = 0
+                    observation = (
+                        f"[TERMINAL RESET FAILED: {e}. "
+                        f"The terminal may still be stuck. Try running commands normally — "
+                        f"the session may have partially recovered.]"
+                    )
 
                 cache_tokens_used = chat.total_cache_tokens - tokens_before_cache
                 step_cost = chat.total_cost - cost_before
