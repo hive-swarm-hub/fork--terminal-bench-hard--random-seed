@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import numpy as np
+> from scipy.signal import find_peaks
+>
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+>
+> # Sort by x ascending
+> sort_idx = np.argsort(x_data)
+> x = x_data[sort_idx]
+> y = y_data[sort_idx]
+>
+> # The x-axis is in cm^-1 (wavenumber). The laser line is at 19139.54.
+> # Let me look at the FULL peak structure more carefully
+> # Maybe the peaks are on top of a large background
+>
+> # Let's try to subtract a smooth background and find peaks
+> from scipy.signal import savgol_filter
+>
+> # Smooth the data heavily to get background
+> # But first, let's look at the data around the prominent peaks
+>
+> # Peak at 3745: let's see the region 3400-4200
+> mask1 = (x > 3400) & (x < 4200)
+> x1 = x[mask1]
+> y1 = y[mask1]
+> print(f"Region 3400-4200: {len(x1)} points")
+> print(f"  Peak at x={x1[np.argmax(y1)]:.2f}, y={y1.max():.2f}")
+> print(f"  Min y={y1.min():.2f} at x={x1[np.argmin(y1)]:.2f}")
+>
+> # Peak at 6329: region 5800-7000
+> mask2 = (x > 5800) & (x < 7200)
+> x2 = x[mask2]
+> y2 = y[mask2]
+> print(f"\nRegion 5800-7200: {len(x2)} points")
+> print(f"  Peak at x={x2[np.argmax(y2)]:.2f}, y={y2.max():.2f}")
+> print(f"  Min y={y2.min():.2f} at x={x2[np.argmin(y2)]:.2f}")
+>
+> # Let me also check: what's the relationship between these peak positions?
+> # If x is wavenumber in cm^-1:
+> laser = 19139.54
+> p1 = 3745.05  # first peak
+> p2 = 6329.37  # second peak
+> print(f"\nPeak positions relative to laser:")
+> print(f"  Peak 1: shift = {laser - p1:.2f} cm^-1")
+> print(f"  Peak 2: shift = {laser - p2:.2f} cm^-1")
+> print(f"  Ratio: {(laser-p1)/(laser-p2):.4f}")
+> print(f"  Expected G/2D ratio: {1580/2700:.4f}")
+> print(f"  Expected 2D/G ratio: {2700/1580:.4f}")
+>
+> # What if we need to convert x from some unit to Raman shift?
+> # Let's see if there's a linear mapping from x to Raman shift
+> # such that peak1 -> 1580 and peak2 -> 2700
+> # shift = a * x + b
+> # 1580 = a * 3745.05 + b
+> # 2700 = a * 6329.37 + b
+> # a = (2700-1580)/(6329.37-3745.05) = 1120/2584.32 = 0.4334
+> # b = 1580 - 0.4334 * 3745.05 = 1580 - 1623.5 = -43.5
+> a = (2700-1580)/(6329.37-3745.05)
+> b = 1580 - a * 3745.05
+> print(f"\nLinear mapping: shift = {a:.6f} * x + {b:.4f}")
+> print(f"  Check: peak1 -> {a*3745.05+b:.2f} (should be 1580)")
+> print(f"  Check: peak2 -> {a*6329.37+b:.2f} (should be 2700)")
+> print(f"  Laser (19139.54) -> {a*19139.54+b:.2f}")
+> print(f"  x=0 -> {b:.2f}")
+>
+> # Actually, if x is wavenumber, maybe we should use: shift = a/x + b
+> # Or shift = a*(1/x - 1/x_laser)
+> # Raman shift = 1/lambda_laser - 1/lambda_scattered (in cm^-1)
+> # If x is proportional to wavelength: x = c * lambda
+> # Then shift = 1/(x_laser/c) - 1/(x/c) = c*(1/x_laser - 1/x)
+> # = c * (x - x_laser)/(x * x_laser)
+>
+> # Let's try: what if the x-axis is proportional to wavelength?
+> # And the Raman shift = c * (1/x_laser - 1/x)
+> # For peak1 at x=3745: 1580 = c * (1/19139.54 - 1/3745.05)
+> # For peak2 at x=6329: 2700 = c * (1/19139.54 - 1/6329.37)
+>
+> c1 = 1580 / (1/19139.54 - 1/3745.05)
+> c2 = 2700 / (1/19139.54 - 1/6329.37)
+> print(f"\nIf x proportional to wavelength:")
+> print(f"  c from peak1: {c1:.2f}")
+> print(f"  c from peak2: {c2:.2f}")
+>
+> # These should be equal if the model is correct
+> # c1 = -7579.8, c2 = -14088.9 - not equal, so this model doesn't work
+>
+> # What about x being directly the CCD pixel number?
+> # Then lambda = A + B*pixel, and shift = 1/lambda_laser - 1/lambda
+> # But we don't know A and B
+>
+> # Let me try another approach: just look at the data as-is and find the two
+> # Raman peaks by their shape. The G and 2D peaks should be Lorentzian-shaped
+> # peaks on top of a background.
+>
+> # Let's compute a local background and subtract it
+> from scipy.ndimage import uniform_filter1d
+>
+> # Use a wide window for background estimation
+> bg = uniform_filter1d(y, size=200)
+> y_sub = y - bg
+>
+> peaks_sub, props_sub = find_peaks(y_sub, prominence=500, distance=5)
+> print(f"\nPeaks after background subtraction (prominence > 500):")
+> for p in peaks_sub:
+>     print(f"  x={x[p]:.2f}, y_sub={y_sub[p]:.2f}, y_orig={y[p]:.2f}, prom={props_sub['prominences'][peaks_sub==p][0]:.2f}")
+> EOF
+

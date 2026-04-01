@@ -1,0 +1,139 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def gradients_differ(g1, g2, tol=1e-8):
+>     """Check if two gradient vectors are different."""
+>     return np.linalg.norm(g1 - g2) > tol
+>
+> def add_to_clusters(clusters, diff):
+>     """Add a diff vector to existing clusters or create a new one.
+>     Clusters group parallel vectors (same direction up to sign)."""
+>     norm = np.linalg.norm(diff)
+>     if norm < 1e-10:
+>         return
+>     direction = diff / norm
+>
+>     for cluster in clusters:
+>         rep = cluster[0]
+>         rep_dir = rep / np.linalg.norm(rep)
+>         cos = np.dot(direction, rep_dir)
+>         if abs(cos) > 0.999:
+>             if cos < 0:
+>                 cluster.append(-diff)
+>             else:
+>                 cluster.append(diff)
+>             return
+>
+>     clusters.append([diff])
+>
+> def main():
+>     """Extract A1 from a one-layer ReLU network f(x) = A2*ReLU(A1*x+b1)+b2.
+>
+>     Strategy: Walk along random lines in input space and compute the gradient
+>     of f at each point using finite differences. The gradient is piecewise
+>     constant (changes only when a ReLU neuron switches on/off). When exactly
+>     one neuron flips, the gradient difference equals A2[i]*A1[i,:] for that
+>     neuron. By collecting many such differences and clustering by direction,
+>     we recover all rows of A1 (up to permutation and scaling by A2 entries).
+>     """
+>     print("Extracting A1 from the neural network...")
+>     np.random.seed(42)
+>
+>     clusters = []
+>     total_breakpoints = 0
+>
+>     # Use fine steps along each line so each interval contains at most 1 breakpoint
+>     n_coarse_steps = 200
+>
+>     # Track convergence: stop when no new clusters found for several lines
+>     lines_without_new_cluster = 0
+>     prev_n_clusters_supported = 0
+>
+>     for line_idx in range(300):
+>         x0 = np.random.randn(10) * 3.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         # Compute gradients along the line
+>         t_values = np.linspace(-5, 5, n_coarse_steps)
+>         prev_grad = None
+>
+>         for t in t_values:
+>             x = x0 + t * d
+>             grad = compute_gradient(x)
+>
+>             if prev_grad is not None:
+>                 diff = grad - prev_grad
+>                 norm = np.linalg.norm(diff)
+>                 if norm > 1e-8:
+>                     # A neuron flipped between these two points
+>                     add_to_clusters(clusters, diff)
+>                     total_breakpoints += 1
+>
+>             prev_grad = grad
+>
+>         # Check convergence: count well-supported clusters
+>         n_supported = sum(1 for c in clusters if len(c) >= 3)
+>
+>         if line_idx % 10 == 0:
+>             print(f"  Line {line_idx}, breakpoints: {total_breakpoints}, "
+>                   f"clusters: {len(clusters)}, well-supported(>=3): {n_supported}")
+>
+>         if n_supported == prev_n_clusters_supported and n_supported > 0:
+>             lines_without_new_cluster += 1
+>         else:
+>             lines_without_new_cluster = 0
+>             prev_n_clusters_supported = n_supported
+>
+>         # Stop if we've gone 15 lines without finding a new well-supported cluster
+>         # and we have at least some clusters
+>         if lines_without_new_cluster >= 15 and n_supported >= 1:
+>             print(f"  Converged at line {line_idx} with {n_supported} well-supported clusters.")
+>             break
+>
+>     print(f"\nTotal breakpoints found: {total_breakpoints}")
+>     print(f"Total clusters: {len(clusters)}")
+>
+>     # Sort clusters by support (number of observations)
+>     clusters.sort(key=lambda c: len(c), reverse=True)
+>
+>     # Determine hidden dimension: count clusters with good support
+>     # Well-supported clusters (>=3 observations) correspond to real neurons
+>     # Single-observation clusters are likely multi-neuron flips or noise
+>     n_hidden = sum(1 for c in clusters if len(c) >= 3)
+>     print(f"Detected hidden dimension: {n_hidden}")
+>
+>     # Take top n_hidden clusters - each represents one hidden neuron
+>     # The average diff in each cluster is A2[i] * A1[i,:]
+>     rows = []
+>     for c in clusters[:n_hidden]:
+>         avg = np.mean(c, axis=0)
+>         rows.append(avg)
+>
+>     A1_recovered = np.array(rows)
+>     print(f"Recovered A1 matrix shape: {A1_recovered.shape}")
+>
+>     # Save the matrix
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 matrix to /app/stolen_A1.npy")
+>     print(A1_recovered)
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

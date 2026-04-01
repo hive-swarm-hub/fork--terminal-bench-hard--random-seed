@@ -1,0 +1,147 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def gradients_differ(g1, g2, tol=1e-8):
+>     return np.linalg.norm(g1 - g2) > tol
+>
+> def find_single_breakpoint(x0, d, t_lo, t_hi, g_lo, g_hi, n_iters=30):
+>     """Binary search for ONE breakpoint in [t_lo, t_hi].
+>     Returns (g_before, g_after) at the breakpoint."""
+>     for _ in range(n_iters):
+>         t_mid = (t_lo + t_hi) / 2
+>         if t_hi - t_lo < 1e-12:
+>             break
+>         g_mid = compute_gradient(x0 + t_mid * d)
+>         if gradients_differ(g_mid, g_lo):
+>             t_hi = t_mid
+>             g_hi = g_mid
+>         else:
+>             t_lo = t_mid
+>             g_lo = g_mid
+>     return g_lo, g_hi
+>
+> def add_to_clusters(clusters, diff):
+>     """Add a diff vector to existing clusters or create a new one."""
+>     norm = np.linalg.norm(diff)
+>     if norm < 1e-10:
+>         return
+>     direction = diff / norm
+>
+>     for cluster in clusters:
+>         rep = cluster[0]
+>         rep_dir = rep / np.linalg.norm(rep)
+>         cos = np.dot(direction, rep_dir)
+>         if abs(cos) > 0.9999:
+>             if cos < 0:
+>                 cluster.append(-diff)
+>             else:
+>                 cluster.append(diff)
+>             return
+>
+>     clusters.append([diff])
+>
+> def main():
+>     print("Extracting A1 from the neural network...")
+>     np.random.seed(42)
+>
+>     clusters = []
+>     total_breakpoints = 0
+>
+>     # With 20 neurons in 10D, a generic line crosses ~20 hyperplanes
+>     # Use enough coarse steps so most intervals have at most 1 breakpoint
+>     n_coarse_steps = 80  # intervals of width 0.125 over [-5,5]
+>
+>     for line_idx in range(200):
+>         x0 = np.random.randn(10) * 3.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         # Coarse sweep
+>         t_values = np.linspace(-5, 5, n_coarse_steps)
+>         grads = [compute_gradient(x0 + t * d) for t in t_values]
+>
+>         # Find intervals with gradient changes
+>         for k in range(len(grads) - 1):
+>             if gradients_differ(grads[k], grads[k+1]):
+>                 g_before, g_after = find_single_breakpoint(
+>                     x0, d, t_values[k], t_values[k+1], grads[k], grads[k+1], n_iters=25
+>                 )
+>                 diff = g_after - g_before
+>                 if np.linalg.norm(diff) > 1e-9:
+>                     add_to_clusters(clusters, diff)
+>                     total_breakpoints += 1
+>
+>         # Count well-supported clusters
+>         n_good = sum(1 for c in clusters if len(c) >= 5)
+>
+>         if line_idx % 10 == 0:
+>             print(f"  Line {line_idx}, breakpoints: {total_breakpoints}, clusters: {len(clusters)}, well-supported(>=5): {n_good}")
+>
+>         if n_good >= 20:
+>             print(f"  Found 20 well-supported clusters at line {line_idx}!")
+>             break
+>
+>     print(f"\nTotal breakpoints: {total_breakpoints}")
+>     print(f"Total clusters: {len(clusters)}")
+>
+>     # Sort by support
+>     clusters.sort(key=lambda c: len(c), reverse=True)
+>
+>     for i, c in enumerate(clusters[:25]):
+>         norms = [np.linalg.norm(v) for v in c]
+>         print(f"  Cluster {i}: {len(c)} members, norm: {np.mean(norms):.6f} +/- {np.std(norms):.8f}")
+>
+>     # Take top 20 clusters
+>     rows = []
+>     for c in clusters[:20]:
+>         avg = np.mean(c, axis=0)
+>         rows.append(avg)
+>
+>     A1_recovered = np.array(rows)
+>     print(f"\nRecovered matrix shape: {A1_recovered.shape}")
+>
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 matrix to /app/stolen_A1.npy")
+>
+>     # Verification
+>     np.random.seed(0)
+>     A1_true = np.random.randn(20, 10) * 0.1
+>     b1_true = np.random.randn(20) * 0.1
+>     A2_true = np.random.randn(1, 20) * 0.1
+>
+>     print(f"\nVerification:")
+>     matched = set()
+>     for i, row in enumerate(A1_recovered):
+>         row_dir = row / np.linalg.norm(row)
+>         best_cos = 0
+>         best_j = -1
+>         for j in range(20):
+>             true_dir = A1_true[j] / np.linalg.norm(A1_true[j])
+>             cos = abs(np.dot(row_dir, true_dir))
+>             if cos > best_cos:
+>                 best_cos = cos
+>                 best_j = j
+>         matched.add(best_j)
+>         print(f"  Row {i} -> True row {best_j}, cos_sim={best_cos:.8f}")
+>
+>     print(f"\nMatched {len(matched)}/20 true neurons")
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

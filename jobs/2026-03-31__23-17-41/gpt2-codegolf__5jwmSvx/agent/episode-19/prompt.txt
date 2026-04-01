@@ -1,0 +1,106 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct
+> import math
+>
+> V,C,E,H,L = 50257,1024,768,12,12
+> D = E//H
+> F = 4*E
+>
+> f = open('gpt2-124M.ckpt','rb')
+> def rf(n): return list(struct.unpack(f'{n}f', f.read(n*4)))
+>
+> wte = rf(V*E)
+> wpe = rf(C*E)
+>
+> layers = []
+> for _ in range(L):
+>     d = {}
+>     d['lg'] = rf(E); d['lb'] = rf(E)
+>     d['aw'] = rf(E*3*E); d['ab'] = rf(3*E)
+>     d['pw'] = rf(E*E); d['pb'] = rf(E)
+>     d['g2'] = rf(E); d['b2'] = rf(E)
+>     d['fw'] = rf(E*F); d['fb'] = rf(F)
+>     d['fpw'] = rf(F*E); d['fpb'] = rf(E)
+>     layers.append(d)
+> lfg = rf(E); lfb = rf(E)
+> f.close()
+>
+> def layernorm(a, g, b):
+>     m = sum(a)/E
+>     v = sum((x-m)**2 for x in a)/E
+>     v = 1/(v+1e-5)**0.5
+>     return [(a[i]-m)*v*g[i]+b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> # Single token: "Hello" = 15496
+> tok = 15496
+> cur = [wte[tok*E+i] + wpe[i] for i in range(E)]
+>
+> for l in range(L):
+>     d = layers[l]
+>     tmp = layernorm(cur, d['lg'], d['lb'])
+>
+>     # QKV
+>     qkv = [0]*(3*E)
+>     for i in range(3*E):
+>         s = d['ab'][i]
+>         for j in range(E):
+>             s += tmp[j] * d['aw'][j*3*E+i]
+>         qkv[i] = s
+>
+>     # Single position: attention output = V
+>     res = qkv[2*E:3*E]
+>
+>     # Project
+>     for i in range(E):
+>         s = d['pb'][i]
+>         for j in range(E):
+>             s += res[j] * d['pw'][j*E+i]
+>         cur[i] += s
+>
+>     # MLP
+>     tmp = layernorm(cur, d['g2'], d['b2'])
+>     hid = [0]*F
+>     for i in range(F):
+>         s = d['fb'][i]
+>         for j in range(E):
+>             s += tmp[j] * d['fw'][j*F+i]
+>         hid[i] = gelu(s)
+>
+>     for i in range(E):
+>         s = d['fpb'][i]
+>         for j in range(F):
+>             s += hid[j] * d['fpw'][j*E+i]
+>         cur[i] += s
+>
+>     print(f'Layer {l} done, cur[:3] = {cur[:3]}')
+>
+> # Final layer norm
+> out = layernorm(cur, lfg, lfb)
+>
+> # Logits
+> logits = [0]*10  # just first 10
+> for i in range(10):
+>     s = 0
+>     for j in range(E):
+>         s += out[j] * wte[i*E+j]
+>     logits[i] = s
+> print(f'First 10 logits: {logits}')
+>
+> # Find argmax over all V
+> mx = -1e30
+> mi = 0
+> for i in range(V):
+>     s = 0
+>     for j in range(E):
+>         s += out[j] * wte[i*E+j]
+>     if s > mx:
+>         mx = s
+>         mi = i
+> print(f'Argmax token: {mi}, logit: {mx}')
+> PYEOF
+

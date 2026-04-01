@@ -1,0 +1,185 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_SCRIPT_EOF'
+> import sys
+> import re
+>
+>
+> def is_javascript_url(val):
+>     """Check if an attribute value contains a javascript: or vbscript: URL."""
+>     if val is None:
+>         return False
+>     # Remove all whitespace, null bytes, and control characters for checking
+>     cleaned = re.sub(r'[\s\x00-\x1f\\]+', '', val).lower()
+>     # Also decode HTML entities for checking
+>     # Decode numeric entities: &#NNN; and &#xHH;
+>     def decode_entity(m):
+>         text = m.group(0)
+>         try:
+>             if text.startswith('&#x') or text.startswith('&#X'):
+>                 return chr(int(text[3:].rstrip(';'), 16))
+>             elif text.startswith('&#'):
+>                 return chr(int(text[2:].rstrip(';')))
+>         except (ValueError, OverflowError):
+>             return text
+>         return text
+>     decoded = re.sub(r'&#[xX]?[0-9a-fA-F]+;?', decode_entity, val)
+>     decoded_cleaned = re.sub(r'[\s\x00-\x1f\\]+', '', decoded).lower()
+>
+>     for check_val in [cleaned, decoded_cleaned]:
+>         if re.match(r'javascript\s*:', check_val):
+>             return True
+>         if re.match(r'vbscript\s*:', check_val):
+>             return True
+>     return False
+>
+>
+> def is_event_handler(attr_name):
+>     """Check if an attribute name is an event handler."""
+>     return attr_name.lower().startswith('on')
+>
+>
+> def clean_tag(tag_match):
+>     """Process a single HTML tag, removing dangerous attributes."""
+>     full_tag = tag_match.group(0)
+>
+>     # Parse the tag to extract tag name and attributes
+>     # Match opening tags (not closing tags, not comments, not doctype)
+>     # We need to handle: <tagname attr1="val1" attr2='val2' attr3=val3 attr4>
+>
+>     # Check if it's a closing tag - no attributes to worry about
+>     if full_tag.startswith('</'):
+>         return full_tag
+>
+>     # Check if it's a comment or doctype
+>     if full_tag.startswith('<!--') or full_tag.startswith('<!') or full_tag.startswith('<?'):
+>         return full_tag
+>
+>     # Parse the tag name
+>     tag_name_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', full_tag)
+>     if not tag_name_match:
+>         return full_tag
+>
+>     tag_name = tag_name_match.group(1)
+>
+>     # For script tags, this shouldn't happen as we remove them separately,
+>     # but just in case:
+>     if tag_name.lower() == 'script':
+>         return ''
+>
+>     # Now we need to parse and filter attributes while preserving formatting
+>     # Get the part after the tag name
+>     rest = full_tag[tag_name_match.end():]
+>
+>     # Parse attributes from rest, preserving whitespace
+>     result = '<' + tag_name
+>     pos = 0
+>
+>     # Pattern to match attributes with various formats:
+>     # name="value", name='value', name=value, name (boolean)
+>     # Also captures leading whitespace
+>     attr_pattern = re.compile(
+>         r'(\s+)'
+>         r'([a-zA-Z_][a-zA-Z0-9_\-.]*)'
+>         r'(?:'
+>             r'(\s*=\s*)'
+>             r'(?:'
+>                 r'"([^"]*)"'
+>                 r"|'([^']*)'"
+>                 r'|([^\s>"\'/=]+)'
+>             r')'
+>         r')?'
+>     )
+>
+>     last_end = 0
+>     removed_something = False
+>
+>     for m in attr_pattern.finditer(rest):
+>         whitespace = m.group(1)
+>         attr_name = m.group(2)
+>         equals_part = m.group(3)  # the = sign with surrounding whitespace
+>         # Value is in group 4 (double-quoted), 5 (single-quoted), or 6 (unquoted)
+>         val_dq = m.group(4)
+>         val_sq = m.group(5)
+>         val_uq = m.group(6)
+>
+>         attr_val = val_dq if val_dq is not None else (val_sq if val_sq is not None else val_uq)
+>
+>         should_remove = False
+>
+>         # Check if it's an event handler
+>         if is_event_handler(attr_name):
+>             should_remove = True
+>
+>         # Check if value contains javascript: URL
+>         if attr_val is not None and is_javascript_url(attr_val):
+>             should_remove = True
+>
+>         if should_remove:
+>             # Skip this attribute - don't add it to result
+>             # We need to handle the text between last_end and this match start
+>             removed_something = True
+>         else:
+>             # Keep this attribute with its original formatting
+>             result += rest[last_end:m.end()]
+>             last_end = m.end()
+>             continue
+>
+>         # If removing, we need to skip from last_end to m.end()
+>         # but keep any text before this attribute that isn't part of it
+>         # The whitespace before the attr is part of the attr match
+>         if last_end < m.start():
+>             result += rest[last_end:m.start()]
+>         last_end = m.end()
+>
+>     # Add the remaining part (closing > or />)
+>     result += rest[last_end:]
+>
+>     return result
+>
+>
+> def remove_javascript(html_content):
+>     # Step 1: Remove <script>...</script> tags and their content (case-insensitive)
+>     # Handle both <script>...</script> and <script .../> self-closing
+>     # Use DOTALL so . matches newlines
+>     result = re.sub(
+>         r'<[sS][cC][rR][iI][pP][tT]\b[^>]*>.*?</[sS][cC][rR][iI][pP][tT]\s*>',
+>         '',
+>         html_content,
+>         flags=re.DOTALL
+>     )
+>     # Also remove self-closing script tags
+>     result = re.sub(
+>         r'<[sS][cC][rR][iI][pP][tT]\b[^>]*/\s*>',
+>         '',
+>         result
+>     )
+>     # Also remove orphaned opening script tags (no closing tag)
+>     result = re.sub(
+>         r'<[sS][cC][rR][iI][pP][tT]\b[^>]*>',
+>         '',
+>         result
+>     )
+>
+>     # Step 2: Process all remaining HTML tags to remove dangerous attributes
+>     # Match HTML tags (opening, closing, self-closing)
+>     result = re.sub(r'<[^>]+>', clean_tag, result)
+>
+>     return result
+>
+>
+> if __name__ == '__main__':
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+> PYTHON_SCRIPT_EOF
+root@modal:/app#

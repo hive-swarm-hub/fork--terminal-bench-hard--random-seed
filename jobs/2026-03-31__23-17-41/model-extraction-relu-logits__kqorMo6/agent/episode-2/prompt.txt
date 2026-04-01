@@ -1,0 +1,258 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def extract_A1():
+>     np.random.seed(42)
+>
+>     # Step 1: Collect many gradients at random points
+>     n_samples = 500
+>     gradients = []
+>     points = []
+>     for _ in range(n_samples):
+>         x = np.random.randn(10) * 2.0
+>         g = compute_gradient(x)
+>         gradients.append(g)
+>         points.append(x)
+>     gradients = np.array(gradients)
+>
+>     # Step 2: Compute all pairwise gradient differences
+>     # Each difference should be a multiple of a row of A1 (when exactly one neuron flips)
+>     # We collect candidate row directions
+>     candidates = []
+>
+>     for i in range(len(gradients)):
+>         for j in range(i+1, len(gradients)):
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm < 1e-10:
+>                 continue
+>             # Normalize the direction
+>             direction = diff / norm
+>             candidates.append((direction, norm, diff))
+>
+>     print(f"Found {len(candidates)} candidate directions")
+>
+>     # Step 3: Cluster the directions
+>     # Two candidates correspond to the same neuron if their normalized directions are parallel
+>     # (either same or opposite direction)
+>     rows = []  # Will store (direction, scale) pairs - the actual scaled rows
+>
+>     for direction, norm, diff in candidates:
+>         found = False
+>         for k, (existing_dir, existing_diffs) in enumerate(rows):
+>             # Check if parallel (same or opposite)
+>             dot = np.dot(direction, existing_dir)
+>             if abs(abs(dot) - 1.0) < 1e-4:
+>                 existing_diffs.append(diff)
+>                 found = True
+>                 break
+>         if not found:
+>             rows.append((direction, [diff]))
+>
+>     print(f"Found {len(rows)} unique directions")
+>
+>     # But some of these might be sums of multiple neuron flips.
+>     # We need exactly the ones that correspond to single neuron flips.
+>     # Single neuron flips will have the most occurrences and consistent magnitudes.
+>     # Multi-neuron flips will be rarer.
+>
+>     # Step 4: For each cluster, the diff should be A2[i] * A1[i,:]
+>     # We want to find the "atomic" directions - those that can't be decomposed
+>     # Sort by number of occurrences (more occurrences = more likely single neuron)
+>     rows.sort(key=lambda x: len(x[1]), reverse=True)
+>
+>     # Take the top directions and verify they're atomic
+>     # For a network with 20 hidden neurons, we expect 20 unique directions
+>
+>     # Actually, let's use a smarter approach: walk along random lines and detect
+>     # gradient changes at individual breakpoints
+>
+>     return rows
+>
+> def extract_A1_v2():
+>     """Better approach: walk along random lines and detect individual breakpoints."""
+>     np.random.seed(42)
+>
+>     found_rows = []  # Each entry is a scaled row: A2[i] * A1[i,:]
+>
+>     n_lines = 200
+>     n_steps = 100
+>
+>     for line_idx in range(n_lines):
+>         # Random starting point and direction
+>         x0 = np.random.randn(10) * 2.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         # Walk along the line x0 + t*d and compute gradients
+>         t_values = np.linspace(-5, 5, n_steps)
+>         prev_grad = None
+>
+>         for t in t_values:
+>             x = x0 + t * d
+>             grad = compute_gradient(x)
+>
+>             if prev_grad is not None:
+>                 diff = grad - prev_grad
+>                 norm = np.linalg.norm(diff)
+>                 if norm > 1e-8:  # Gradient changed - a neuron flipped
+>                     # Check if this is a single neuron flip by seeing if
+>                     # the diff is parallel to any existing row
+>                     direction = diff / norm
+>
+>                     # Check if we already have this direction
+>                     is_new = True
+>                     for existing in found_rows:
+>                         existing_norm = np.linalg.norm(existing)
+>                         existing_dir = existing / existing_norm
+>                         dot = abs(np.dot(direction, existing_dir))
+>                         if dot > 0.999:
+>                             is_new = False
+>                             break
+>
+>                     if is_new:
+>                         found_rows.append(diff.copy())
+>
+>             prev_grad = grad.copy()
+>
+>         if len(found_rows) >= 20:
+>             # We might have enough, but some could be multi-neuron flips
+>             pass
+>
+>     print(f"Found {len(found_rows)} candidate rows")
+>     return found_rows
+>
+> def refine_and_decompose(candidates):
+>     """Given candidate gradient differences, find the atomic ones (single neuron flips).
+>
+>     Key insight: if we have differences that are sums of atomic directions,
+>     we can identify atomic ones as those that appear most frequently and
+>     can't be decomposed further.
+>     """
+>     # For each candidate, check if it can be expressed as sum of other candidates
+>     # Atomic candidates will have consistent magnitudes for the same neuron
+>
+>     # Actually, if we use fine enough steps along lines, most gradient changes
+>     # will be single neuron flips. Multi-neuron flips happen only when the line
+>     # passes through an intersection of hyperplanes, which is measure-zero.
+>
+>     # So with fine enough sampling, all our candidates should be single-neuron flips.
+>     # We just need to cluster them by direction.
+>
+>     # Cluster by direction
+>     clusters = []  # (representative_direction, list_of_diffs)
+>
+>     for diff in candidates:
+>         norm = np.linalg.norm(diff)
+>         if norm < 1e-10:
+>             continue
+>         direction = diff / norm
+>
+>         found = False
+>         for k, (rep_dir, diffs) in enumerate(clusters):
+>             dot = np.dot(direction, rep_dir)
+>             if abs(abs(dot) - 1.0) < 0.001:
+>                 # Same direction (possibly flipped)
+>                 if dot < 0:
+>                     diffs.append(-diff)
+>                 else:
+>                     diffs.append(diff)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append((direction, [diff]))
+>
+>     print(f"After clustering: {len(clusters)} unique directions")
+>
+>     # For each cluster, compute the average diff (they should all be the same up to sign)
+>     rows = []
+>     for rep_dir, diffs in clusters:
+>         avg_diff = np.mean(diffs, axis=0)
+>         rows.append(avg_diff)
+>
+>     return np.array(rows)
+>
+> def main():
+>     print("Extracting A1 from the neural network...")
+>
+>     # Use line-walking approach with fine granularity
+>     candidates = extract_A1_v2()
+>
+>     if len(candidates) < 20:
+>         print(f"Only found {len(candidates)} directions, trying more lines...")
+>         # Try more lines with different seeds
+>         np.random.seed(123)
+>         n_extra_lines = 500
+>         n_steps = 200
+>
+>         for line_idx in range(n_extra_lines):
+>             x0 = np.random.randn(10) * 3.0
+>             d = np.random.randn(10)
+>             d = d / np.linalg.norm(d)
+>
+>             t_values = np.linspace(-8, 8, n_steps)
+>             prev_grad = None
+>
+>             for t in t_values:
+>                 x = x0 + t * d
+>                 grad = compute_gradient(x, eps=1e-6)
+>
+>                 if prev_grad is not None:
+>                     diff = grad - prev_grad
+>                     norm = np.linalg.norm(diff)
+>                     if norm > 1e-8:
+>                         direction = diff / norm
+>                         is_new = True
+>                         for existing in candidates:
+>                             existing_norm = np.linalg.norm(existing)
+>                             if existing_norm < 1e-10:
+>                                 continue
+>                             existing_dir = existing / existing_norm
+>                             dot = abs(np.dot(direction, existing_dir))
+>                             if dot > 0.999:
+>                                 is_new = False
+>                                 break
+>                         if is_new:
+>                             candidates.append(diff.copy())
+>
+>                 prev_grad = grad.copy()
+>
+>             if len(candidates) >= 25:  # Get a few extra to be safe
+>                 break
+>
+>         print(f"Now have {len(candidates)} candidate directions")
+>
+>     # Cluster and average
+>     A1_recovered = refine_and_decompose(candidates)
+>
+>     print(f"Recovered matrix shape: {A1_recovered.shape}")
+>
+>     # The recovered rows are A2[i] * A1[i,:]
+>     # "up to permuting neurons and scaling" means we can report each row
+>     # scaled by any nonzero constant. So A2[i]*A1[i,:] is a valid scaled version of A1[i,:].
+>
+>     # Save the matrix
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 matrix to /app/stolen_A1.npy")
+>     print(f"Matrix shape: {A1_recovered.shape}")
+>     print(f"Matrix:\n{A1_recovered}")
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

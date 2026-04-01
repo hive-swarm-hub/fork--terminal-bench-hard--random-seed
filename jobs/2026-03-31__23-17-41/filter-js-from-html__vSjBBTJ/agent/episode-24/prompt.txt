@@ -1,0 +1,182 @@
+New Terminal Output:
+
+root@modal:/app# rm -f /tmp/test*.html
+root@modal:/app# ls -la /app/
+total 7
+drwxr-xr-x 2 root root    6 Apr  1 06:18 .
+drwxr-xr-x 2 root root   89 Apr  1 06:17 ..
+-rw-r--r-- 1 root root 5814 Apr  1 06:23 filter.py
+root@modal:/app# cat /app/filter.py
+import sys
+import re
+
+# Regex to match an HTML tag, handling > inside quoted attribute values
+# Matches: < (non-quote-non-gt chars | single-quoted strings | double-quoted strings)* >
+TAG_RE = re.compile(r'<(?:[^\'">/]*(?:\'[^\']*\'|"[^"]*"))*[^\'">/]*/?>|<[^>]+>', re.DOTALL)
+
+# Regex to match <script ...>...</script> (case-insensitive, handles > in attributes)
+SCRIPT_OPEN_RE = re.compile(
+    r'<\s*script(?:\s(?:[^\'">/]*(?:\'[^\']*\'|"[^"]*"))*[^\'">/]*)?>',
+    re.IGNORECASE | re.DOTALL
+)
+SCRIPT_CLOSE_RE = re.compile(r'</\s*script\s*>', re.IGNORECASE)
+
+
+def is_dangerous_url(val):
+    """Check if an attribute value contains a javascript: or vbscript: URL."""
+    if val is None:
+        return False
+    # Decode HTML entities for checking
+    def decode_entity(m):
+        text = m.group(0)
+        try:
+            if text.lower().startswith('&#x'):
+                return chr(int(text[3:].rstrip(';'), 16))
+            elif text.startswith('&#'):
+                return chr(int(text[2:].rstrip(';')))
+        except (ValueError, OverflowError):
+            return text
+        return text
+
+    decoded = re.sub(r'&#[xX]?[0-9a-fA-F]+;?', decode_entity, val)
+
+    # Check both original (with entities stripped) and decoded versions
+    for v in [val, decoded]:
+        # Remove whitespace, null bytes, and control characters for checking
+        cleaned = re.sub(r'[\s\x00-\x1f]+', '', v).lower().lstrip()
+        if re.match(r'javascript\s*:', cleaned):
+            return True
+        if re.match(r'vbscript\s*:', cleaned):
+            return True
+    return False
+
+
+def is_event_handler(attr_name):
+    """Check if an attribute name is an event handler."""
+    return attr_name.lower().startswith('on')
+
+
+def clean_tag(tag_match):
+    """Process a single HTML tag, removing dangerous attributes."""
+    full_tag = tag_match.group(0)
+
+    # Check if it's a closing tag, comment, doctype, or processing instruction
+    if full_tag.startswith('</') or full_tag.startswith('<!--') or \
+       full_tag.startswith('<!') or full_tag.startswith('<?'):
+        return full_tag
+
+    # Parse the tag name
+    tag_name_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', full_tag)
+    if not tag_name_match:
+        return full_tag
+
+    tag_name = tag_name_match.group(1)
+
+    # Script tags should already be removed, but just in case
+    if tag_name.lower() == 'script':
+        return ''
+
+    # Get the part after the tag name
+    rest = full_tag[tag_name_match.end():]
+
+    # Parse attributes preserving original formatting
+    result = '<' + tag_name
+
+    # Pattern to match attributes with various formats:
+    # Captures: (leading_whitespace)(attr_name)(=sign_with_ws)(quoted_or_unquoted_value)
+    attr_pattern = re.compile(
+        r'(\s+)'
+        r'([a-zA-Z_][a-zA-Z0-9_\-.:]*)'  # attribute name
+        r'(?:'
+            r'(\s*=\s*)'  # equals sign
+            r'(?:'
+                r'"([^"]*)"'    # double-quoted value
+                r"|'([^']*)'"    # single-quoted value
+                r'|([^\s>"\'/=]+)'  # unquoted value
+            r')'
+        r')?'
+    )
+
+    last_end = 0
+
+    for m in attr_pattern.finditer(rest):
+        attr_name_found = m.group(2)
+        # Value is in group 4 (double-quoted), 5 (single-quoted), or 6 (unquoted)
+        val_dq = m.group(4)
+        val_sq = m.group(5)
+        val_uq = m.group(6)
+        attr_val = val_dq if val_dq is not None else (val_sq if val_sq is not None else val_uq)
+
+        should_remove = False
+
+        # Check if it's an event handler
+        if is_event_handler(attr_name_found):
+            should_remove = True
+
+        # Check if value contains dangerous URL
+        if attr_val is not None and is_dangerous_url(attr_val):
+            should_remove = True
+
+        if should_remove:
+            # Keep any non-attribute text before this match
+            if last_end < m.start():
+                result += rest[last_end:m.start()]
+            last_end = m.end()
+        else:
+            # Keep this attribute with its original formatting
+            result += rest[last_end:m.end()]
+            last_end = m.end()
+
+    # Add the remaining part (closing > or /> and any whitespace)
+    result += rest[last_end:]
+
+    return result
+
+
+def remove_script_tags(html_content):
+    """Remove all <script>...</script> blocks from HTML."""
+    result = html_content
+
+    # Repeatedly find and remove script blocks
+    while True:
+        # Find the next opening script tag
+        open_match = SCRIPT_OPEN_RE.search(result)
+        if not open_match:
+            break
+
+        # Find the corresponding closing tag after the opening tag
+        close_match = SCRIPT_CLOSE_RE.search(result, open_match.end())
+        if close_match:
+            # Remove everything from opening tag to end of closing tag
+            result = result[:open_match.start()] + result[close_match.end():]
+        else:
+            # No closing tag found - remove just the opening tag
+            result = result[:open_match.start()] + result[open_match.end():]
+
+    return result
+
+
+def remove_javascript(html_content):
+    # Step 1: Remove <script>...</script> tags and their content
+    result = remove_script_tags(html_content)
+
+    # Step 2: Process all remaining HTML tags to remove dangerous attributes
+    result = TAG_RE.sub(clean_tag, result)
+
+    return result
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python filter.py <html_file>", file=sys.stderr)
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+
+    cleaned = remove_javascript(content)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(cleaned)
+root@modal:/app#

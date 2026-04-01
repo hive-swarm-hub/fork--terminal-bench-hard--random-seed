@@ -1,0 +1,142 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def calc_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> with open('sequences.fasta') as f:
+>     content = f.read()
+> sequences = {}
+> current = None
+> for line in content.strip().split('\n'):
+>     if line.startswith('>'):
+>         current = line[1:].strip()
+>         sequences[current] = ''
+>     else:
+>         sequences[current] += line.strip()
+>
+> input_seq = sequences['input'].upper()
+> output_seq = sequences['output'].upper()
+>
+> # Use insertion point 215
+> insert_pos = 215
+> inserted_seq = output_seq[insert_pos:insert_pos+39]
+>
+> print(f'Insertion at position {insert_pos}')
+> print(f'Inserted sequence: {inserted_seq}')
+> print(f'Verify reconstruction: {(input_seq[:insert_pos] + inserted_seq + input_seq[insert_pos:]) == output_seq}')
+> print()
+>
+> # Now the question is: for the Tm calculation, what is the "annealing portion"?
+> # The task says: "Melting temperature should be computed with respect to only the
+> # part of the primers that anneal to the input template."
+> #
+> # In Q5 SDM, the forward primer has a 5' tail (insertion) + 3' annealing region.
+> # The annealing region is the part that binds the template.
+> # Even if some bases at the tail/annealing junction happen to match the template,
+> # the DESIGNED annealing portion is what we specify.
+> #
+> # However, the task might consider the ACTUAL annealing (maximum match from 3' end).
+> # Let me check both interpretations.
+>
+> # For the forward primer with designed annealing of 16 nt at position 215:
+> fwd_designed_anneal = input_seq[215:231]  # CAAGGGCGAGGAGCTG
+> print(f'Fwd designed annealing (16 nt): {fwd_designed_anneal}')
+> print(f'Fwd designed annealing Tm: {calc_tm(fwd_designed_anneal):.2f}')
+>
+> # Maximum annealing from 3' end:
+> fwd_full = inserted_seq + fwd_designed_anneal
+> max_anneal = None
+> for length in range(len(fwd_full), 14, -1):
+>     candidate = fwd_full[-length:]
+>     if candidate in input_seq:
+>         max_anneal = candidate
+>         break
+> print(f'Max annealing from 3\' end: {max_anneal} ({len(max_anneal)} nt)')
+> if max_anneal and len(max_anneal) <= 36:
+>     print(f'Max annealing Tm: {calc_tm(max_anneal):.2f}')
+>
+> print()
+>
+> # The issue: if we consider max annealing, the tail is shorter.
+> # But the construct still works because the PCR product from the fwd primer
+> # starts from wherever the primer anneals and extends.
+> # The reverse primer product goes the other direction.
+> # After KLD ligation, the junction will be:
+> # ...rev_annealing_region_on_template... | ...fwd_primer_full_from_5'_end...
+> # = ...input[181:215]... | TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG...
+> # The ligated product includes the ENTIRE forward primer sequence from 5' to 3'
+> # So the construct is: input[...215] + full_fwd_primer_sequence + input[215+annealing:...]
+> # Wait no. Let me think again.
+>
+> # In Q5 SDM PCR:
+> # Fwd primer binds to template and extends -> produces one strand
+> # Rev primer binds to template and extends -> produces complementary strand
+> # The PCR product is a linear double-stranded DNA:
+> #   5'---[fwd_tail][fwd_anneal]---[rest of plasmid]---[rev_anneal_RC]---3'
+> #   3'---[fwd_tail_RC][fwd_anneal_RC]---[rest of plasmid RC]---[rev_anneal]---5'
+> #
+> # After KLD (Kinase-Ligase-DpnI):
+> # - Kinase phosphorylates 5' ends
+> # - Ligase circularizes
+> # - DpnI digests template
+> #
+> # The circular product has the sequence:
+> # [rev_anneal_region_on_template_RC = rev_primer] joined to [fwd_primer_full]
+> # Wait, let me think about this more carefully.
+>
+> # The linear PCR product (top strand) is:
+> # 5'-[fwd_tail][fwd_anneal_on_template]...[template]...[RC of rev_primer]-3'
+> #
+> # When circularized, the 3' end (RC of rev_primer) joins to 5' end (fwd_tail)
+> # So the circular sequence is:
+> # ...template_between_primers...[RC_of_rev]|[fwd_tail][fwd_anneal]...template...
+> #
+> # In terms of the original template orientation:
+> # Starting from where rev primer anneals (going forward on template):
+> # input[rev_start:rev_end] is where rev anneals
+> # The product going clockwise from the junction:
+> # fwd_tail + input[fwd_anneal_start:] + input[:rev_anneal_end_on_template]
+> # Wait, this is getting confusing. Let me just think about it simply.
+>
+> # The reverse primer anneals to the (-) strand at positions 181-215
+> # This means it reads the (+) strand from 215 back to 181
+> # The forward primer anneals to the (+) strand at positions 215-231
+> # (or 213-231 if we count the matching tail bases)
+>
+> # The PCR amplifies everything EXCEPT the region between the primers
+> # Since the primers are back-to-back, they amplify the entire plasmid
+> # The product is the entire plasmid opened at position 215, with the insertion added
+>
+> # Result (reading the top strand of the linear product):
+> # [fwd_tail][input[215:]...input[...215]] = [insertion][input[215:]...input[...215]]
+> # When circularized: input[0:215] + insertion + input[215:end]
+> # This equals the output!
+>
+> print('=== VERIFICATION ===')
+> result = input_seq[:215] + inserted_seq + input_seq[215:]
+> print(f'Construct matches output: {result == output_seq}')
+>
+> PYEOF
+Insertion at position 215
+Inserted sequence: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+Verify reconstruction: True
+
+Fwd designed annealing (16 nt): CAAGGGCGAGGAGCTG
+Fwd designed annealing Tm: 61.24
+Max annealing from 3' end: AGCAAGGGCGAGGAGCTG (18 nt)
+Max annealing Tm: 66.27
+
+=== VERIFICATION ===
+Construct matches output: True
+root@modal:/app#

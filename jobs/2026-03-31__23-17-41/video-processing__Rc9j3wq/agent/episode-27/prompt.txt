@@ -1,0 +1,202 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import sys
+> import cv2
+> import numpy as np
+> import toml
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Define the track region - focus on where the athlete's feet would be
+>     # This should capture the running surface area
+>     track_y_start = int(height * 0.46)   # ~248 for 540px
+>     track_y_end = int(height * 0.74)     # ~400 for 540px
+>
+>     # Collect per-frame metrics
+>     frame_data = []  # list of (frame_number, fg_pixels, bottom_y)
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>         # Background subtraction in track region
+>         track_bg = bg_gray[track_y_start:track_y_end, :]
+>         track_frame = gray[track_y_start:track_y_end, :]
+>         diff = np.abs(track_frame - track_bg)
+>
+>         # Threshold to create binary mask
+>         mask = (diff > 30).astype(np.uint8) * 255
+>
+>         # Morphological cleanup
+>         kernel_open = np.ones((3, 3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+>         kernel_close = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+>
+>         fg_pixels = np.sum(mask > 0)
+>
+>         if fg_pixels > 100:
+>             ys, xs = np.where(mask > 0)
+>             bottom_y = np.max(ys) + track_y_start
+>             frame_data.append((frame_idx, fg_pixels, bottom_y))
+>         else:
+>             frame_data.append((frame_idx, fg_pixels, None))
+>
+>     cap.release()
+>
+>     # Step 1: Find the athlete's active pass
+>     # Look for the first continuous stretch of frames with significant foreground
+>     # that represents the athlete running through the frame
+>     active_frames = [(fn, fp, by) for fn, fp, by in frame_data if by is not None and fp > 300]
+>
+>     if not active_frames:
+>         # Try with lower threshold
+>         active_frames = [(fn, fp, by) for fn, fp, by in frame_data if by is not None and fp > 100]
+>
+>     if not active_frames:
+>         raise ValueError("No athlete detected")
+>
+>     # Find continuous stretches of active frames (allowing small gaps)
+>     stretches = []
+>     current_stretch = [active_frames[0]]
+>     for i in range(1, len(active_frames)):
+>         if active_frames[i][0] - active_frames[i-1][0] <= 3:  # allow up to 3 frame gap
+>             current_stretch.append(active_frames[i])
+>         else:
+>             stretches.append(current_stretch)
+>             current_stretch = [active_frames[i]]
+>     stretches.append(current_stretch)
+>
+>     # The athlete's main pass is the longest stretch
+>     main_pass = max(stretches, key=len)
+>     pass_start = main_pass[0][0]
+>     pass_end = main_pass[-1][0]
+>
+>     # Step 2: Get all frame data within the pass window (including gaps)
+>     frame_dict = {fn: (fp, by) for fn, fp, by in frame_data}
+>
+>     # Collect bottom_y values for frames in the pass
+>     pass_bottom_ys = []
+>     for fn in range(pass_start, pass_end + 1):
+>         fp, by = frame_dict.get(fn, (0, None))
+>         if by is not None:
+>             pass_bottom_ys.append((fn, by))
+>
+>     if not pass_bottom_ys:
+>         raise ValueError("No valid bottom_y data in pass")
+>
+>     # Step 3: Determine ground level from the pass data
+>     # Ground level is the typical bottom_y when running (highest values)
+>     all_by = [by for _, by in pass_bottom_ys]
+>     ground_level = np.percentile(all_by, 80)
+>
+>     # Step 4: Find the jump
+>     # The jump is characterized by a significant drop in bottom_y
+>     # Takeoff: last frame where bottom_y >= threshold before it drops
+>     # Landing: first frame where bottom_y >= threshold after the drop
+>
+>     # Use a threshold that's slightly below ground level
+>     jump_threshold = ground_level - 10
+>
+>     # Classify each frame in the pass as ground or air
+>     frame_status = []  # (frame_number, status, bottom_y)
+>     for fn in range(pass_start, pass_end + 1):
+>         fp, by = frame_dict.get(fn, (0, None))
+>         if by is not None and by >= jump_threshold:
+>             frame_status.append((fn, 'GROUND', by))
+>         else:
+>             frame_status.append((fn, 'AIR', by))
+>
+>     # Find transitions from GROUND to AIR (takeoff) and AIR to GROUND (landing)
+>     takeoff_frame = None
+>     land_frame = None
+>
+>     for i in range(1, len(frame_status)):
+>         prev_fn, prev_status, prev_by = frame_status[i-1]
+>         curr_fn, curr_status, curr_by = frame_status[i]
+>
+>         if prev_status == 'GROUND' and curr_status == 'AIR':
+>             # Potential takeoff - the last ground frame before air
+>             takeoff_frame = prev_fn
+>
+>         if prev_status == 'AIR' and curr_status == 'GROUND':
+>             # Potential landing - the first ground frame after air
+>             if takeoff_frame is not None:
+>                 land_frame = curr_fn
+>                 break  # Take the first complete jump
+>
+>     if takeoff_frame is None or land_frame is None:
+>         # Fallback: find the minimum bottom_y and work outward
+>         min_by_frame = min(pass_bottom_ys, key=lambda x: x[1])
+>         min_fn = min_by_frame[0]
+>
+>         # Search backward for takeoff
+>         for fn in range(min_fn, pass_start - 1, -1):
+>             fp, by = frame_dict.get(fn, (0, None))
+>             if by is not None and by >= jump_threshold:
+>                 takeoff_frame = fn
+>                 break
+>
+>         # Search forward for landing
+>         for fn in range(min_fn, pass_end + 1):
+>             fp, by = frame_dict.get(fn, (0, None))
+>             if by is not None and by >= jump_threshold:
+>                 land_frame = fn
+>                 break
+>
+>         if takeoff_frame is None:
+>             takeoff_frame = pass_start
+>         if land_frame is None:
+>             land_frame = pass_end
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame,
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@modal:/app# echo "Script updated"
+Script updated
+root@modal:/app#

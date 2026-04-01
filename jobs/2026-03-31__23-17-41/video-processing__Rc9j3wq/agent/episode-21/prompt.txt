@@ -1,0 +1,184 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import sys
+> import cv2
+> import numpy as np
+> import toml
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Define the track region - lower portion of frame where athlete runs
+>     # This avoids noise from sky/buildings in upper portion
+>     track_y_start = int(height * 0.46)  # ~250 for 540px height
+>     track_y_end = int(height * 0.78)    # ~420 for 540px height
+>
+>     # Collect per-frame metrics
+>     frame_data = []  # (frame_number, fg_pixels, bottom_y, mean_x)
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>         # Background subtraction in track region
+>         track_bg = bg_gray[track_y_start:track_y_end, :]
+>         track_frame = gray[track_y_start:track_y_end, :]
+>         diff = np.abs(track_frame - track_bg)
+>
+>         # Threshold to create binary mask
+>         mask = (diff > 30).astype(np.uint8) * 255
+>
+>         # Morphological cleanup
+>         kernel_open = np.ones((3, 3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+>         kernel_close = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+>
+>         fg_pixels = np.sum(mask > 0)
+>
+>         if fg_pixels > 50:
+>             ys, xs = np.where(mask > 0)
+>             bottom_y = np.max(ys) + track_y_start
+>             mean_x = np.mean(xs)
+>             frame_data.append((frame_idx, fg_pixels, bottom_y, mean_x))
+>         else:
+>             frame_data.append((frame_idx, fg_pixels, None, None))
+>
+>     cap.release()
+>
+>     # Find frames where athlete is present (significant foreground)
+>     athlete_frames = [(fn, fp, by, mx) for fn, fp, by, mx in frame_data if by is not None and fp > 200]
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Determine ground level: the maximum bottom_y when athlete is on the ground
+>     # This should be the track surface level
+>     bottom_ys = [by for _, _, by, _ in athlete_frames]
+>     ground_level = np.percentile(bottom_ys, 85)  # Use high percentile as ground level
+>
+>     # Define threshold for "in the air" - bottom_y significantly above ground level
+>     # When jumping, the feet rise above the ground
+>     air_threshold = ground_level - 15  # If bottom_y drops more than 15px below ground level, athlete is in air
+>
+>     # Find the airborne phase: consecutive frames where bottom_y < air_threshold
+>     # or where the athlete disappears from the track region entirely
+>
+>     # Build a complete timeline including frames with no detection
+>     # For frames with no athlete detection during the athlete's presence,
+>     # they might be at peak jump (above track region)
+>
+>     first_athlete_frame = athlete_frames[0][0]
+>     last_athlete_frame = athlete_frames[-1][0]
+>
+>     # Create a dictionary for quick lookup
+>     frame_dict = {fn: (fp, by, mx) for fn, fp, by, mx in frame_data}
+>
+>     # For each frame in the athlete's presence window, determine if on ground or in air
+>     # on_ground = True if bottom_y is close to ground_level
+>     # in_air = True if bottom_y is significantly above ground_level or no detection
+>
+>     ground_frames = []
+>     air_frames = []
+>
+>     for fn in range(first_athlete_frame, last_athlete_frame + 1):
+>         fp, by, mx = frame_dict.get(fn, (0, None, None))
+>         if by is not None and by >= air_threshold:
+>             ground_frames.append(fn)
+>         else:
+>             # Either no detection (peak of jump) or bottom_y is high (in air)
+>             air_frames.append(fn)
+>
+>     if not air_frames:
+>         raise ValueError("No jump detected")
+>
+>     # The jump phase is the continuous block of air frames
+>     # Find the main continuous block of air frames
+>     air_frames_sorted = sorted(air_frames)
+>
+>     # Find the longest continuous run of air frames
+>     best_start = air_frames_sorted[0]
+>     best_end = air_frames_sorted[0]
+>     current_start = air_frames_sorted[0]
+>     current_end = air_frames_sorted[0]
+>
+>     for i in range(1, len(air_frames_sorted)):
+>         if air_frames_sorted[i] == current_end + 1:
+>             current_end = air_frames_sorted[i]
+>         else:
+>             if (current_end - current_start) > (best_end - best_start):
+>                 best_start = current_start
+>                 best_end = current_end
+>             current_start = air_frames_sorted[i]
+>             current_end = air_frames_sorted[i]
+>     if (current_end - current_start) > (best_end - best_start):
+>         best_start = current_start
+>         best_end = current_end
+>
+>     # Takeoff: the frame just before the air phase begins
+>     # This is the last ground frame before the air phase
+>     takeoff_frame = best_start - 1
+>
+>     # Landing: the frame just after the air phase ends
+>     # This is the first ground frame after the air phase
+>     land_frame = best_end + 1
+>
+>     # Validate: make sure takeoff and landing frames are within the athlete's presence
+>     # If takeoff_frame is before the first athlete frame, use best_start
+>     if takeoff_frame < first_athlete_frame:
+>         takeoff_frame = best_start
+>
+>     # If land_frame is after the last athlete frame, use best_end
+>     if land_frame > last_athlete_frame:
+>         land_frame = best_end
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame,
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@modal:/app# echo "Script written"
+Script written
+root@modal:/app#

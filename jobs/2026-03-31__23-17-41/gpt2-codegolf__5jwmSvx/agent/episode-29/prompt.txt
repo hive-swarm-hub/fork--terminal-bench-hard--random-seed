@@ -1,0 +1,81 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct
+>
+> # Let me check if the weights might be transposed
+> # In TensorFlow, the convention is often [out, in] for dense layers
+> # In my code I assumed [in, out] i.e. attnw[E][3*E]
+> # Let me try with transposed weights for a single layer
+>
+> V,C,E,H,L = 50257,1024,768,12,12
+> D = E//H
+> F = 4*E
+>
+> f = open('gpt2-124M.ckpt','rb')
+> def rf(n): return list(struct.unpack(f'{n}f', f.read(n*4)))
+>
+> wte = rf(V*E)
+> wpe = rf(C*E)
+>
+> # Layer 0
+> ln1g = rf(E); ln1b = rf(E)
+> attnw = rf(E*3*E); attnb = rf(3*E)
+> projw = rf(E*E); projb = rf(E)
+> ln2g = rf(E); ln2b = rf(E)
+> fcw = rf(E*F); fcb = rf(F)
+> fcpw = rf(F*E); fcpb = rf(E)
+> f.close()
+>
+> # Check: are the attention weights reasonable?
+> # If stored as [E, 3*E], attnw[i*3*E+j] means input i, output j
+> # If stored as [3*E, E], attnw[i*E+j] means output i, input j
+>
+> # Let me check the standard GPT-2 weight shapes from TF
+> # In TF GPT-2, c_attn/w has shape [E, 3*E]
+> # c_proj/w has shape [E, E]
+> # c_fc/w has shape [E, 4*E]
+> # c_proj/w (mlp) has shape [4*E, E]
+> # These are all [in, out] which is what I assumed
+>
+> # But wait - in TF, the convention for matmul is x @ W where x is [batch, in] and W is [in, out]
+> # So the weight matrix W[i][j] means input i, output j
+> # And attnw[j*3*E+i] with my indexing means... let me be more careful
+>
+> # I stored attnw as a flat array of E*3*E floats
+> # In my C code: s += tmp[j] * aw[l][j*3*E+i] where j goes over E (input) and i is the output
+> # This means aw[j*3*E+i] = W[j][i] = W[input][output]
+> # Which is correct for [in, out] layout
+>
+> # Let me check: what if the checkpoint stores them in a different order?
+> # Standard TF checkpoint order for GPT-2:
+> # model/wte, model/wpe
+> # For each layer: model/h{i}/ln_1/g, model/h{i}/ln_1/b,
+> #   model/h{i}/attn/c_attn/w, model/h{i}/attn/c_attn/b,
+> #   model/h{i}/attn/c_proj/w, model/h{i}/attn/c_proj/b,
+> #   model/h{i}/ln_2/g, model/h{i}/ln_2/b,
+> #   model/h{i}/mlp/c_fc/w, model/h{i}/mlp/c_fc/b,
+> #   model/h{i}/mlp/c_proj/w, model/h{i}/mlp/c_proj/b
+> # model/ln_f/g, model/ln_f/b
+>
+> # But this is a custom .ckpt format, not a standard TF checkpoint
+> # The order might be different
+>
+> # Let me check: the ln1g values should be close to 1 (initialized to 1)
+> # and ln1b should be close to 0
+> print('ln1g[:5]:', ln1g[:5])
+> print('ln1b[:5]:', ln1b[:5])
+> print('ln1g mean:', sum(ln1g)/len(ln1g))
+> print('ln1b mean:', sum(ln1b)/len(ln1b))
+>
+> # Check attnw stats
+> import statistics
+> print('attnw mean:', sum(attnw)/len(attnw))
+> print('attnw std:', statistics.stdev(attnw))
+> print('attnw[:5]:', attnw[:5])
+>
+> # Check projw stats
+> print('projw mean:', sum(projw)/len(projw))
+> print('projw std:', statistics.stdev(projw))
+> PYEOF
+

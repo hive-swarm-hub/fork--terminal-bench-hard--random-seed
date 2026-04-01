@@ -1,0 +1,72 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> # The original DB was created with SQLite 3.43.2
+> # Schema cookie is 3, change counter is 3
+> # This suggests:
+> # 1. CREATE TABLE (schema cookie 1, change counter 1)
+> # 2. INSERT base records (change counter 2)
+> # 3. Something else (schema cookie 3, change counter 3) - maybe WAL mode change?
+>
+> # Actually, PRAGMA journal_mode=WAL changes the file format version
+> # but might also increment the schema cookie
+>
+> import sqlite3
+> import os
+>
+> # Let me recreate with the exact same pattern
+> test_db = '/tmp/ref2.db'
+> for ext in ['', '-wal', '-shm']:
+>     if os.path.exists(test_db + ext):
+>         os.remove(test_db + ext)
+>
+> # Create in default journal mode first, then switch to WAL
+> conn = sqlite3.connect(test_db)
+> conn.execute('''CREATE TABLE items (
+>         id INTEGER PRIMARY KEY,
+>         name TEXT,
+>         value INTEGER
+>     )''')
+> conn.commit()
+>
+> base_records = [
+>     (1, 'apple', 100),
+>     (2, 'banana', 200),
+>     (3, 'cherry', 300),
+>     (4, 'date', 400),
+>     (5, 'elderberry', 500),
+> ]
+> conn.executemany('INSERT INTO items VALUES (?, ?, ?)', base_records)
+> conn.commit()
+>
+> # Now switch to WAL mode
+> conn.execute('PRAGMA journal_mode=WAL')
+> conn.commit()
+> conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+>
+> with open(test_db, 'rb') as f:
+>     ref2_data = f.read()
+> with open('/app/main.db', 'rb') as f:
+>     orig_data = f.read()
+>
+> print(f"Reference2 DB size: {len(ref2_data)}")
+> print(f"Match: {ref2_data == orig_data}")
+>
+> if ref2_data != orig_data:
+>     diffs = []
+>     for i in range(min(len(ref2_data), len(orig_data))):
+>         if ref2_data[i] != orig_data[i]:
+>             diffs.append((i, ref2_data[i], orig_data[i]))
+>     print(f"Number of differences: {len(diffs)}")
+>     for offset, ref_byte, orig_byte in diffs:
+>         print(f"  Offset 0x{offset:04x}: ref2={hex(ref_byte)}, orig={hex(orig_byte)}")
+>
+> conn.close()
+> PYEOF
+Reference2 DB size: 8192
+Match: False
+Number of differences: 3
+  Offset 0x002b: ref2=0x1, orig=0x3
+  Offset 0x0062: ref2=0x76, orig=0x6e
+  Offset 0x0063: ref2=0x89, orig=0xba
+root@modal:/app#

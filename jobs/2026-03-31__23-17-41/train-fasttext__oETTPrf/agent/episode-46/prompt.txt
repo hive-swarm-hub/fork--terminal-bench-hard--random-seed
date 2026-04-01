@@ -1,0 +1,71 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train.py << 'PYEOF'
+> import pandas as pd
+> import fasttext
+> import os
+> import re
+>
+> # Load and prepare training data
+> print("Loading training data...")
+> df_train = pd.read_parquet('data/train-00000-of-00001.parquet')
+>
+> def preprocess(text):
+>     text = str(text).replace('\n', ' ').replace('\r', ' ').lower()
+>     text = re.sub(r'([.!?,;:()"\'])', r' \1 ', text)
+>     text = re.sub(r'\s+', ' ', text).strip()
+>     return text
+>
+> print("Converting to fasttext format...")
+> with open('/tmp/train.txt', 'w') as f:
+>     for _, row in df_train.iterrows():
+>         text = preprocess(row['text'])
+>         label = int(row['label'])
+>         f.write(f'__label__{label} {text}\n')
+>
+> print("Loading test data...")
+> df_test = pd.read_parquet('data/test-00000-of-00001.parquet')
+> with open('/tmp/test.txt', 'w') as f:
+>     for _, row in df_test.iterrows():
+>         text = preprocess(row['text'])
+>         label = int(row['label'])
+>         f.write(f'__label__{label} {text}\n')
+>
+> # Train a large model based on autotune params but with more epochs
+> print("Training fasttext model...")
+> model = fasttext.train_supervised(
+>     input='/tmp/train.txt',
+>     epoch=10,
+>     lr=0.1,
+>     wordNgrams=3,
+>     dim=100,
+>     loss='softmax',
+>     bucket=500000,
+>     minCount=2,
+>     minn=3,
+>     maxn=6,
+>     t=0.0001,
+>     thread=4
+> )
+>
+> result = model.test('/tmp/test.txt')
+> print(f"Before quantize - Samples: {result[0]}, Precision: {result[1]:.4f}, Recall: {result[2]:.4f}")
+>
+> # Save unquantized to check size
+> model.save_model('/tmp/model_full.bin')
+> size_mb = os.path.getsize('/tmp/model_full.bin') / (1024 * 1024)
+> print(f"Full model size: {size_mb:.1f} MB")
+>
+> # Quantize to fit under 150MB
+> print("Quantizing...")
+> model.quantize(input='/tmp/train.txt', retrain=True, cutoff=200000, qnorm=True, dsub=2)
+> model.save_model('/app/model.bin')
+> size_mb = os.path.getsize('/app/model.bin') / (1024 * 1024)
+> print(f"Quantized model size: {size_mb:.1f} MB")
+>
+> result = model.test('/tmp/test.txt')
+> print(f"After quantize - Samples: {result[0]}, Precision: {result[1]:.4f}, Recall: {result[2]:.4f}")
+>
+> print("Done!")
+> PYEOF
+root@modal:/app#
