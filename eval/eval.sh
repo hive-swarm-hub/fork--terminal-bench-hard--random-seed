@@ -9,9 +9,10 @@ harbor run \
   --agent-import-path agent:AgentHarness \
   -d terminal-bench@2.0 \
   -m anthropic/claude-opus-4-6 \
-  -e daytona \
+  -e modal \
   -n 20 \
   --n-attempts 1 \
+  -o "$REPO_DIR/jobs" \
   -i adaptive-rejection-sampler \
   -i caffe-cifar-10 \
   -i db-wal-recovery \
@@ -35,7 +36,7 @@ harbor run \
   --env-file "$REPO_DIR/.env"
 
 # Find the most recent job result
-LATEST_JOB=$(ls -td "$REPO_DIR/agent/jobs/"*/ 2>/dev/null | head -1)
+LATEST_JOB=$(ls -td "$REPO_DIR/jobs/"*/ 2>/dev/null | head -1)
 RESULT_FILE="${LATEST_JOB}result.json"
 
 if [ ! -f "$RESULT_FILE" ]; then

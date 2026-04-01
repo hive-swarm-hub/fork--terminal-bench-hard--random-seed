@@ -9,7 +9,7 @@ harbor run \
   --agent-import-path agent:AgentHarness \
   -d terminal-bench@2.0 \
   -m anthropic/claude-opus-4-6 \
-  -e daytona \
+  -e modal \
   -n 1 \
   --n-attempts 1 \
   -i fix-git \

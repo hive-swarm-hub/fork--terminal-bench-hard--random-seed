@@ -11,12 +11,13 @@ Improve an agent scaffold to maximize mean pass rate on the 20 hardest Terminal-
    - `agent/prompt-templates/` — prompt templates used by the agent.
    - `eval/eval.sh` — runs evaluation. Do not modify.
    - `prepare.sh` — installs dependencies. Do not modify.
-2. **Run prepare**: `bash prepare.sh` to install the agent package and its dependencies.
-3. **Run baseline**: `bash eval/eval.sh` to establish the starting score.
+2. **Set up API keys**: Copy `.env.example` to `.env` and fill in the required keys (`ANTHROPIC_API_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`).
+3. **Run prepare**: `bash prepare.sh` to install the agent package and its dependencies.
+4. **Run baseline**: `bash eval/eval.sh` to establish the starting score.
 
 ## The benchmark
 
-Terminal-Bench 2.0 is a benchmark of 89 terminal-based coding tasks. This task focuses on the 20 hardest tasks where the baseline Terminus-KIRA agent scores 0-40%. Tasks span systems programming (compile CompCert, build DOOM for MIPS), ML (train FastText, SAM cell segmentation), data recovery (DB WAL recovery), and more. Each task runs in an isolated sandbox environment via Daytona.
+Terminal-Bench 2.0 is a benchmark of 89 terminal-based coding tasks. This task focuses on the 20 hardest tasks where the baseline Terminus-KIRA agent scores 0-40%. Tasks span systems programming (compile CompCert, build DOOM for MIPS), ML (train FastText, SAM cell segmentation), data recovery (DB WAL recovery), and more. Each task runs in an isolated sandbox environment via Modal.
 
 The 20 hard tasks (grouped by baseline Terminus-KIRA pass rate):
 
@@ -41,6 +42,20 @@ The 20 hard tasks (grouped by baseline Terminus-KIRA pass rate):
 **The goal: maximize mean_pass_rate.** This is the average score across all 20 tasks, where each task scores 0.0 (fail) or 1.0 (pass) on a single trial. Higher is better.
 
 **Simplicity criterion**: All else being equal, simpler is better.
+
+## Keeping results
+
+After each eval run, harbor writes raw traces and results to `jobs/<timestamp>/`. This directory is gitignored so it survives `git reset --hard` when reverting failed experiments. Each job directory contains:
+- `result.json` — overall scores and reward distribution
+- `<task-name>/trial.log` — full agent trajectory (every command and LLM call)
+- `<task-name>/config.json` — run configuration
+- `<task-name>/artifacts/` — any files the agent produced
+
+To permanently preserve a run's traces, force-add and commit:
+```bash
+git add -f jobs/<timestamp>/
+git commit -m "eval run <timestamp>: mean_pass_rate=<score>"
+```
 
 ## Output format
 
