@@ -153,13 +153,49 @@ def _strip_markers(text):
 
 
 async def exec_baseline(session, commands):
-    """Baseline: sequential sleep."""
+    """Baseline: sequential sleep (Terminus2 parent class behavior)."""
     t0 = time.monotonic()
     for cmd in commands:
         if cmd.keystrokes:
             await session.send_keys(cmd.keystrokes, block=False, min_timeout_sec=0.0)
         await asyncio.sleep(cmd.duration)
     output = await session.get_incremental_output()
+    return time.monotonic() - t0, output
+
+
+async def exec_original(session, commands):
+    """EXACT original agent code before fixes.
+
+    This is the marker-sequential approach that was in agent.py before changes:
+    - Send cmd + marker per command
+    - Poll capture_pane(capture_entire=False) per command
+    - Wait up to cmd.duration per command
+    - No fast path, no pipelining, no empty-cmd handling
+    """
+    t0 = time.monotonic()
+    seq = 0
+    for cmd in commands:
+        seq += 1
+        marker = f"__ORIG__{seq}__"
+        start = time.monotonic()
+
+        if cmd.keystrokes:
+            await session.send_keys(cmd.keystrokes, block=False, min_timeout_sec=0.0)
+        # Always send marker (original code did this for every command)
+        await session.send_keys(f"echo '{marker}'\n", block=False, min_timeout_sec=0.0)
+
+        # Poll per-command with capture_entire=False (original used visible screen only)
+        await asyncio.sleep(min(0.3, cmd.duration))
+        while time.monotonic() - start < cmd.duration:
+            pane = await session.capture_pane(capture_entire=False)
+            if marker in pane:
+                break
+            await asyncio.sleep(0.5)
+
+    # Filter markers
+    output = await session.get_incremental_output()
+    for i in range(1, seq + 1):
+        output = output.replace(f"__ORIG__{i}__", "")
     return time.monotonic() - t0, output
 
 
@@ -253,7 +289,7 @@ async def exec_smart(session, commands):
 
 
 STRATEGIES = {
-    "baseline": exec_baseline,
+    "original": exec_original,
     "hybrid": exec_hybrid,
     "smart": exec_smart,
 }
@@ -318,8 +354,8 @@ async def main():
             print(f"{'='*70}")
 
             for sname, sfn in STRATEGIES.items():
-                # Skip baseline on cases with >60s of empty waits (would timeout sandbox)
-                if sname == "baseline" and empty_time > 60:
+                # Skip original on cases with >60s of empty waits (would timeout sandbox)
+                if sname == "original" and empty_time > 60:
                     print(f"  {sname:<12s}    SKIP (would sleep {empty_time:.0f}s of empty waits)")
                     results.append({
                         "case": case.name, "strategy": sname,
