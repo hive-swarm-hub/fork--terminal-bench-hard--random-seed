@@ -1,0 +1,65 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct, mmap
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def read_floats(offset, count):
+>     data = mm[offset*4:(offset+count)*4]
+>     return struct.unpack(f'<{count}f', data)
+>
+> layer0_start = 50257*768 + 1024*768  # = 39383808
+>
+> # Try different orderings. Let's check various offsets within layer 0
+> # to find where ln1_g might be (values ~1.0)
+>
+> # Possible orderings from common implementations:
+> # Order A (llm.c style): wte, wpe, ln1w, ln1b, qkvw, qkvb, attprojw, attprojb, ln2w, ln2b, fcw, fcb, fcprojw, fcprojb, lnfw, lnfb
+> # Order B: all ln1w for all layers, all ln1b, etc. (grouped by parameter type)
+>
+> # Let's check if it's grouped by parameter type across all layers
+> # That would mean: all ln1_g (12*768), all ln1_b (12*768), all qkv_w (12*768*2304), etc.
+>
+> # Check if offset layer0_start has 12*768 values near 1.0
+> vals = read_floats(layer0_start, 20)
+> print('At layer0_start:', [f'{v:.3f}' for v in vals])
+>
+> # Maybe the order is different. Let me check if this is llm.c / llama.c style
+> # where params are grouped by type across all layers
+>
+> # Check various offsets for values near 1.0
+> offsets_to_check = [
+>     ('layer0_start', layer0_start),
+>     ('layer0_start + 12*768', layer0_start + 12*768),
+>     ('layer0_start + 2*12*768', layer0_start + 2*12*768),
+> ]
+>
+> for name, off in offsets_to_check:
+>     vals = read_floats(off, 10)
+>     print(f'{name}: {[f"{v:.4f}" for v in vals]}')
+>
+> # Let's just search for a block of 768 consecutive values all near 1.0
+> print('\nSearching for ln gamma (values near 1.0)...')
+> chunk_size = 768
+> for i in range(layer0_start, layer0_start + 7087872, chunk_size):
+>     vals = read_floats(i, chunk_size)
+>     avg = sum(vals) / len(vals)
+>     mn = min(vals)
+>     mx = max(vals)
+>     if 0.5 < avg < 1.5 and mn > 0.3:
+>         print(f'  Offset {i} (relative {i - layer0_start}): avg={avg:.4f}, min={mn:.4f}, max={mx:.4f}')
+>         print(f'  First 10: {[f"{v:.4f}" for v in vals[:10]]}')
+>
+> mm.close()
+> f.close()
+> PYEOF
+At layer0_start: ['0.013', '0.111', '-0.019', '-0.080', '-0.194', '-0.023', '-0.045', '0.049', '0.039', '0.106', '0.114', '0.032', '0.339', '0.159', '-0.063', '
+0.064', '0.152', '0.022', '-0.006', '-0.069']
+layer0_start: ['0.0126', '0.1113', '-0.0190', '-0.0797', '-0.1945', '-0.0229', '-0.0454', '0.0487', '0.0393', '0.1060']
+layer0_start + 12*768: ['0.0240', '0.0429', '-0.0241', '-0.0179', '-0.1271', '0.0495', '0.0544', '-0.0132', '0.0773', '0.1802']
+layer0_start + 2*12*768: ['0.0736', '0.0973', '-0.0026', '-0.0659', '-0.0224', '-0.2941', '-0.0238', '0.1386', '0.0114', '-0.0754']
+
+Searching for ln gamma (values near 1.0)...
+root@modal:/app#

@@ -1,0 +1,108 @@
+New Terminal Output:
+
+  90 |       3653 | cx= 418.3 cy= 162.8 bot=390 top= 80
+ 103 |       5634 | cx= 446.5 cy= 176.8 bot=398 top= 80
+ 105 |       4476 | cx= 510.7 cy= 146.1 bot=277 top= 80
+ 107 |       8459 | cx= 390.4 cy= 135.9 bot=325 top= 80
+ 108 |      10347 | cx= 443.9 cy= 154.1 bot=362 top= 80
+ 109 |      47114 | cx= 473.7 cy= 174.2 bot=516 top= 80
+ 110 |      50691 | cx= 468.7 cy= 181.3 bot=508 top= 80
+ 111 |      18823 | cx= 460.5 cy= 153.6 bot=361 top= 80
+ 112 |      13376 | cx= 324.3 cy= 152.4 bot=398 top= 80
+ 113 |      11908 | cx= 433.2 cy= 161.6 bot=506 top= 80
+ 114 |      42369 | cx= 461.4 cy= 175.0 bot=515 top= 80
+ 115 |      26799 | cx= 453.6 cy= 160.5 bot=388 top= 80
+ 116 |      16097 | cx= 402.0 cy= 142.7 bot=396 top= 80
+ 117 |       3864 | cx= 417.5 cy= 131.9 bot=358 top= 80
+ 118 |      60326 | cx= 481.5 cy= 164.2 bot=514 top= 80
+ 119 |      70398 | cx= 485.5 cy= 177.1 bot=517 top= 80
+root@modal:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> frames = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     frames.append(frame)
+> cap.release()
+>
+> bg_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY).astype(np.float32)
+> kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+>
+> # Step 1: Find the athlete's horizontal trajectory using consecutive frame differences
+> # This gives us the moving region without static noise
+> prev_gray = bg_gray.copy()
+> motion_data = {}  # frame_idx -> (cx, cy, bot_y)
+>
+> for i in range(1, len(frames)):
+>     gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     consec_diff = np.abs(gray - prev_gray)
+>     consec_mask = (consec_diff > 15).astype(np.uint8) * 255
+>     consec_mask = cv2.morphologyEx(consec_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+>     consec_mask = cv2.morphologyEx(consec_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+>     consec_mask[:80, :] = 0
+>
+>     consec_sum = np.sum(consec_mask > 0)
+>     if consec_sum > 500:
+>         ys, xs = np.where(consec_mask > 0)
+>         motion_data[i] = (np.mean(xs), np.mean(ys), np.max(ys))
+>
+>     prev_gray = gray.copy()
+>
+> # Step 2: Identify the athlete's run sequence
+> # The athlete moves consistently from right to left
+> # Find the longest sequence of frames where cx is decreasing
+> motion_frames = sorted(motion_data.keys())
+> if len(motion_frames) > 0:
+>     # Find consecutive sequences
+>     sequences = []
+>     current_seq = [motion_frames[0]]
+>     for j in range(1, len(motion_frames)):
+>         if motion_frames[j] - motion_frames[j-1] <= 3:  # Allow small gaps
+>             current_seq.append(motion_frames[j])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [motion_frames[j]]
+>     sequences.append(current_seq)
+>
+>     # Find the longest sequence (should be the athlete's run)
+>     longest_seq = max(sequences, key=len)
+>     print(f"Longest motion sequence: frames {longest_seq[0]} to {longest_seq[-1]}")
+>
+>     # Step 3: For each frame in the sequence, use background subtraction
+>     # in a window around the athlete's expected horizontal position
+>     # to find the actual bottom of the athlete (feet)
+>
+>     print("\nFrame | Motion_Cx | Motion_Bot | BG_Bot_in_window | BG_Top_in_window")
+>     for i in longest_seq:
+>         gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray - bg_gray)
+>         bg_mask = (diff > 20).astype(np.uint8) * 255
+>         bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+>         bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+>
+>         # Get the athlete's expected horizontal position from motion data
+>         mcx, mcy, mbot = motion_data[i]
+>
+>         # Create a window around the athlete's horizontal position
+>         window_half = 150
+>         x_min = max(0, int(mcx - window_half))
+>         x_max = min(960, int(mcx + window_half))
+>
+>         # Look at the background subtraction mask in this window
+>         window_mask = bg_mask[:, x_min:x_max]
+>         window_mask[:80, :] = 0  # Remove sky
+>
+>         fg_pixels = np.sum(window_mask > 0)
+>         if fg_pixels > 100:
+>             ys, xs = np.where(window_mask > 0)
+>             bot_y = np.max(ys)
+>             top_y = np.min(ys)
+>             print(f"{i:4d} | {mcx:9.1f} | {mbot:10d} | {bot_y:16d} | {top_y:16d}")
+>         else:
+>             print(f"{i:4d} | {mcx:9.1f} | {mbot:10d} | {'N/A':>16s} | {'N/A':>16s}")
+> PYEOF
+

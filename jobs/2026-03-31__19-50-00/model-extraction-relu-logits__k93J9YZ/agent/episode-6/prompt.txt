@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def extract_A1():
+>     np.random.seed(42)
+>
+>     # Strategy: Walk along random lines with fine steps.
+>     # Between consecutive steps, at most one neuron should flip.
+>     # The gradient difference gives us A2[0,j] * A1[j,:] for the flipping neuron j.
+>     # We collect all such differences and cluster by direction.
+>
+>     row_candidates = []  # raw gradient differences
+>
+>     print("Collecting gradient differences along random lines...")
+>     n_lines = 150
+>     n_steps = 300  # fine steps per line
+>
+>     for line_idx in range(n_lines):
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         t_values = np.linspace(-5, 5, n_steps)
+>
+>         prev_grad = numerical_gradient(x0 + t_values[0] * direction)
+>
+>         for i in range(1, len(t_values)):
+>             curr_grad = numerical_gradient(x0 + t_values[i] * direction)
+>             diff = curr_grad - prev_grad
+>             norm = np.linalg.norm(diff)
+>
+>             if norm > 1e-5:
+>                 row_candidates.append(diff)
+>
+>             prev_grad = curr_grad
+>
+>         if (line_idx + 1) % 30 == 0:
+>             print(f"  Line {line_idx+1}/{n_lines}, candidates: {len(row_candidates)}")
+>
+>     print(f"Total candidates: {len(row_candidates)}")
+>
+>     # Normalize directions for clustering
+>     normalized = []
+>     for c in row_candidates:
+>         n = np.linalg.norm(c)
+>         if n < 1e-8:
+>             normalized.append(np.zeros(10))
+>             continue
+>         v = c / n
+>         # Canonicalize sign
+>         idx = np.argmax(np.abs(v))
+>         if v[idx] < 0:
+>             v = -v
+>         normalized.append(v)
+>     normalized = np.array(normalized)
+>
+>     # Cluster by cosine similarity
+>     clusters = []  # list of (representative_direction, [indices])
+>     used = np.zeros(len(normalized), dtype=bool)
+>
+>     for i in range(len(normalized)):
+>         if used[i]:
+>             continue
+>         if np.linalg.norm(normalized[i]) < 0.5:
+>             used[i] = True
+>             continue
+>
+>         cluster_indices = [i]
+>         used[i] = True
+>
+>         for j in range(i+1, len(normalized)):
+>             if used[j]:
+>                 continue
+>             if np.linalg.norm(normalized[j]) < 0.5:
+>                 continue
+>             dot = abs(np.dot(normalized[i], normalized[j]))
+>             if dot > 0.995:
+>                 cluster_indices.append(j)
+>                 used[j] = True
+>
+>         clusters.append(cluster_indices)
+>
+>     print(f"Found {len(clusters)} clusters")
+>     cluster_sizes = sorted([len(c) for c in clusters], reverse=True)
+>     print(f"Cluster sizes: {cluster_sizes[:30]}")
+>
+>     # Sort by cluster size, take top 20
+>     clusters.sort(key=len, reverse=True)
+>
+>     # For each of the top 20 clusters, compute average direction
+>     rows = []
+>     for cluster_indices in clusters[:20]:
+>         ref = normalized[cluster_indices[0]]
+>         aligned = []
+>         for idx in cluster_indices:
+>             raw = row_candidates[idx]
+>             if np.dot(raw, ref) < 0:
+>                 raw = -raw
+>             aligned.append(raw)
+>         avg = np.mean(aligned, axis=0)
+>         rows.append(avg)
+>
+>     A1_stolen = np.array(rows)
+>     print(f"\nExtracted matrix shape: {A1_stolen.shape}")
+>
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = extract_A1()
+>
+>     # Quick verification against true A1 (for development)
+>     try:
+>         from forward import A1 as true_A1
+>
+>         print("\nVerification against true A1:")
+>         stolen_norm = A1_stolen / np.linalg.norm(A1_stolen, axis=1, keepdims=True)
+>         true_norm = true_A1 / np.linalg.norm(true_A1, axis=1, keepdims=True)
+>
+>         matched_true = set()
+>         all_good = True
+>         for i in range(len(stolen_norm)):
+>             dots = np.abs(true_norm @ stolen_norm[i])
+>             best_j = np.argmax(dots)
+>             best_dot = dots[best_j]
+>             status = ""
+>             if best_j in matched_true:
+>                 status = " [DUPLICATE]"
+>                 all_good = False
+>             elif best_dot < 0.99:
+>                 status = " [POOR MATCH]"
+>                 all_good = False
+>             matched_true.add(best_j)
+>             print(f"  Row {i}: matches true row {best_j} (cos_sim={best_dot:.6f}){status}")
+>
+>         unmatched = set(range(20)) - matched_true
+>         if unmatched:
+>             print(f"  Unmatched true rows: {unmatched}")
+>         print(f"  Matched {len(matched_true)} / 20 unique true rows")
+>         print(f"  All good: {all_good}")
+>     except Exception as e:
+>         print(f"Verification error: {e}")
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("\nSaved to /app/stolen_A1.npy")
+> PYEOF
+root@modal:/app#

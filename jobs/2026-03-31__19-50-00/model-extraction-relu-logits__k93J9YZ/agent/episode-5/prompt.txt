@@ -1,0 +1,190 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_boundary_crossings_on_line(x0, direction, t_min=-5, t_max=5, n_coarse=200):
+>     """Find points along x0 + t*direction where the gradient changes (ReLU boundary)."""
+>     # Coarse scan
+>     t_values = np.linspace(t_min, t_max, n_coarse)
+>     grads = []
+>     for t in t_values:
+>         x = x0 + t * direction
+>         g = numerical_gradient(x)
+>         grads.append(g)
+>
+>     crossings = []
+>     for i in range(len(grads) - 1):
+>         diff = grads[i+1] - grads[i]
+>         if np.linalg.norm(diff) > 1e-5:
+>             # Binary search to find exact crossing point
+>             t_lo, t_hi = t_values[i], t_values[i+1]
+>             g_lo = grads[i]
+>
+>             for _ in range(30):  # binary search iterations
+>                 t_mid = (t_lo + t_hi) / 2
+>                 g_mid = numerical_gradient(x0 + t_mid * direction)
+>                 if np.linalg.norm(g_mid - g_lo) > 1e-5:
+>                     t_hi = t_mid
+>                 else:
+>                     t_lo = t_mid
+>                     g_lo = g_mid
+>
+>             # Now t_lo and t_hi bracket a single crossing
+>             g_before = numerical_gradient(x0 + t_lo * direction)
+>             g_after = numerical_gradient(x0 + t_hi * direction)
+>             grad_diff = g_after - g_before
+>
+>             if np.linalg.norm(grad_diff) > 1e-5:
+>                 crossings.append(grad_diff)
+>
+>     return crossings
+>
+> def normalize_direction(v):
+>     """Normalize vector and canonicalize sign."""
+>     n = np.linalg.norm(v)
+>     if n < 1e-10:
+>         return None
+>     v_norm = v / n
+>     # Canonicalize: make the component with largest absolute value positive
+>     idx = np.argmax(np.abs(v_norm))
+>     if v_norm[idx] < 0:
+>         v_norm = -v_norm
+>     return v_norm
+>
+> def extract_A1():
+>     np.random.seed(42)
+>
+>     row_candidates = []  # (direction_normalized, raw_vector)
+>
+>     print("Finding boundary crossings...")
+>     trial = 0
+>     while len(row_candidates) < 500 and trial < 300:
+>         x0 = np.random.randn(10) * 2
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         crossings = find_boundary_crossings_on_line(x0, direction)
+>         for c in crossings:
+>             d = normalize_direction(c)
+>             if d is not None:
+>                 row_candidates.append((d, c))
+>
+>         trial += 1
+>         if trial % 50 == 0:
+>             print(f"  Trial {trial}, candidates so far: {len(row_candidates)}")
+>
+>     print(f"Total candidates: {len(row_candidates)}")
+>
+>     # Cluster by direction similarity
+>     directions = np.array([r[0] for r in row_candidates])
+>     raws = [r[1] for r in row_candidates]
+>
+>     clusters = []  # list of lists of indices
+>     used = np.zeros(len(directions), dtype=bool)
+>
+>     for i in range(len(directions)):
+>         if used[i]:
+>             continue
+>         cluster = [i]
+>         used[i] = True
+>         for j in range(i+1, len(directions)):
+>             if used[j]:
+>                 continue
+>             dot = abs(np.dot(directions[i], directions[j]))
+>             if dot > 0.995:
+>                 cluster.append(j)
+>                 used[j] = True
+>         clusters.append(cluster)
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # For each cluster, compute the average raw gradient difference
+>     # The raw differences are A2[0,j] * A1[j,:] but may have inconsistent signs
+>     rows = []
+>     for cluster in clusters:
+>         if len(cluster) < 2:
+>             # Skip singleton clusters as they might be noise or multi-neuron crossings
+>             # Actually keep them but mark as less reliable
+>             pass
+>
+>         # Use the first element as reference direction
+>         ref_dir = directions[cluster[0]]
+>         aligned_raws = []
+>         for idx in cluster:
+>             raw = raws[idx]
+>             if np.dot(raw, ref_dir) < 0:
+>                 raw = -raw
+>             aligned_raws.append(raw)
+>
+>         avg_raw = np.mean(aligned_raws, axis=0)
+>         rows.append(avg_raw)
+>
+>     # Now we need to identify which clusters correspond to actual A1 rows
+>     # and which are multi-neuron artifacts
+>     #
+>     # Key insight: if a gradient difference is a sum of two rows, it won't be
+>     # parallel to any single row. With enough data, single-row crossings will
+>     # form large clusters, while multi-row artifacts will be rare/singleton.
+>
+>     # Sort clusters by size (largest first)
+>     cluster_sizes = [len(c) for c in clusters]
+>     sorted_indices = np.argsort(cluster_sizes)[::-1]
+>
+>     print("Cluster sizes:", sorted([len(c) for c in clusters], reverse=True))
+>
+>     # Take the top 20 clusters
+>     top_rows = []
+>     for i in sorted_indices[:20]:
+>         top_rows.append(rows[i])
+>
+>     A1_stolen = np.array(top_rows)
+>     print(f"Extracted matrix shape: {A1_stolen.shape}")
+>
+>     # Verify: each row should be proportional to a row of the true A1
+>     # We normalize each row to unit length for comparison
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = extract_A1()
+>
+>     # Verify against true A1
+>     from forward import A1 as true_A1
+>
+>     print("\nVerification:")
+>     # For each stolen row, find the best matching true row
+>     stolen_normalized = A1_stolen / np.linalg.norm(A1_stolen, axis=1, keepdims=True)
+>     true_normalized = true_A1 / np.linalg.norm(true_A1, axis=1, keepdims=True)
+>
+>     matched = set()
+>     for i in range(len(stolen_normalized)):
+>         dots = np.abs(true_normalized @ stolen_normalized[i])
+>         best_j = np.argmax(dots)
+>         best_dot = dots[best_j]
+>         if best_j in matched:
+>             print(f"  Stolen row {i}: best match true row {best_j} (dot={best_dot:.6f}) [DUPLICATE]")
+>         else:
+>             print(f"  Stolen row {i}: best match true row {best_j} (dot={best_dot:.6f})")
+>             matched.add(best_j)
+>
+>     print(f"\nMatched {len(matched)} out of 20 true rows")
+>
+>     # Save
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+> PYEOF
+root@modal:/app#

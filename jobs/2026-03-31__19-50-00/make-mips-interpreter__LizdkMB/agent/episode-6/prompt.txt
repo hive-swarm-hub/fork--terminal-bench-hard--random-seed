@@ -1,0 +1,201 @@
+New Terminal Output:
+
+root@modal:/app# sed -n '1517,1600p' doomgeneric/doomgeneric/my_stdlib.c
+/* Forward declaration for the fake filesystem syscall handler */
+
+/*
+ * Generic syscall function that can handle up to 6 arguments
+ * Returns the syscall return value (usually negative on error)
+ *
+ * Arguments are passed in the following registers:
+ * syscall number: rax
+ * arg1: rdi
+ * arg2: rsi
+ * arg3: rdx
+ * arg4: r10
+ * arg5: r8
+ * arg6: r9
+ */
+
+static long syscall6(long syscall_num, long arg1, long arg2, long arg3,
+                     long arg4, long arg5, long arg6) {
+    long result;
+
+    /* Special case for stdout/stderr writes - bypass fake filesystem */
+    if (syscall_num == SYS_write && (arg1 == 0 || arg1 == 1)) {
+        /* Use the real syscall for stdout/stderr */
+      return real_syscall6(syscall_num, arg1, arg2, arg3, arg4, arg5, arg6);
+    }
+
+    /* Check if this is a file-related syscall that should be handled by fake_fs.c */
+    switch (syscall_num) {
+        case SYS_read:
+        case SYS_write:
+        case SYS_open:
+        case SYS_close:
+        case SYS_lseek:
+        case SYS_fsync:
+        case SYS_rename:
+        case SYS_mkdir:
+        case SYS_unlink:
+          #ifdef USE_FS
+          /* Redirect to the fake filesystem handler */
+          return syscall_fs((int)syscall_num, arg1, arg2, arg3, arg4, arg5, arg6);
+          #else
+          0;
+          #endif
+
+    }
+
+    return real_syscall6(syscall_num, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+
+/* One argument syscall */
+static long syscall1(long syscall_num, long arg1) {
+    return syscall6(syscall_num, arg1, 0, 0, 0, 0, 0);
+}
+
+/* Two argument syscall */
+static long syscall2(long syscall_num, long arg1, long arg2) {
+    return syscall6(syscall_num, arg1, arg2, 0, 0, 0, 0);
+}
+
+/* Three argument syscall */
+static long syscall3(long syscall_num, long arg1, long arg2, long arg3) {
+    return syscall6(syscall_num, arg1, arg2, arg3, 0, 0, 0);
+}
+
+/* Four argument syscall */
+static long syscall4(long syscall_num, long arg1, long arg2, long arg3, long arg4) {
+    return syscall6(syscall_num, arg1, arg2, arg3, arg4, 0, 0);
+}
+
+/* Five argument syscall */
+static long syscall5(long syscall_num, long arg1, long arg2, long arg3, long arg4, long arg5) {
+    return syscall6(syscall_num, arg1, arg2, arg3, arg4, arg5, 0);
+}
+
+/* Zero argument syscall */
+static long syscall0(long syscall_num) {
+    return syscall6(syscall_num, 0, 0, 0, 0, 0, 0);
+}
+
+
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
+root@modal:/app# sed -n '200,280p' doomgeneric/doomgeneric/my_stdlib.c
+
+
+FileNode* create_node(const char* name, int type, FileNode* parent);
+
+// Helper function to initialize the filesystem
+void init_filesystem() {
+    // Create root directory if it doesn't exist
+    if (root == NULL) {
+        root = (FileNode*)malloc(sizeof(FileNode));
+        strcpy(root->name, "/");
+        root->type = FILE_TYPE_DIRECTORY;
+        root->created = root->modified = root->accessed = time(NULL);
+        root->data = NULL;
+        root->size = 0;
+        root->capacity = 0;
+        root->entries = (DirEntry*)malloc(10 * sizeof(DirEntry));
+        root->num_entries = 0;
+        root->max_entries = 10;
+        root->parent = root; // Root is its own parent
+
+        // Initialize file descriptor table
+        for (int i = 0; i < MAX_FILE_DESCRIPTORS; i++) {
+            if (i < 5) {
+                fd_table[i].used = 1;  // Reserve file descriptors 0-4
+                fd_table[i].node = NULL;
+            } else {
+                fd_table[i].used = 0;
+            }
+        }
+
+        // Load doom.wad from the real filesystem
+        const char* wad_path = "doom.wad";
+
+        // Open the WAD file from the real filesystem
+        int real_fd = real_syscall6(SYS_open, (long)wad_path, O_RDONLY, 0, 0, 0, 0);
+        if (real_fd >= 0) {
+            // Get the file size
+            off_t file_size = real_syscall6(SYS_lseek, real_fd, 0, SEEK_END, 0, 0, 0);
+            real_syscall6(SYS_lseek, real_fd, 0, SEEK_SET, 0, 0, 0); // Reset to beginning
+
+            if (file_size > 0 && file_size <= MAX_FILE_SIZE) {
+                // Allocate memory for the file data
+                unsigned char* wad_data = (unsigned char*)malloc(file_size);
+                if (wad_data != NULL) {
+                    // Read the file data
+                    ssize_t bytes_read = real_syscall6(SYS_read, real_fd, (long)wad_data, file_size, 0, 0, 0);
+
+                    if (bytes_read == file_size) {
+                        // Create a new file node for doom.wad
+                        FileNode* wad_node = create_node("doom.wad", FILE_TYPE_REGULAR, root);
+                        wad_node->data = wad_data;
+                        wad_node->size = file_size;
+                        wad_node->capacity = file_size;
+
+                        // Add the file to the root directory
+                        add_to_directory(root, "doom.wad", wad_node);
+
+                        printf("Loaded doom.wad (%d bytes) into in-memory filesystem\n", file_size);
+                    } else {
+                        free(wad_data);
+                        printf("Failed to read doom.wad: read %d of %d bytes\n", bytes_read, file_size);
+                    }
+                } else {
+                    printf("Failed to allocate memory for doom.wad (%d bytes)\n", file_size);
+                }
+            } else {
+                printf("doom.wad file size invalid: %d bytes\n", file_size);
+            }
+
+            // Close the real file
+            real_syscall6(SYS_close, real_fd, 0, 0, 0, 0, 0);
+        } else {
+            printf("Failed to open doom.wad: error %d\n", errno);
+        }
+    }
+}
+
+// Helper function to find a file node by path
+FileNode* find_node(const char* path, FileNode** parent_dir) {
+    if (root == NULL) {
+        init_filesystem();
+root@modal:/app# readelf -s doomgeneric_mips | grep -E '(syscall|__start|main|_start|FUNC.*GLOBAL)' | head -30
+   103: 00000000     0 FILE    LOCAL  DEFAULT  ABS d_main.c
+   124: 0047b334     4 OBJECT  LOCAL  DEFAULT    6 wipe_scr_start
+   232: 0047c954     4 OBJECT  LOCAL  DEFAULT    6 default_main_config
+   304: 00000000     0 FILE    LOCAL  DEFAULT  ABS r_main.c
+   431: 00000000     0 FILE    LOCAL  DEFAULT  ABS w_main.c
+   454: 0043d974   168 FUNC    LOCAL  DEFAULT    3 syscall6
+   466: 004118f4    84 FUNC    GLOBAL DEFAULT    3 M_DrawSelCell
+   469: 00415258   672 FUNC    GLOBAL DEFAULT    3 A_Chase
+   470: 0043ac80    92 FUNC    GLOBAL DEFAULT    3 putchar
+   471: 00427630   184 FUNC    GLOBAL DEFAULT    3 R_DrawColumnInCache
+   473: 0042a444   244 FUNC    GLOBAL DEFAULT    3 R_InitLightTables
+   474: 0040e0a0    56 FUNC    GLOBAL DEFAULT    3 I_InitSound
+   477: 0040e118     8 FUNC    GLOBAL DEFAULT    3 I_InitMusic
+   480: 0042d31c   976 FUNC    GLOBAL DEFAULT    3 R_ProjectSprite
+   483: 00416830   272 FUNC    GLOBAL DEFAULT    3 A_SkullAttack
+   485: 00435a18   300 FUNC    GLOBAL DEFAULT    3 WI_initNetgameStats
+   486: 00404570   292 FUNC    GLOBAL DEFAULT    3 D_SetGameDescription
+   487: 0043a394    36 FUNC    GLOBAL DEFAULT    3 strcpy
+   488: 00411214    12 FUNC    GLOBAL DEFAULT    3 M_ClearMenus
+   490: 00423cc0   304 FUNC    GLOBAL DEFAULT    3 P_InitPicAnims
+   491: 00418050   416 FUNC    GLOBAL DEFAULT    3 P_GiveAmmo
+   493: 00429ec0   472 FUNC    GLOBAL DEFAULT    3 R_PointToAngle
+   497: 00439c70   156 FUNC    GLOBAL DEFAULT    3 basic_free
+   500: 00422244   588 FUNC    GLOBAL DEFAULT    3 P_LoadSegs
+   503: 0043322c   352 FUNC    GLOBAL DEFAULT    3 V_DrawXlaPatch
+   505: 0043dba8    28 FUNC    GLOBAL DEFAULT    3 fabs
+   509: 0040e158     8 FUNC    GLOBAL DEFAULT    3 I_StopSong
+   511: 0042a558   936 FUNC    GLOBAL DEFAULT    3 R_ExecuteSetViewSize
+   514: 0041c524   280 FUNC    GLOBAL DEFAULT    3 P_TraverseIntercepts
+   515: 00405b50   328 FUNC    GLOBAL DEFAULT    3 F_StartFinale
+root@modal:/app#

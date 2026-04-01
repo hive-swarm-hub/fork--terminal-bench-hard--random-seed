@@ -1,0 +1,116 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> frames = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     frames.append(frame)
+> cap.release()
+>
+> bg_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+> # Approach: track the athlete using consecutive frame differences
+> # to avoid static artifacts
+>
+> # First, let's identify the hurdle position from frame 0
+> # The hurdle is roughly in the center of the frame
+> # From the blob analysis, the static blobs are at:
+> # cx~73, cy~125 (some sign/artifact)
+> # cx~332, cy~170 (another artifact or part of hurdle area)
+> # cx~403, cy~154 (another artifact)
+> # cx~622, cy~169 (another artifact)
+>
+> # The athlete blob moves from cx=916 (frame 49) to cx=58 (frame 70)
+> # The hurdle appears to be around x=400-500 based on the frame 0 analysis
+>
+> # Let me use a different approach: use MOG2 or simple running average
+> # Actually, let me just focus on the athlete's vertical position
+> # by looking at the foreground mask in a window around the athlete's expected position
+>
+> # Track the athlete by following the largest moving blob
+> # Filter out static blobs by comparing to a "static noise" mask
+>
+> # Create a static noise mask from a frame where no athlete is present (e.g., frame 80)
+> static_gray = cv2.cvtColor(frames[80], cv2.COLOR_BGR2GRAY).astype(np.float32)
+> static_diff = np.abs(static_gray - bg_gray)
+> static_mask = (static_diff > 20).astype(np.uint8) * 255
+> kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+> static_mask = cv2.morphologyEx(static_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+> static_mask = cv2.morphologyEx(static_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+> static_mask = cv2.dilate(static_mask, kernel, iterations=3)  # Dilate to cover edges
+>
+> print(f"Static mask has {np.sum(static_mask > 0)} pixels")
+>
+> # Now for each frame, subtract the static mask
+> print("\nFrame | Bot_Y | Top_Y | Cx | Area")
+> for i in range(45, 75):
+>     gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     diff = np.abs(gray - bg_gray)
+>     mask = (diff > 20).astype(np.uint8) * 255
+>     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+>     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+>
+>     # Remove static noise
+>     mask[static_mask > 0] = 0
+>     mask[:100, :] = 0  # Remove sky
+>
+>     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+>
+>     if num_labels > 1:
+>         areas = stats[1:, cv2.CC_STAT_AREA]
+>         largest_idx = np.argmax(areas) + 1
+>         area = stats[largest_idx, cv2.CC_STAT_AREA]
+>
+>         if area > 100:
+>             x = stats[largest_idx, cv2.CC_STAT_LEFT]
+>             y = stats[largest_idx, cv2.CC_STAT_TOP]
+>             w = stats[largest_idx, cv2.CC_STAT_WIDTH]
+>             h = stats[largest_idx, cv2.CC_STAT_HEIGHT]
+>             cx, cy = centroids[largest_idx]
+>             bot_y = y + h
+>             print(f"{i:4d} | {bot_y:5d} | {y:5d} | {cx:6.1f} | {area:5d}")
+>         else:
+>             print(f"{i:4d} | small")
+>     else:
+>         print(f"{i:4d} | none")
+> PYEOF
+Static mask has 102808 pixels
+
+Frame | Bot_Y | Top_Y | Cx | Area
+  45 |   114 |   100 |   34.6 |   375
+  46 |   114 |   100 |   34.3 |   371
+  47 |   303 |   241 |  953.7 |   675
+  48 |   336 |   270 |  894.2 |  1068
+  49 |   359 |   221 |  881.9 |  2650
+  50 |   361 |   189 |  875.3 |  4235
+  51 |   363 |   211 |  845.7 |  3714
+  52 |   363 |   197 |  816.7 |  3973
+  53 |   363 |   177 |  805.3 |  3232
+  54 |   343 |   224 |  792.4 |  1962
+  55 |   309 |   172 |  749.1 |  2168
+  56 |   161 |   112 |  664.4 |  1462
+  57 |   148 |   105 |  594.1 |   659
+  58 |   157 |   114 |  574.8 |   965
+  59 |   157 |   100 |  495.0 |  1567
+  60 |   309 |   233 |  387.0 |  1503
+  61 |   347 |   237 |  380.5 |  2324
+  62 |   368 |   215 |  369.8 |  3085
+  63 |   369 |   223 |  354.6 |  3028
+  64 |   368 |   227 |  334.3 |  2828
+  65 |   364 |   203 |  291.9 |  3060
+  66 |   344 |   236 |  254.2 |  2540
+  67 |   349 |   100 |  162.7 |  8099
+  68 |   364 |   234 |  126.0 |  5052
+  69 |   343 |   228 |   85.1 |  4337
+  70 |   336 |   228 |   45.5 |  3526
+  71 |   333 |   235 |   31.3 |  1537
+  72 |   353 |   272 |   50.4 |  1213
+  73 |   324 |   282 |   39.3 |   913
+  74 |   289 |   264 |   10.8 |   401
+root@modal:/app#

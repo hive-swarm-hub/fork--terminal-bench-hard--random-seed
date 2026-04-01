@@ -1,0 +1,129 @@
+New Terminal Output:
+
+root@modal:/app# cat > design_primers2.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'c': 'g', 'g': 'c'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> with open('sequences.fasta') as f:
+>     content = f.read()
+>
+> seqs = {}
+> for block in content.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip().lower()
+>     seqs[name] = seq
+>
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Find the insertion
+> prefix_len = 0
+> for i in range(min(len(input_seq), len(output_seq))):
+>     if input_seq[i] == output_seq[i]:
+>         prefix_len += 1
+>     else:
+>         break
+>
+> ins_len = len(output_seq) - len(input_seq)
+> insertion = output_seq[prefix_len:prefix_len+ins_len]
+>
+> # Verify
+> assert input_seq[:prefix_len] + insertion + input_seq[prefix_len:] == output_seq
+>
+> print(f'Insertion point: {prefix_len}')
+> print(f'Insertion: {insertion} (len={len(insertion)})')
+>
+> # Design primers for Q5 SDM insertion
+> # Forward primer: insertion (5\' tail) + annealing downstream of insertion point
+> # Reverse primer: RC of upstream annealing region (back-to-back with fwd)
+>
+> seq_len = len(input_seq)
+> best_pair = None
+> best_tm_diff = float('inf')
+>
+> for fwd_anneal_len in range(15, 37):  # oligotm max is 36
+>     # Forward anneals starting at insert_pos on input
+>     fwd_anneal = ''
+>     for i in range(fwd_anneal_len):
+>         fwd_anneal += input_seq[(prefix_len + i) % seq_len]
+>
+>     fwd_tm = get_tm(fwd_anneal)
+>
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_anneal_len in range(15, 37):
+>         # Reverse anneals ending just before insert_pos
+>         rev_anneal = ''
+>         for i in range(rev_anneal_len):
+>             pos = (prefix_len - rev_anneal_len + i) % seq_len
+>             rev_anneal += input_seq[pos]
+>
+>         rev_tm = get_tm(rev_anneal)
+>
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > 5:
+>             continue
+>
+>         if tm_diff < best_tm_diff:
+>             fwd_primer = insertion + fwd_anneal
+>             rev_primer = reverse_complement(rev_anneal)
+>
+>             best_pair = {
+>                 'fwd_primer': fwd_primer,
+>                 'rev_primer': rev_primer,
+>                 'fwd_anneal': fwd_anneal,
+>                 'rev_anneal': rev_anneal,
+>                 'fwd_anneal_len': fwd_anneal_len,
+>                 'rev_anneal_len': rev_anneal_len,
+>                 'fwd_tm': fwd_tm,
+>                 'rev_tm': rev_tm,
+>                 'tm_diff': tm_diff
+>             }
+>             best_tm_diff = tm_diff
+>
+> if best_pair:
+>     p = best_pair
+>     print(f'\nBest primer pair:')
+>     print(f'  Forward: {p["fwd_primer"]}')
+>     print(f'  Reverse: {p["rev_primer"]}')
+>     print(f'  Fwd anneal: {p["fwd_anneal"]} (len={p["fwd_anneal_len"]}, Tm={p["fwd_tm"]:.2f})')
+>     print(f'  Rev anneal: {p["rev_anneal"]} (len={p["rev_anneal_len"]}, Tm={p["rev_tm"]:.2f})')
+>     print(f'  Tm diff: {p["tm_diff"]:.2f}')
+>
+>     # Verify the product
+>     # After PCR + KLD: the circular product should be the output
+>     # The linear PCR product top strand:
+>     # fwd_primer + extension from input[prefix_len+fwd_anneal_len:] around to where rev anneals
+>     # After circularization: input[:prefix_len] + insertion + input[prefix_len:]
+>
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f'>forward_primer\n{p["fwd_primer"]}\n')
+>         f.write(f'>reverse_primer\n{p["rev_primer"]}\n')
+>     print('\nWritten to primers.fasta')
+> else:
+>     print('No valid pair found!')
+>     sys.exit(1)
+> PYEOF
+root@modal:/app# python3 design_primers2.py
+Insertion point: 215
+Insertion: tagattagaagaagaattaagaagaagattaacagaaag (len=39)
+

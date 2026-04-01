@@ -1,0 +1,171 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_kinks_on_line(x0, direction, t_min=-5, t_max=5, n_points=500):
+>     """Find kink points on a line by detecting changes in slope of f(x0 + t*d).
+>
+>     Along a line, f is piecewise linear in t. We detect where the slope changes.
+>     This only requires 1 forward call per point (much cheaper than gradient).
+>     """
+>     t_values = np.linspace(t_min, t_max, n_points)
+>     f_values = np.array([forward(x0 + t * direction) for t in t_values])
+>
+>     # Compute slopes between consecutive points
+>     dt = t_values[1] - t_values[0]
+>     slopes = np.diff(f_values) / dt
+>
+>     # Find where slope changes significantly
+>     slope_changes = np.abs(np.diff(slopes))
+>     threshold = 1e-5
+>
+>     kink_indices = np.where(slope_changes > threshold)[0]
+>
+>     # Return the t values at kinks (between i and i+2)
+>     kink_t_values = []
+>     for idx in kink_indices:
+>         # The kink is between t_values[idx] and t_values[idx+2]
+>         kink_t_values.append((t_values[idx], t_values[idx+2]))
+>
+>     return kink_t_values
+>
+> def extract_A1():
+>     np.random.seed(42)
+>
+>     row_candidates = []  # raw gradient differences at kink points
+>
+>     print("Phase 1: Finding kink points along random lines...")
+>     n_lines = 80
+>
+>     all_kinks = 0
+>     for line_idx in range(n_lines):
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         kinks = find_kinks_on_line(x0, direction, n_points=500)
+>         all_kinks += len(kinks)
+>
+>         # For each kink, compute gradient on both sides
+>         for t_lo, t_hi in kinks:
+>             g_before = numerical_gradient(x0 + t_lo * direction)
+>             g_after = numerical_gradient(x0 + t_hi * direction)
+>             diff = g_after - g_before
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-5:
+>                 row_candidates.append(diff)
+>
+>         if (line_idx + 1) % 20 == 0:
+>             print(f"  Line {line_idx+1}/{n_lines}, kinks found: {all_kinks}, candidates: {len(row_candidates)}")
+>
+>     print(f"Total kinks: {all_kinks}, Total candidates: {len(row_candidates)}")
+>
+>     # Normalize directions for clustering
+>     normalized = []
+>     for c in row_candidates:
+>         n = np.linalg.norm(c)
+>         if n < 1e-8:
+>             continue
+>         v = c / n
+>         # Canonicalize sign: make largest-abs component positive
+>         idx = np.argmax(np.abs(v))
+>         if v[idx] < 0:
+>             v = -v
+>         normalized.append(v)
+>     normalized = np.array(normalized)
+>
+>     # Cluster by cosine similarity
+>     clusters = []  # list of lists of indices
+>     used = np.zeros(len(normalized), dtype=bool)
+>
+>     for i in range(len(normalized)):
+>         if used[i]:
+>             continue
+>         cluster_indices = [i]
+>         used[i] = True
+>         for j in range(i+1, len(normalized)):
+>             if used[j]:
+>                 continue
+>             dot = abs(np.dot(normalized[i], normalized[j]))
+>             if dot > 0.995:
+>                 cluster_indices.append(j)
+>                 used[j] = True
+>         clusters.append(cluster_indices)
+>
+>     print(f"Found {len(clusters)} clusters")
+>     cluster_sizes = sorted([len(c) for c in clusters], reverse=True)
+>     print(f"Cluster sizes: {cluster_sizes[:30]}")
+>
+>     # Sort by cluster size, take top 20
+>     clusters.sort(key=len, reverse=True)
+>
+>     # For each of the top 20 clusters, compute the representative row
+>     rows = []
+>     for cluster_indices in clusters[:20]:
+>         ref = normalized[cluster_indices[0]]
+>         aligned = []
+>         for idx in cluster_indices:
+>             raw = row_candidates[idx]
+>             if np.dot(raw, ref) < 0:
+>                 raw = -raw
+>             aligned.append(raw)
+>         avg = np.mean(aligned, axis=0)
+>         # Normalize to unit length (since we only need direction up to scaling)
+>         avg = avg / np.linalg.norm(avg)
+>         rows.append(avg)
+>
+>     A1_stolen = np.array(rows)
+>     print(f"\nExtracted matrix shape: {A1_stolen.shape}")
+>
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = extract_A1()
+>
+>     # Verification against true A1
+>     try:
+>         from forward import A1 as true_A1
+>
+>         print("\nVerification against true A1:")
+>         stolen_norm = A1_stolen / np.linalg.norm(A1_stolen, axis=1, keepdims=True)
+>         true_norm = true_A1 / np.linalg.norm(true_A1, axis=1, keepdims=True)
+>
+>         matched_true = set()
+>         for i in range(len(stolen_norm)):
+>             dots = np.abs(true_norm @ stolen_norm[i])
+>             best_j = np.argmax(dots)
+>             best_dot = dots[best_j]
+>             status = ""
+>             if best_j in matched_true:
+>                 status = " [DUPLICATE]"
+>             elif best_dot < 0.99:
+>                 status = " [POOR MATCH]"
+>             matched_true.add(best_j)
+>             print(f"  Row {i}: matches true row {best_j} (cos_sim={best_dot:.6f}){status}")
+>
+>         unmatched = set(range(20)) - matched_true
+>         if unmatched:
+>             print(f"  Unmatched true rows: {unmatched}")
+>         print(f"  Matched {len(matched_true)} / 20 unique true rows")
+>     except Exception as e:
+>         print(f"Verification error: {e}")
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("\nSaved to /app/stolen_A1.npy")
+> PYEOF
+root@modal:/app#
