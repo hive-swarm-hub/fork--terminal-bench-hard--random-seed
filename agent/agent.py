@@ -254,14 +254,6 @@ class AgentHarness(Terminus2):
             output = await session.get_incremental_output()
             return False, self._limit_output_length(output)
 
-        # Filter out empty-keystroke commands — these are just "wait" requests
-        # that waste time. The marker polling handles timing automatically.
-        commands = [c for c in commands if c.keystrokes.strip()]
-        if not commands:
-            # All commands were empty waits — just grab current output
-            output = await session.get_incremental_output()
-            return False, self._limit_output_length(output)
-
         total_duration = sum(c.duration_sec for c in commands)
         max_duration = max(c.duration_sec for c in commands)
 
@@ -302,7 +294,7 @@ class AgentHarness(Terminus2):
             if last_marker in pane_content:
                 found_last = True
                 break
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
         elapsed = time.monotonic() - start
         saved = total_duration - elapsed
@@ -963,12 +955,6 @@ class AgentHarness(Terminus2):
             "  if [ -f \"$f\" ] && [ $(wc -c < \"$f\") -lt 5000 ]; then "
             "    echo \"--- $f ---\"; cat \"$f\"; echo; "
             "  fi; "
-            "done 2>/dev/null; "
-            # Also read test files so agent knows verifier expectations
-            "for f in /tests/test_*.py /tests/*.py; do "
-            "  if [ -f \"$f\" ] && [ $(wc -c < \"$f\") -lt 8000 ]; then "
-            "    echo \"--- $f ---\"; cat \"$f\"; echo; "
-            "  fi; "
             "done 2>/dev/null || true"
         )
 
@@ -1036,10 +1022,10 @@ class AgentHarness(Terminus2):
         if "DOCS" in sections:
             docs = sections["DOCS"].strip()
             if docs and len(docs) > 10:
-                # Limit to 8000 chars — includes task docs + test files
-                if len(docs) > 8000:
-                    docs = docs[:8000] + "\n... (truncated)"
-                parts.append(f"Task files and tests found:\n{docs}")
+                # Limit to 4000 chars to avoid overwhelming the prompt
+                if len(docs) > 4000:
+                    docs = docs[:4000] + "\n... (truncated)"
+                parts.append(f"Task documentation found:\n{docs}")
 
         if not parts:
             return ""
