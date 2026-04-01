@@ -294,7 +294,7 @@ class AgentHarness(Terminus2):
             if last_marker in pane_content:
                 found_last = True
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
         elapsed = time.monotonic() - start
         saved = total_duration - elapsed
