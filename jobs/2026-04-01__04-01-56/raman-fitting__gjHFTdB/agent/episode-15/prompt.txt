@@ -1,0 +1,112 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/fit_final.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+> import json
+>
+> # Parse the data file
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Lorentzian function: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> laser_wn = x_data[np.argmax(y_data)]  # 19139.54
+> print(f"Laser line at {laser_wn:.2f} cm^-1")
+>
+> # Convert to Raman shift for analysis
+> raman_shift = laser_wn - x_data
+>
+> # ============ Fit 2D peak ============
+> # 2D peak is at shift ~2894 -> x ~16246
+> # Use a window around it
+> mask_2d = (x_data > 15500) & (x_data < 17000)
+> rx_2d = x_data[mask_2d]
+> ry_2d = y_data[mask_2d]
+>
+> print(f"\n2D peak region: {len(rx_2d)} points, x: {rx_2d.min():.0f}-{rx_2d.max():.0f}")
+>
+> # Initial guess for 2D
+> p0_2d = [16246, 100, 1748 * 100**2, 16500]  # x0, gamma, amplitude, offset
+> try:
+>     popt_2d, pcov_2d = curve_fit(lorentzian, rx_2d, ry_2d, p0=p0_2d, maxfev=10000)
+>     print(f"2D fit: x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amplitude={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+>     print(f"  Raman shift: {laser_wn - popt_2d[0]:.1f} cm^-1")
+> except Exception as e:
+>     print(f"2D fit failed: {e}")
+>     popt_2d = None
+>
+> # ============ Fit G peak ============
+> # G peak is at shift ~1580 -> x ~17560
+> # The data is sparse here. Let me check what we have.
+> mask_g = (x_data > 17200) & (x_data < 18000)
+> rx_g = x_data[mask_g]
+> ry_g = y_data[mask_g]
+> print(f"\nG peak region: {len(rx_g)} points, x: {rx_g.min():.0f}-{rx_g.max():.0f}")
+> for xi, yi in zip(rx_g, ry_g):
+>     print(f"  x={xi:.2f} (shift={laser_wn-xi:.1f}), y={yi:.1f}")
+>
+> # The G peak region has very few points and shows monotonic increase (laser tail)
+> # Let me try a wider region and fit Lorentzian + linear background
+> def lorentzian_with_slope(x, x0, gamma, amplitude, offset, slope):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset + slope * (x - x0)
+>
+> # Use wider region
+> mask_g2 = (x_data > 16800) & (x_data < 18200)
+> rx_g2 = x_data[mask_g2]
+> ry_g2 = y_data[mask_g2]
+> print(f"\nWider G region: {len(rx_g2)} points")
+>
+> # Try fitting with slope
+> p0_g = [17560, 50, 500 * 50**2, 19000, 5]  # x0, gamma, amp, offset, slope
+> try:
+>     popt_g, pcov_g = curve_fit(lorentzian_with_slope, rx_g2, ry_g2, p0=p0_g, maxfev=10000)
+>     print(f"G fit (with slope): x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amplitude={popt_g[2]:.4f}, offset={popt_g[3]:.4f}, slope={popt_g[4]:.4f}")
+>     print(f"  Raman shift: {laser_wn - popt_g[0]:.1f} cm^-1")
+> except Exception as e:
+>     print(f"G fit failed: {e}")
+>     popt_g = None
+>
+> PYEOF
+root@modal:/app# python3 /app/fit_final.py
+Laser line at 19139.54 cm^-1
+
+2D peak region: 22 points, x: 15534-16955
+2D fit: x0=16210.3557, gamma=151.8045, amplitude=2010.9585, offset=16304.8232
+  Raman shift: 2929.2 cm^-1
+
+G peak region: 10 points, x: 17256-17978
+  x=17256.49 (shift=1883.1), y=18199.4
+  x=17333.73 (shift=1805.8), y=18560.4
+  x=17411.69 (shift=1727.9), y=19004.1
+  x=17490.38 (shift=1649.2), y=19327.4
+  x=17569.82 (shift=1569.7), y=19755.7
+  x=17650.01 (shift=1489.5), y=20340.8
+  x=17730.96 (shift=1408.6), y=20815.0
+  x=17812.68 (shift=1326.9), y=21422.0
+  x=17895.19 (shift=1244.4), y=22176.0
+  x=17978.50 (shift=1161.0), y=23027.7
+
+Wider G region: 18 points
+G fit (with slope): x0=19695.2807, gamma=4946.1031, amplitude=-398762.8980, offset=474252.6682, slope=55.4763
+  Raman shift: -555.7 cm^-1
+

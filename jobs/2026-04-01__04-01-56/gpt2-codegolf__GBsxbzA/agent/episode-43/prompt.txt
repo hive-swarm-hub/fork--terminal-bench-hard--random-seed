@@ -1,0 +1,192 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define E 768
+> #define L 12
+> #define H 12
+> #define C 1024
+> #define A 2304
+> #define M 3072
+> #define S 7087872
+> float*W,x[C][E],xb[E],qkv[A],hb[M],att[H][C];
+> float kc[L][C][E],vc[L][C][E];
+> char*voc[V];int vl[V];
+> int b2u[256];
+> void bpe_init(char*fn){
+>     int n=0,ex=256;
+>     for(int i=33;i<=126;i++)b2u[i]=i;
+>     for(int i=161;i<=172;i++)b2u[i]=i;
+>     for(int i=174;i<=255;i++)b2u[i]=i;
+>     for(int i=0;i<256;i++)
+>         if(!((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255)))
+>             b2u[i]=ex++;
+>     for(int i=0;i<256;i++){
+>         int u=b2u[i];
+>         voc[i]=malloc(4);
+>         if(u<128){voc[i][0]=u;vl[i]=1;}
+>         else if(u<2048){voc[i][0]=0xC0|(u>>6);voc[i][1]=0x80|(u&63);vl[i]=2;}
+>         else{voc[i][0]=0xE0|(u>>12);voc[i][1]=0x80|((u>>6)&63);voc[i][2]=0x80|(u&63);vl[i]=3;}
+>         voc[i][vl[i]]=0;
+>     }
+>     FILE*f=fopen(fn,"r");char buf[256];
+>     fgets(buf,256,f);
+>     for(int i=256;i<V&&fgets(buf,256,f);i++){
+>         char*sp=strchr(buf,' ');
+>         if(!sp)continue;
+>         *sp++=0;int bl=strlen(sp);
+>         if(sp[bl-1]=='\n')sp[--bl]=0;
+>         int al=strlen(buf);
+>         voc[i]=malloc(al+bl+1);
+>         memcpy(voc[i],buf,al);
+>         memcpy(voc[i]+al,sp,bl+1);
+>         vl[i]=al+bl;
+>     }
+>     fclose(f);
+> }
+> int encode(char*text,int*tok){
+>     // Convert text to BPE unicode representation
+>     int len=strlen(text);
+>     // Build list of unicode-encoded pieces
+>     char pieces[C][16];int pl[C],n=0;
+>     for(int i=0;i<len;i++){
+>         unsigned char c=text[i];
+>         memcpy(pieces[n],voc[c],vl[c]+1);
+>         pl[n]=vl[c];n++;
+>     }
+>     // BPE merge loop
+>     for(int m=256;m<V;m++){
+>         if(!voc[m])break;
+>         // Find pair that matches merge m = voc[m] split into first part and second part
+>         // voc[m] was built from two parts during bpe_init
+>         // We need to find adjacent pieces that concatenate to voc[m]
+>         for(int i=0;i<n-1;i++){
+>             if(pl[i]+pl[i+1]==vl[m]&&memcmp(pieces[i],voc[m],pl[i])==0&&memcmp(pieces[i+1],voc[m]+pl[i],pl[i+1])==0){
+>                 memcpy(pieces[i],voc[m],vl[m]+1);
+>                 pl[i]=vl[m];
+>                 for(int j=i+1;j<n-1;j++){memcpy(pieces[j],pieces[j+1],pl[j+1]+1);pl[j]=pl[j+1];}
+>                 n--;i--;
+>             }
+>         }
+>     }
+>     // Convert pieces to token ids
+>     for(int i=0;i<n;i++){
+>         tok[i]=-1;
+>         for(int j=0;j<V;j++)
+>             if(vl[j]==pl[i]&&memcmp(voc[j],pieces[i],pl[i])==0){tok[i]=j;break;}
+>     }
+>     return n;
+> }
+> void decode(int t){
+>     char*s=voc[t];
+>     // Convert BPE unicode back to bytes
+>     int u2b[512];memset(u2b,0,sizeof(u2b));
+>     for(int i=0;i<256;i++)u2b[b2u[i]]=i;
+>     int i=0,l=vl[t];
+>     while(i<l){
+>         int u;
+>         unsigned char c=s[i];
+>         if(c<0x80){u=c;i++;}
+>         else if(c<0xE0){u=((c&0x1F)<<6)|(s[i+1]&0x3F);i+=2;}
+>         else{u=((c&0xF)<<12)|((s[i+1]&0x3F)<<6)|(s[i+2]&0x3F);i+=3;}
+>         putchar(u2b[u]);
+>     }
+> }
+> void ln(float*o,float*i,float*g,float*b){
+>     float m=0,v=0;
+>     for(int j=0;j<E;j++)m+=i[j];
+>     m/=E;
+>     for(int j=0;j<E;j++)v+=(i[j]-m)*(i[j]-m);
+>     v=1.f/sqrtf(v/E+1e-5f);
+>     for(int j=0;j<E;j++)o[j]=(i[j]-m)*v*g[j]+b[j];
+> }
+> void matmul(float*o,float*i,float*w,int n,int d){
+>     for(int j=0;j<d;j++){
+>         float s=0;
+>         for(int k=0;k<n;k++)s+=i[k]*w[k*d+j];
+>         o[j]=s;
+>     }
+> }
+> float gelu(float x){return 0.5f*x*(1.f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> int main(int argc,char**argv){
+>     FILE*f=fopen(argv[1],"rb");
+>     fseek(f,0,SEEK_END);long sz=ftell(f);fseek(f,0,SEEK_SET);
+>     W=malloc(sz);fread(W,1,sz,f);fclose(f);
+>     bpe_init(argv[2]);
+>     int tok[C],T=encode(argv[3],tok);
+>     float*wte=W+85842432,*wpe=W+85056000;
+>     for(int t=0;t<T;t++)
+>         for(int j=0;j<E;j++)x[t][j]=wte[tok[t]*E+j]+wpe[t*E+j];
+>     int gen=20;
+>     for(int g=0;g<T+gen-1;g++){
+>         int t=g<T?g:T-1;
+>         int pos=g;
+>         if(g>=T){
+>             // shift: we only need last position
+>             for(int j=0;j<E;j++)x[0][j]=wte[tok[g]*E+j]+wpe[pos*E+j];
+>             t=0;
+>         }
+>         for(int l=0;l<L;l++){
+>             float*lw=W+l*S;
+>             float*qkvw=lw+A,*qkvb=lw;
+>             float*apw=lw+1772544,*apb=lw+1771776;
+>             float*l1b=lw+2362368,*l1w=lw+2363136;
+>             float*l2b=lw+2363904,*l2w=lw+2364672;
+>             float*fcb=lw+2365440,*fcw=lw+2368512;
+>             float*fpb=lw+4727808,*fpw=lw+4728576;
+>             ln(xb,x[t],l1w,l1b);
+>             matmul(qkv,xb,qkvw,E,A);
+>             for(int j=0;j<A;j++)qkv[j]+=qkvb[j];
+>             for(int j=0;j<E;j++){kc[l][pos][j]=qkv[E+j];vc[l][pos][j]=qkv[2*E+j];}
+>             float ap[E]={0};
+>             for(int h=0;h<H;h++){
+>                 int ho=h*64;
+>                 for(int p=0;p<=pos;p++){
+>                     float s=0;
+>                     for(int j=0;j<64;j++)s+=qkv[ho+j]*kc[l][p][ho+j];
+>                     att[h][p]=s/8.f;
+>                 }
+>                 float mx=-1e9;
+>                 for(int p=0;p<=pos;p++)if(att[h][p]>mx)mx=att[h][p];
+>                 float sm=0;
+>                 for(int p=0;p<=pos;p++){att[h][p]=expf(att[h][p]-mx);sm+=att[h][p];}
+>                 for(int p=0;p<=pos;p++)att[h][p]/=sm;
+>                 for(int j=0;j<64;j++){
+>                     float s=0;
+>                     for(int p=0;p<=pos;p++)s+=att[h][p]*vc[l][p][ho+j];
+>                     ap[ho+j]=s;
+>                 }
+>             }
+>             float proj[E];
+>             matmul(proj,ap,apw,E,E);
+>             for(int j=0;j<E;j++)x[t][j]+=proj[j]+apb[j];
+>             ln(xb,x[t],l2w,l2b);
+>             matmul(hb,xb,fcw,E,M);
+>             for(int j=0;j<M;j++)hb[j]=gelu(hb[j]+fcb[j]);
+>             float mp[E];
+>             matmul(mp,hb,fpw,M,E);
+>             for(int j=0;j<E;j++)x[t][j]+=mp[j]+fpb[j];
+>         }
+>         if(g>=T-1){
+>             float*lfb=W+85054464,*lfw=W+85055232;
+>             ln(xb,x[t],lfw,lfb);
+>             int best=-1;float bv=-1e9;
+>             for(int j=0;j<V;j++){
+>                 float s=0;
+>                 for(int k=0;k<E;k++)s+=xb[k]*wte[j*E+k];
+>                 if(s>bv){bv=s;best=j;}
+>             }
+>             if(g<T+gen-1)tok[g+1]=best;
+>             decode(best);
+>         }
+>     }
+>     printf("\n");
+> }
+> CEOF
+root@modal:/app# wc -c /app/gpt2.c
+6156 /app/gpt2.c
+root@modal:/app#

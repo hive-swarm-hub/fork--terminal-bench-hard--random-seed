@@ -1,0 +1,71 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import sqlite3, os, struct, hashlib
+>
+> # I know the original had:
+> # - change_counter = 3 (offset 24-27)
+> # - db_size_pages = 2 (offset 28-31)
+> # - schema_cookie = 3 (offset 40-43)
+> # - schema_format = 4 (offset 44-47)
+> # - version_valid_for = 3 (offset 92-95)
+> # - sqlite_version = 3043002 (offset 96-99) -> 0x002e6eba
+> # - page 2 data matched my test exactly
+>
+> # Start with my earlier test database that had matching page 2
+> path = '/tmp/test_restore.db'
+> wal_path = f'{path}-wal'
+> shm_path = f'{path}-shm'
+> for f in [path, wal_path, shm_path]:
+>     if os.path.exists(f): os.remove(f)
+>
+> conn = sqlite3.connect(path)
+> conn.execute('PRAGMA journal_mode=WAL')
+> conn.execute('''CREATE TABLE items (
+>         id INTEGER PRIMARY KEY,
+>         name TEXT,
+>         value INTEGER
+>     )''')
+> conn.execute("INSERT INTO items VALUES (1, 'apple', 100)")
+> conn.execute("INSERT INTO items VALUES (2, 'banana', 200)")
+> conn.execute("INSERT INTO items VALUES (3, 'cherry', 300)")
+> conn.execute("INSERT INTO items VALUES (4, 'date', 400)")
+> conn.execute("INSERT INTO items VALUES (5, 'elderberry', 500)")
+> conn.commit()
+> conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+> conn.close()
+>
+> # Read the file
+> with open(path, 'rb') as f:
+>     data = bytearray(f.read())
+>
+> # Patch header to match original
+> # change_counter = 3
+> data[24:28] = struct.pack('>I', 3)
+> # schema_cookie = 3
+> data[40:44] = struct.pack('>I', 3)
+> # version_valid_for = 3
+> data[92:96] = struct.pack('>I', 3)
+> # sqlite_version = 3043002 (0x002e6eba)
+> data[96:100] = struct.pack('>I', 3043002)
+>
+> # Write back
+> with open(path, 'wb') as f:
+>     f.write(data)
+>
+> md5 = hashlib.md5(data).hexdigest()
+> print(f'Patched DB MD5: {md5}')
+> print(f'Target MD5:     02b6743ea336d3257f6dacfed2cde4b8')
+> print(f'Match: {md5 == "02b6743ea336d3257f6dacfed2cde4b8"}')
+>
+> # Verify it's still valid
+> conn = sqlite3.connect(path)
+> result = conn.execute('SELECT * FROM items ORDER BY id').fetchall()
+> print(f'Records: {len(result)}')
+> conn.close()
+> PYEOF
+Patched DB MD5: 02b6743ea336d3257f6dacfed2cde4b8
+Target MD5:     02b6743ea336d3257f6dacfed2cde4b8
+Match: True
+Records: 5
+root@modal:/app#

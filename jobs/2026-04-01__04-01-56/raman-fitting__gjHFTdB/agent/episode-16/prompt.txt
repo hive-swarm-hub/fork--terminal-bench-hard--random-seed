@@ -1,0 +1,147 @@
+New Terminal Output:
+
+  Raman shift: -555.7 cm^-1
+root@modal:/app# cat > /app/fit_final2.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+> import matplotlib
+> matplotlib.use('Agg')
+> import matplotlib.pyplot as plt
+>
+> # Parse the data file
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> laser_wn = x_data[np.argmax(y_data)]  # 19139.54
+>
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # ============ Approach: fit in Raman shift space ============
+> # Work with Stokes side only
+> mask_stokes = (x_data < laser_wn - 50)  # Exclude laser line region
+> raman_shift = laser_wn - x_data[mask_stokes]
+> y_stokes = y_data[mask_stokes]
+>
+> # Sort by Raman shift
+> sort2 = np.argsort(raman_shift)
+> raman_shift = raman_shift[sort2]
+> y_stokes = y_stokes[sort2]
+>
+> print(f"Stokes data: {len(raman_shift)} points, shift range: {raman_shift.min():.1f} to {raman_shift.max():.1f}")
+>
+> # ============ 2D peak fit ============
+> # Region around the 2D peak (shift ~2894)
+> mask_2d = (raman_shift > 2200) & (raman_shift < 3500)
+> rs_2d = raman_shift[mask_2d]
+> ys_2d = y_stokes[mask_2d]
+>
+> print(f"\n2D region: {len(rs_2d)} points")
+>
+> # Fit Lorentzian
+> p0_2d = [2894, 100, 1748 * 100**2, 16000]
+> popt_2d, pcov_2d = curve_fit(lorentzian, rs_2d, ys_2d, p0=p0_2d, maxfev=10000)
+> print(f"2D peak fit:")
+> print(f"  x0 = {popt_2d[0]:.4f} cm^-1")
+> print(f"  gamma = {popt_2d[1]:.4f} cm^-1")
+> print(f"  amplitude = {popt_2d[2]:.4f}")
+> print(f"  offset = {popt_2d[3]:.4f}")
+>
+> # ============ G peak fit ============
+> # The G peak region (shift ~1580) has very few points and is on a sloping background
+> # Let's try fitting with a Lorentzian + linear background
+> # Use shift range 1000-2100
+> mask_g = (raman_shift > 1000) & (raman_shift < 2100)
+> rs_g = raman_shift[mask_g]
+> ys_g = y_stokes[mask_g]
+>
+> print(f"\nG region: {len(rs_g)} points")
+> for s, y in zip(rs_g, ys_g):
+>     print(f"  shift={s:.1f}, y={y:.1f}")
+>
+> # Fit Lorentzian + linear background
+> def lorentzian_linear_bg(x, x0, gamma, amplitude, offset, slope):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset + slope * x
+>
+> # Initial guess - the background is clearly linear (decreasing with shift)
+> # Let's estimate: at shift=1000, y~24000; at shift=2000, y~18000
+> # slope ~ (18000-24000)/1000 = -6
+> # offset ~ 24000 - (-6)*1000 = 30000
+> p0_g = [1580, 30, 1000 * 30**2, 30000, -6]
+> try:
+>     popt_g, pcov_g = curve_fit(lorentzian_linear_bg, rs_g, ys_g, p0=p0_g, maxfev=50000,
+>                                 bounds=([1400, 5, 0, 0, -100], [1700, 200, 1e10, 100000, 0]))
+>     print(f"\nG peak fit (Lorentzian + linear bg):")
+>     print(f"  x0 = {popt_g[0]:.4f} cm^-1")
+>     print(f"  gamma = {popt_g[1]:.4f} cm^-1")
+>     print(f"  amplitude = {popt_g[2]:.4f}")
+>     print(f"  offset = {popt_g[3]:.4f}")
+>     print(f"  slope = {popt_g[4]:.4f}")
+>
+>     # Check residuals
+>     y_fit = lorentzian_linear_bg(rs_g, *popt_g)
+>     residuals = ys_g - y_fit
+>     print(f"  RMS residual: {np.sqrt(np.mean(residuals**2)):.1f}")
+> except Exception as e:
+>     print(f"G fit failed: {e}")
+>     # Try without bounds
+>     try:
+>         popt_g, pcov_g = curve_fit(lorentzian_linear_bg, rs_g, ys_g, p0=p0_g, maxfev=50000)
+>         print(f"\nG peak fit (no bounds):")
+>         print(f"  x0 = {popt_g[0]:.4f}, gamma = {popt_g[1]:.4f}, amplitude = {popt_g[2]:.4f}")
+>         print(f"  offset = {popt_g[3]:.4f}, slope = {popt_g[4]:.4f}")
+>     except Exception as e2:
+>         print(f"G fit also failed without bounds: {e2}")
+>
+> PYEOF
+root@modal:/app# python3 /app/fit_final2.py
+Stokes data: 3447 points, shift range: 94.8 to 17490.8
+
+2D region: 19 points
+2D peak fit:
+  x0 = 2930.6094 cm^-1
+  gamma = 154.7407 cm^-1
+  amplitude = 2016.4649
+  offset = 16291.8241
+
+G region: 13 points
+  shift=1076.9, y=24222.5
+  shift=1161.0, y=23027.7
+  shift=1244.4, y=22176.0
+  shift=1326.9, y=21422.0
+  shift=1408.6, y=20815.0
+  shift=1489.5, y=20340.8
+  shift=1569.7, y=19755.7
+  shift=1649.2, y=19327.4
+  shift=1727.9, y=19004.1
+  shift=1805.8, y=18560.4
+  shift=1883.1, y=18199.4
+  shift=1959.6, y=17693.5
+  shift=2035.4, y=17686.8
+
+G peak fit (Lorentzian + linear bg):
+  x0 = 1507.7694 cm^-1
+  gamma = 5.0000 cm^-1
+  amplitude = 0.0000
+  offset = 30427.4782
+  slope = -6.5555
+  RMS residual: 367.3
+root@modal:/app#

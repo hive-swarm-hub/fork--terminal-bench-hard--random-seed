@@ -1,0 +1,283 @@
+New Terminal Output:
+
+root@modal:/app# =m n Number of samples requested
+) - h(x_j) - x_{j+1}*h'(x_{j+1}) + x_j*h'(x_j)) /
+#'         (h'(x_j) - h'(x_{j+1}))
+#' @param x_k Sorted abscissae
+#' @param h_k log(g(x_k))
+#' @param hp_k Derivatives of h at x_k
+#' @param lb Lower bound of domain
+#' @param ub Upper bound of domain
+#' @return Vector of intersection points z, with z[0]=lb and z[k]=ub
+compute_z_intersections <- function(x_k, h_k, hp_k, lb, ub) {
+  k <- length(x_k)
+  z <- numeric(k + 1)
+  z[1] <- lb
+  z[k + 1] <- ub
+
+  if (k >= 2) {
+    for (j in 1:(k - 1)) {
+      denom <- hp_k[j] - hp_k[j + 1]
+      if (abs(denom) < 1e-15) {
+        # Parallel tangent lines; use midpoint
+        z[j + 1] <- (x_k[j] + x_k[j + 1]) / 2
+      } else {
+        z[j + 1] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hp_k[j + 1] + x_k[j] * hp_k[j]) / denom
+      }
+    }
+  }
+
+  return(z)
+}
+
+#' Evaluate the upper hull u(x) at a point x
+#' u(x) = h(x_j) + h'(x_j) * (x - x_j) for x in [z_{j-1}, z_j]
+#' @param x Points at which to evaluate
+#' @param x_k Sorted abscissae
+#' @param h_k log(g(x_k))
+#' @param hp_k Derivatives of h at x_k
+#' @param z Intersection points
+#' @return Values of the upper hull at x
+evaluate_upper_hull <- function(x, x_k, h_k, hp_k, z) {
+  k <- length(x_k)
+  result <- numeric(length(x))
+
+  for (i in seq_along(x)) {
+    # Find which segment x[i] falls in
+    # x[i] is in [z[j], z[j+1]] -> use tangent at x_k[j]
+    j <- findInterval(x[i], z)
+    j <- max(1, min(j, k))  # Clamp to valid range
+    result[i] <- h_k[j] + hp_k[j] * (x[i] - x_k[j])
+  }
+
+  return(result)
+}
+
+# -----------------------------------------------------------------------------
+# Module 5: Lower hull construction
+# -----------------------------------------------------------------------------
+
+#' Evaluate the lower hull l(x) at a point x
+#' l(x) = ((x_{j+1} - x)*h(x_j) + (x - x_j)*h(x_{j+1})) / (x_{j+1} - x_j)
+#' for x in [x_j, x_{j+1}], and l(x) = -Inf outside [x_1, x_k]
+#' @param x Points at which to evaluate
+#' @param x_k Sorted abscissae
+#' @param h_k log(g(x_k))
+#' @return Values of the lower hull at x
+evaluate_lower_hull <- function(x, x_k, h_k) {
+  k <- length(x_k)
+  result <- rep(-Inf, length(x))
+
+  for (i in seq_along(x)) {
+    if (x[i] >= x_k[1] && x[i] <= x_k[k]) {
+      # Find which segment
+      j <- findInterval(x[i], x_k)
+      j <- max(1, min(j, k - 1))
+      result[i] <- ((x_k[j + 1] - x[i]) * h_k[j] + (x[i] - x_k[j]) * h_k[j + 1]) /
+                   (x_k[j + 1] - x_k[j])
+    }
+  }
+
+  return(result)
+}
+
+# -----------------------------------------------------------------------------
+# Module 6: Sampling from the upper hull (piecewise exponential)
+# -----------------------------------------------------------------------------
+
+#' Sample from the exponential of the piecewise-linear upper hull s(x)
+#' Each piece is exp(a_j + b_j * x) on [z_j, z_{j+1}]
+#' where a_j = h(x_j) - x_j * h'(x_j), b_j = h'(x_j)
+#' @param n_samples Number of samples to draw
+#' @param x_k Sorted abscissae
+#' @param h_k log(g(x_k))
+#' @param hp_k Derivatives of h at x_k
+#' @param z Intersection points
+#' @return Vector of samples from the upper hull distribution
+sample_upper_hull <- function(n_samples, x_k, h_k, hp_k, z) {
+  k <- length(x_k)
+
+  # Compute the integral of exp(u(x)) on each segment [z_j, z_{j+1}]
+  # u(x) = h_k[j] + hp_k[j] * (x - x_k[j]) = (h_k[j] - hp_k[j]*x_k[j]) + hp_k[j]*x
+  # integral of exp(a + b*x) from L to R:
+  #   if b != 0: (exp(a + b*R) - exp(a + b*L)) / b
+  #   if b == 0: exp(a) * (R - L)
+
+  seg_areas <- numeric(k)
+  a_j <- h_k - hp_k * x_k  # intercepts
+
+  for (j in 1:k) {
+    L <- z[j]
+    R <- z[j + 1]
+    b <- hp_k[j]
+    a <- a_j[j]
+
+    if (abs(b) < 1e-15) {
+      seg_areas[j] <- exp(a) * (R - L)
+    } else {
+      # Use log-sum-exp trick for numerical stability
+      log_val_R <- a + b * R
+      log_val_L <- a + b * L
+      max_log <- max(log_val_R, log_val_L)
+
+      if (is.finite(max_log)) {
+        seg_areas[j] <- exp(max_log) * abs(exp(log_val_R - max_log) - exp(log_val_L - max_log)) / abs(b)
+      } else {
+        seg_areas[j] <- 0
+      }
+    }
+  }
+
+  # Handle any non-finite areas
+  seg_areas[!is.finite(seg_areas)] <- 0
+
+  if (sum(seg_areas) <= 0) {
+    stop("Total area under upper hull is zero or negative. Check density and bounds.")
+  }
+
+  # Normalize to get probabilities for each segment
+  seg_probs <- seg_areas / sum(seg_areas)
+
+  # Sample segments
+  segments <- sample(1:k, n_samples, replace = TRUE, prob = seg_probs)
+
+  # Sample within each segment using inverse CDF of truncated exponential
+  samples <- numeric(n_samples)
+  u_rand <- runif(n_samples)
+
+  for (i in 1:n_samples) {
+    j <- segments[i]
+    L <- z[j]
+    R <- z[j + 1]
+    b <- hp_k[j]
+    a <- a_j[j]
+
+    if (abs(b) < 1e-15) {
+      # Uniform on [L, R]
+      samples[i] <- L + u_rand[i] * (R - L)
+    } else {
+      # Inverse CDF of truncated exponential
+      # CDF: F(x) = (exp(a+b*x) - exp(a+b*L)) / (exp(a+b*R) - exp(a+b*L))
+      # Inverse: x = (1/b) * log(exp(b*L) + u*(exp(b*R) - exp(b*L)))
+      # Use log-sum-exp for stability
+      log_eL <- b * L
+      log_eR <- b * R
+
+      if (b > 0) {
+        # exp(b*L) < exp(b*R)
+        val <- exp(log_eL) + u_rand[i] * (exp(log_eR) - exp(log_eL))
+      } else {
+        val <- exp(log_eL) + u_rand[i] * (exp(log_eR) - exp(log_eL))
+      }
+
+      if (val > 0) {
+        samples[i] <- log(val) / b
+      } else {
+        samples[i] <- L + u_rand[i] * (R - L)
+      }
+    }
+
+    # Clamp to segment bounds
+    samples[i] <- max(L, min(R, samples[i]))
+  }
+
+  return(samples)
+}
+
+# -----------------------------------------------------------------------------
+# Module 7: Initialize abscissae
+# -----------------------------------------------------------------------------
+
+#' Create initial abscissae if not provided by the user
+#' Ensures that the leftmost point has positive derivative and
+#' the rightmost has negative derivative (for unbounded domains)
+#' @param g Density function
+#' @param lb Lower bound
+#' @param ub Upper bound
+#' @return Numeric vector of initial abscissae
+initialize_abscissae <- function(g, lb, ub) {
+  # Try to find reasonable starting points
+  if (is.finite(lb) && is.finite(ub)) {
+    # Bounded domain: use equally spaced points
+    x_init <- seq(lb + 0.1 * (ub - lb), ub - 0.1 * (ub - lb), length.out = 5)
+  } else if (is.finite(lb)) {
+    x_init <- lb + c(0.5, 1, 2, 4, 8)
+  } else if (is.finite(ub)) {
+bash: =m: command not found
+    x_init <- ub - c(8, 4, 2, 1, 0.5)
+  } else {
+    # Unbounded: try points around 0
+    x_init <- c(-4, -1, 0, 1, 4)
+  }
+
+  # Filter to points where g is positive
+  vals <- g(x_init)
+  x_init <- x_init[is.finite(vals) & vals > 0]
+
+  if (length(x_init) < 2) {
+    stop("Could not find enough valid initial points. Please provide 'x_init' manually.")
+  }
+
+  # Ensure derivative conditions for unbounded domains
+  # Left derivative should be > 0 if lb = -Inf
+  # Right derivative should be < 0 if ub = Inf
+  hp <- compute_log_density_deriv(x_init, g)
+
+  if (!is.finite(lb)) {
+    if (hp[1] <= 0) {
+      # Try to find a point further left with positive derivative
+      candidates <- x_init[1] - c(0.5, 1, 2, 5, 10, 20)
+      for (c in candidates) {
+        d <- compute_log_density_deriv(c, g)
+        v <- g(c)
+        if (is.finite(d) && d > 0 && is.finite(v) && v > 0) {
+          x_init <- c(c, x_init)
+          break
+        }
+      }
+    }
+  }
+
+  if (!is.finite(ub)) {
+    n <- length(x_init)
+    hp_last <- compute_log_density_deriv(x_init[n], g)
+    if (hp_last >= 0) {
+      candidates <- x_init[n] + c(0.5, 1, 2, 5, 10, 20)
+      for (c in candidates) {
+        d <- compute_log_density_deriv(c, g)
+        v <- g(c)
+        if (is.finite(d) && d < 0 && is.finite(v) && v > 0) {
+          x_init <- c(x_init, c)
+          break
+        }
+      }
+    }
+  }
+
+  return(sort(unique(x_init)))
+}
+
+# -----------------------------------------------------------------------------
+# Module 8: Main ARS function
+# -----------------------------------------------------------------------------
+
+#' Adaptive Rejection Sampling
+#' @param n Number of samples to generate
+#' @param g Density function (possibly unnormalized), must be log-concave.
+#'          Should accept a numeric vector and return a numeric vector.
+#' @param lb Lower bound of the support (default -Inf)
+#' @param ub Upper bound of the support (default Inf)
+#' @param x_init Initial abscissae (optional; at least 2 points in (lb, ub))
+#' @return Numeric vector of n samples from the distribution proportional to g
+ars <- function(n, g, lb = -Inf, ub = Inf, x_init = NULL) {
+
+  # --- Step 1: Initialize abscissae if not provided ---
+  if (is.null(x_init)) {
+    x_init <- initialize_abscissae(g, lb, ub)
+root@modal:/app# e_l,= nt 7: ITn g ---ste("Co) e-= 0.5
+bash: syntax error near unexpected token `('
+root@modal:/app#
+
+
+[WARNING: 1 command(s) may not have completed within 10s. Possibly stalled commands: cat > /app/ars.R << 'ENDOFFILE'
+# ==============================================. If a process is stuck, try: kill the process, use Ctrl+C, or run your next command with a fresh approach.]

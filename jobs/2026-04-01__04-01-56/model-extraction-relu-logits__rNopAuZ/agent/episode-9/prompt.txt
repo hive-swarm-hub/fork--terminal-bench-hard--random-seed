@@ -1,0 +1,120 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(123)
+>
+>     # Approach: Walk along random directions from random starting points.
+>     # At each step, compute the gradient via finite differences.
+>     # When the gradient changes between consecutive steps, we crossed a ReLU boundary.
+>     # For a single-layer ReLU network f(x) = A2 * ReLU(A1*x + b1) + b2,
+>     # the gradient is: nabla f(x) = A1^T * diag(sigma) * A2^T
+>     # where sigma_j = 1 if (A1*x+b1)_j > 0.
+>     # When a single neuron j flips, the gradient changes by +/- a2_j * a1_j.
+>     # With small enough steps, each crossing flips exactly one neuron.
+>     # Clustering these gradient differences by direction recovers the rows of A1
+>     # (up to scaling by a2_j and permutation).
+>
+>     raw_diffs = []  # (normalized_direction, norm) pairs
+>
+>     n_walks = 300
+>     for walk in range(n_walks):
+>         # Random starting point
+>         x = np.random.randn(10) * 3.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Compute gradient at starting point
+>         grad = compute_gradient(x)
+>
+>         # Walk along direction with small steps
+>         current = x.copy()
+>         current_grad = grad.copy()
+>
+>         for step in range(20):
+>             current = current + 0.05 * direction
+>             new_grad = compute_gradient(current)
+>             diff = new_grad - current_grad
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 raw_diffs.append((diff / norm, norm))
+>             current_grad = new_grad
+>
+>     print(f"Collected {len(raw_diffs)} gradient changes")
+>
+>     # Cluster the normalized directions
+>     clusters = []  # Each cluster: list of (direction, norm) pairs
+>     cluster_centers = []
+>
+>     for i, (d, n) in enumerate(raw_diffs):
+>         matched = False
+>         for ci, center in enumerate(cluster_centers):
+>             dot = np.abs(np.dot(d, center))
+>             if dot > 0.999:
+>                 # Align sign with cluster center
+>                 if np.dot(d, center) < 0:
+>                     clusters[ci].append((-d, n))
+>                 else:
+>                     clusters[ci].append((d, n))
+>                 # Update center as running average
+>                 all_dirs = [c[0] for c in clusters[ci]]
+>                 new_center = np.mean(all_dirs, axis=0)
+>                 cluster_centers[ci] = new_center / np.linalg.norm(new_center)
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([(d, n)])
+>             cluster_centers.append(d.copy())
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # Sort clusters by size (largest first - most likely real neurons)
+>     cluster_sizes = [(len(c), i) for i, c in enumerate(clusters)]
+>     cluster_sizes.sort(reverse=True)
+>
+>     print("Cluster sizes:", [s[0] for s in cluster_sizes[:30]])
+>
+>     # Select top 20 clusters with at least 2 observations
+>     good_clusters = []
+>     for size, idx in cluster_sizes:
+>         if size < 2:
+>             continue
+>         center = cluster_centers[idx]
+>         good_clusters.append(center)
+>         if len(good_clusters) >= 20:
+>             break
+>
+>     print(f"Selected {len(good_clusters)} neuron directions")
+>
+>     # Each center is a1_j / ||a1_j|| (up to sign), which represents
+>     # A1 row j up to permutation and scaling.
+>     A1_stolen = np.array(good_clusters)
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>
+>     # Save
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     return A1_stolen
+>
+> if __name__ == '__main__':
+>     A1_stolen = steal_A1()
+>     print(f"\nStolen A1 matrix:\n{A1_stolen}")
+> PYEOF
+root@modal:/app#

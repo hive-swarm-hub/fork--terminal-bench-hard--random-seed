@@ -1,0 +1,231 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_SCRIPT_EOF'
+> import sys
+> import re
+> import html
+>
+>
+> def decode_html_entities(s):
+>     """Decode HTML entities and remove null bytes and whitespace for comparison."""
+>     # First decode named and numeric entities
+>     decoded = html.unescape(s)
+>     # Remove null bytes, tabs, newlines (used for obfuscation)
+>     decoded = re.sub(r'[\x00\t\n\r]', '', decoded)
+>     return decoded
+>
+>
+> def is_javascript_uri(value):
+>     """Check if an attribute value is a javascript/vbscript URI (possibly obfuscated)."""
+>     # Decode entities and strip whitespace
+>     decoded = decode_html_entities(value).strip()
+>     # Check for dangerous protocols
+>     return bool(re.match(r'\s*(?:javascript|vbscript|livescript)\s*:', decoded, re.IGNORECASE))
+>
+>
+> def clean_style_value(value):
+>     """Remove javascript from CSS style values."""
+>     # Remove url(javascript:...) patterns
+>     # First try with decoded content
+>     result = re.sub(
+>         r'url\s*\(\s*["\']?\s*(?:javascript|vbscript|livescript)\s*:[^)]*\)',
+>         'url()',
+>         value,
+>         flags=re.IGNORECASE
+>     )
+>     # Also handle expression() which is IE-specific JS execution
+>     result = re.sub(
+>         r'expression\s*\([^)]*\)',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove -moz-binding
+>     result = re.sub(
+>         r'-moz-binding\s*:[^;"}\']*',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle behavior: url(...) (IE)
+>     result = re.sub(
+>         r'behavior\s*:\s*url\s*\([^)]*\)',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     return result
+>
+>
+> def process_tag(tag_str):
+>     """Process an HTML opening tag to remove dangerous attributes and sanitize values."""
+>     # Pattern to match attributes in an HTML tag
+>     # We need to carefully parse attributes to handle various quoting styles
+>
+>     # First, separate tag name from attributes
+>     tag_match = re.match(r'(<\s*[a-zA-Z][a-zA-Z0-9]*)(\s[^>]*)?(>|/>)$', tag_str, re.DOTALL)
+>     if not tag_match:
+>         return tag_str
+>
+>     tag_open = tag_match.group(1)  # e.g., '<div'
+>     attrs_str = tag_match.group(2) or ''  # e.g., ' class="x" onclick="bad"'
+>     tag_close = tag_match.group(3)  # e.g., '>' or '/>'
+>
+>     if not attrs_str.strip():
+>         return tag_str
+>
+>     # Parse attributes using a regex that handles all quoting styles
+>     # Attribute pattern: name, optional =value
+>     attr_pattern = re.compile(
+>         r'''(\s+)'''                          # leading whitespace
+>         r'''([a-zA-Z_][a-zA-Z0-9_:.-]*)'''    # attribute name
+>         r'''(\s*=\s*'''                        # equals sign with optional spaces
+>         r'''(?:"([^"]*)"|'([^']*)'|(\S+))'''  # value: double-quoted, single-quoted, or unquoted
+>         r''')?''',                              # value is optional
+>         re.DOTALL
+>     )
+>
+>     result_attrs = ''
+>     last_end = 0
+>
+>     for m in attr_pattern.finditer(attrs_str):
+>         whitespace = m.group(1)
+>         attr_name = m.group(2)
+>         has_value = m.group(3) is not None
+>         # Get the actual value from whichever group matched
+>         if m.group(4) is not None:
+>             attr_value = m.group(4)
+>             quote_style = 'double'
+>         elif m.group(5) is not None:
+>             attr_value = m.group(5)
+>             quote_style = 'single'
+>         elif m.group(6) is not None:
+>             attr_value = m.group(6)
+>             quote_style = 'none'
+>         else:
+>             attr_value = None
+>             quote_style = None
+>
+>         attr_name_lower = attr_name.lower()
+>
+>         # Skip event handler attributes (on*)
+>         if re.match(r'^on', attr_name_lower, re.IGNORECASE):
+>             # Skip this attribute entirely
+>             continue
+>
+>         # Check for javascript: URIs in URL-type attributes
+>         uri_attrs = {'href', 'src', 'action', 'formaction', 'data', 'poster',
+>                      'codebase', 'cite', 'background', 'dynsrc', 'lowsrc',
+>                      'srcset', 'xlink:href', 'to', 'values', 'from'}
+>
+>         if attr_name_lower in uri_attrs and attr_value is not None:
+>             if is_javascript_uri(attr_value):
+>                 # Replace value with empty string, keep the attribute
+>                 if quote_style == 'double':
+>                     result_attrs += whitespace + attr_name + '=""'
+>                 elif quote_style == 'single':
+>                     result_attrs += whitespace + attr_name + "=''"
+>                 else:
+>                     result_attrs += whitespace + attr_name + '=""'
+>                 continue
+>
+>         # Clean style attributes
+>         if attr_name_lower == 'style' and attr_value is not None:
+>             cleaned_style = clean_style_value(attr_value)
+>             if quote_style == 'double':
+>                 result_attrs += whitespace + attr_name + '="' + cleaned_style + '"'
+>             elif quote_style == 'single':
+>                 result_attrs += whitespace + attr_name + "='" + cleaned_style + "'"
+>             else:
+>                 result_attrs += whitespace + attr_name + '=' + cleaned_style
+>             continue
+>
+>         # Keep the attribute as-is
+>         result_attrs += m.group(0)
+>
+>     return tag_open + result_attrs + tag_close
+>
+>
+> def filter_html(content):
+>     result = content
+>
+>     # Step 1: Remove <script> tags and their contents
+>     # Handle multiline and various whitespace in tags
+>     result = re.sub(
+>         r'<\s*script(?:\s[^>]*)?>.*?<\s*/\s*script\s*>',
+>         '',
+>         result,
+>         flags=re.DOTALL | re.IGNORECASE
+>     )
+>
+>     # Remove self-closing script tags
+>     result = re.sub(
+>         r'<\s*script(?:\s[^>]*)?/\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Remove orphaned opening script tags
+>     result = re.sub(
+>         r'<\s*script(?:\s[^>]*)?>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Remove orphaned closing script tags
+>     result = re.sub(
+>         r'<\s*/\s*script\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 2: Process all opening tags to remove dangerous attributes
+>     result = re.sub(
+>         r'<[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>',
+>         lambda m: process_tag(m.group(0)),
+>         result,
+>         flags=re.DOTALL
+>     )
+>
+>     # Also handle self-closing tags
+>     result = re.sub(
+>         r'<[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)? */>',
+>         lambda m: process_tag(m.group(0)),
+>         result,
+>         flags=re.DOTALL
+>     )
+>
+>     # Step 3: Remove meta refresh with javascript
+>     result = re.sub(
+>         r'(<\s*meta[^>]*content\s*=\s*["\'][^"\']*)(?:javascript|vbscript):[^"\'>]*',
+>         r'\1',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return result
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_html(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT_EOF
+root@modal:/app#

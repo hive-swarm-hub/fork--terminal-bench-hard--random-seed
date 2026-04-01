@@ -1,0 +1,107 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/fit_both.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Parse the data file
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> laser_wn = x_data[np.argmax(y_data)]  # 19139.54
+> raman_shift = laser_wn - x_data
+>
+> # Select the region 1000-3600 cm^-1
+> mask = (raman_shift > 1000) & (raman_shift < 3600)
+> rs = raman_shift[mask]
+> ys = y_data[mask]
+> sort_rs = np.argsort(rs)
+> rs = rs[sort_rs]
+> ys = ys[sort_rs]
+>
+> print(f"Fitting region: {len(rs)} points, shift {rs.min():.0f}-{rs.max():.0f}")
+>
+> # Model: 2 Lorentzians + quadratic background
+> def model(x, x0_g, gamma_g, amp_g, x0_2d, gamma_2d, amp_2d, bg_a, bg_b, bg_c):
+>     lor_g = amp_g * gamma_g**2 / ((x - x0_g)**2 + gamma_g**2)
+>     lor_2d = amp_2d * gamma_2d**2 / ((x - x0_2d)**2 + gamma_2d**2)
+>     bg = bg_a * x**2 + bg_b * x + bg_c
+>     return lor_g + lor_2d + bg
+>
+> # Initial guesses
+> # Background: roughly linear from 22000 at shift=1200 to 16000 at shift=3500
+> # slope ~ (16000-22000)/(3500-1200) = -2.6/cm^-1
+> # 2D peak: center 2894, amplitude ~1800, gamma ~150
+> # G peak: center 1580, amplitude ~500 (weak), gamma ~100
+> p0 = [1580, 100, 500, 2894, 150, 1800, 0, -2.6, 22000+2.6*1200]
+>
+> # Try fit with bounds
+> bounds_lo = [1400, 20, 0, 2600, 50, 0, -0.01, -20, 10000]
+> bounds_hi = [1700, 500, 50000, 3100, 500, 50000, 0.01, 0, 40000]
+>
+> try:
+>     popt, pcov = curve_fit(model, rs, ys, p0=p0, bounds=(bounds_lo, bounds_hi), maxfev=100000)
+>     perr = np.sqrt(np.diag(pcov))
+>
+>     print("\nFit results:")
+>     labels = ['x0_G', 'gamma_G', 'amp_G', 'x0_2D', 'gamma_2D', 'amp_2D', 'bg_a', 'bg_b', 'bg_c']
+>     for l, v, e in zip(labels, popt, perr):
+>         print(f"  {l} = {v:.4f} +/- {e:.4f}")
+>
+>     y_fit = model(rs, *popt)
+>     residuals = ys - y_fit
+>     print(f"  RMS residual: {np.sqrt(np.mean(residuals**2)):.1f}")
+>
+>     # Also try without G peak to see if fit improves
+>     def model_no_g(x, x0_2d, gamma_2d, amp_2d, bg_a, bg_b, bg_c):
+>         lor_2d = amp_2d * gamma_2d**2 / ((x - x0_2d)**2 + gamma_2d**2)
+>         bg = bg_a * x**2 + bg_b * x + bg_c
+>         return lor_2d + bg
+>
+>     p0_nog = [2894, 150, 1800, 0, -2.6, 22000+2.6*1200]
+>     bounds_nog_lo = [2600, 50, 0, -0.01, -20, 10000]
+>     bounds_nog_hi = [3100, 500, 50000, 0.01, 0, 40000]
+>     popt_nog, _ = curve_fit(model_no_g, rs, ys, p0=p0_nog, bounds=(bounds_nog_lo, bounds_nog_hi), maxfev=100000)
+>     y_fit_nog = model_no_g(rs, *popt_nog)
+>     residuals_nog = ys - y_fit_nog
+>     print(f"  RMS residual (no G): {np.sqrt(np.mean(residuals_nog**2)):.1f}")
+>
+> except Exception as e:
+>     print(f"Fit failed: {e}")
+>     import traceback
+>     traceback.print_exc()
+>
+> PYEOF
+root@modal:/app# python3 /app/fit_both.py
+Fitting region: 35 points, shift 1077-3544
+
+Fit results:
+  x0_G = 1400.0026 +/- 0.0000
+  gamma_G = 107.3514 +/- 0.0000
+  amp_G = 0.0000 +/- 180.9648
+  x0_2D = 2943.7351 +/- 10.0723
+  gamma_2D = 257.4177 +/- 23.9229
+  amp_2D = 3053.3936 +/- 137.8790
+  bg_a = 0.0023 +/- 0.0001
+  bg_b = -13.8775 +/- 0.3832
+  bg_c = 35908.9767 +/- 437.5296
+  RMS residual: 150.4
+  RMS residual (no G): 150.4
+root@modal:/app#
