@@ -1,0 +1,199 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define HS 64
+> #define T 1024
+> #define FC (4*C)
+> float *W;
+> int off_wte,off_wpe,off_l1w,off_l1b,off_qw,off_qb,off_pw,off_pb;
+> int off_l2w,off_l2b,off_fw,off_fb,off_fpw,off_fpb,off_lfw,off_lfb;
+> float kv[L][T][2*C]; // k and v cache
+> void init_offsets(){
+>     off_wte=0; off_wpe=V*C;
+>     int o=off_wpe+T*C;
+>     off_l1w=o; o+=L*C; off_l1b=o; o+=L*C;
+>     off_qw=o; o+=L*C*3*C; off_qb=o; o+=L*3*C;
+>     off_pw=o; o+=L*C*C; off_pb=o; o+=L*C;
+>     off_l2w=o; o+=L*C; off_l2b=o; o+=L*C;
+>     off_fw=o; o+=L*C*FC; off_fb=o; o+=L*FC;
+>     off_fpw=o; o+=L*FC*C; off_fpb=o; o+=L*C;
+>     off_lfw=o; o+=C; off_lfb=o;
+> }
+> void layernorm(float *out, float *x, float *w, float *b){
+>     float m=0,v=0;
+>     for(int i=0;i<C;i++) m+=x[i];
+>     m/=C;
+>     for(int i=0;i<C;i++) v+=(x[i]-m)*(x[i]-m);
+>     v=1.0f/sqrtf(v/C+1e-5f);
+>     for(int i=0;i<C;i++) out[i]=(x[i]-m)*v*(w[i]+1)+b[i];
+> }
+> void matmul(float *out, float *x, float *w, int ic, int oc){
+>     for(int j=0;j<oc;j++){
+>         float s=0;
+>         for(int i=0;i<ic;i++) s+=x[i]*w[j*ic+i];
+>         out[j]=s;
+>     }
+> }
+> void forward(float *x, int tok, int pos){
+>     float h[C],qkv_[3*C],attn[C],fc[FC],proj[C];
+>     for(int i=0;i<C;i++) x[i]=W[off_wte+tok*C+i]+W[off_wpe+pos*C+i];
+>     for(int l=0;l<L;l++){
+>         layernorm(h,x,W+off_l1w+l*C,W+off_l1b+l*C);
+>         matmul(qkv_,h,W+off_qw+l*C*3*C,C,3*C);
+>         for(int i=0;i<3*C;i++) qkv_[i]+=W[off_qb+l*3*C+i];
+>         memcpy(kv[l][pos],qkv_+C,2*C*sizeof(float)); // store k,v
+>         memset(attn,0,C*sizeof(float));
+>         for(int hd=0;hd<H;hd++){
+>             int ho=hd*HS;
+>             float scores[T],mx=-1e30f,se=0;
+>             for(int p=0;p<=pos;p++){
+>                 float s=0;
+>                 for(int i=0;i<HS;i++) s+=qkv_[ho+i]*kv[l][p][ho+i];
+>                 scores[p]=s/sqrtf(HS);
+>                 if(scores[p]>mx) mx=scores[p];
+>             }
+>             for(int p=0;p<=pos;p++){scores[p]=expf(scores[p]-mx);se+=scores[p];}
+>             for(int p=0;p<=pos;p++){
+>                 float w=scores[p]/se;
+>                 for(int i=0;i<HS;i++) attn[ho+i]+=w*kv[l][p][C+ho+i];
+>             }
+>         }
+>         matmul(proj,attn,W+off_pw+l*C*C,C,C);
+>         for(int i=0;i<C;i++) x[i]+=proj[i]+W[off_pb+l*C+i];
+>         layernorm(h,x,W+off_l2w+l*C,W+off_l2b+l*C);
+>         matmul(fc,h,W+off_fw+l*C*FC,C,FC);
+>         for(int i=0;i<FC;i++){
+>             fc[i]+=W[off_fb+l*FC+i];
+>             fc[i]=0.5f*fc[i]*(1+tanhf(0.7978845608f*(fc[i]+0.044715f*fc[i]*fc[i]*fc[i])));
+>         }
+>         matmul(proj,fc,W+off_fpw+l*FC*C,FC,C);
+>         for(int i=0;i<C;i++) x[i]+=proj[i]+W[off_fpb+l*C+i];
+>     }
+>     layernorm(x,x,W+off_lfw,W+off_lfb);
+> }
+> char *toks[V]; int ntok;
+> void load_bpe(char *fn){
+>     FILE *f=fopen(fn,"r");
+>     char buf[256];
+>     // First 256 tokens are byte values
+>     // GPT-2 byte mapping
+>     static int b2u[256];
+>     int bs[512],cs[512],nb=0;
+>     for(int i='!';i<='~';i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     for(int i=0xa1;i<=0xac;i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     for(int i=0xae;i<=0xff;i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         int found=0;
+>         for(int j=0;j<nb;j++) if(bs[j]==i){found=1;break;}
+>         if(!found){bs[nb]=i;cs[nb]=256+n;nb++;n++;}
+>     }
+>     // b2u maps byte->unicode codepoint, we need u2b: unicode->byte
+>     static int u2b[512];
+>     for(int i=0;i<nb;i++) u2b[cs[i]]=bs[i];
+>     // Build token strings as raw bytes
+>     for(int i=0;i<256;i++){
+>         toks[i]=malloc(2);
+>         toks[i][0]=i; toks[i][1]=0;
+>     }
+>     ntok=256;
+>     fgets(buf,256,f); // skip header
+>     while(fgets(buf,256,f)&&ntok<V){
+>         // Each line: "tok1 tok2\n" in unicode, we need to concat
+>         int len=strlen(buf);
+>         if(buf[len-1]=='\n') buf[--len]=0;
+>         // Find the space separator
+>         char *sp=strchr(buf,' ');
+>         if(!sp) continue;
+>         // The merge result is tok1+tok2
+>         // But these are in GPT-2 unicode encoding
+>         // Find tok1 and tok2 in existing tokens and concat
+>         *sp=0;
+>         char *t1s=buf, *t2s=sp+1;
+>         // Convert unicode strings to byte strings
+>         // Each character in the string is a unicode codepoint from the b2u mapping
+>         char merged[256];
+>         int mi=0;
+>         for(char *p=t1s;*p;){
+>             // Read UTF-8 codepoint
+>             unsigned c;
+>             unsigned char ch=*p;
+>             if(ch<0x80){c=ch;p++;}
+>             else if(ch<0xe0){c=((ch&0x1f)<<6)|(p[1]&0x3f);p+=2;}
+>             else if(ch<0xf0){c=((ch&0xf)<<12)|((p[1]&0x3f)<<6)|(p[2]&0x3f);p+=3;}
+>             else{c=((ch&7)<<18)|((p[1]&0x3f)<<12)|((p[2]&0x3f)<<6)|(p[3]&0x3f);p+=4;}
+>             merged[mi++]=u2b[c];
+>         }
+>         for(char *p=t2s;*p;){
+>             unsigned c;
+>             unsigned char ch=*p;
+>             if(ch<0x80){c=ch;p++;}
+>             else if(ch<0xe0){c=((ch&0x1f)<<6)|(p[1]&0x3f);p+=2;}
+>             else if(ch<0xf0){c=((ch&0xf)<<12)|((p[1]&0x3f)<<6)|(p[2]&0x3f);p+=3;}
+>             else{c=((ch&7)<<18)|((p[1]&0x3f)<<12)|((p[2]&0x3f)<<6)|(p[3]&0x3f);p+=4;}
+>             merged[mi++]=u2b[c];
+>         }
+>         merged[mi]=0;
+>         toks[ntok]=malloc(mi+1);
+>         memcpy(toks[ntok],merged,mi+1);
+>         ntok++;
+>     }
+>     fclose(f);
+> }
+> int encode(char *text, int *out){
+>     // Simple greedy longest-match tokenization
+>     int n=0, len=strlen(text);
+>     int i=0;
+>     while(i<len){
+>         int best=-1, bestl=0;
+>         for(int t=0;t<ntok;t++){
+>             int tl=strlen(toks[t]);
+>             if(tl>bestl && tl<=len-i && memcmp(text+i,toks[t],tl)==0){
+>                 best=t; bestl=tl;
+>             }
+>         }
+>         if(best<0){out[n++]=text[i];i++;}
+>         else{out[n++]=best;i+=bestl;}
+>     }
+>     return n;
+> }
+> int main(int argc, char **argv){
+>     if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>     FILE *f=fopen(argv[1],"rb");
+>     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
+>     W=malloc(sz); fread(W,1,sz,f); fclose(f);
+>     init_offsets();
+>     load_bpe(argv[2]);
+>     int tokens[T],nt=encode(argv[3],tokens);
+>     float x[C];
+>     for(int i=0;i<nt+20;i++){
+>         int tok=(i<nt)?tokens[i]:tokens[i];
+>         forward(x,tok,i);
+>         if(i>=nt-1){
+>             // Find argmax
+>             float mx=-1e30f; int mi=0;
+>             for(int j=0;j<V;j++){
+>                 float s=0;
+>                 for(int k=0;k<C;k++) s+=x[k]*W[off_wte+j*C+k];
+>                 if(s>mx){mx=s;mi=j;}
+>             }
+>             if(i>=nt-1){
+>                 printf("%s",toks[mi]);
+>                 fflush(stdout);
+>                 if(i<nt+19) tokens[i+1]=mi;
+>             }
+>         }
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@modal:/app#

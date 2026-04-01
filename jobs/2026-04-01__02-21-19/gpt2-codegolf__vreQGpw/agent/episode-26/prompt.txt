@@ -1,0 +1,154 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define HS 64
+> #define T 1024
+> #define FC (4*C)
+> float *W;
+> int O[16]; // offsets
+> float kv[L][T][2*C];
+> void init(){
+>     O[0]=0;O[1]=V*C; // wte,wpe
+>     int o=O[1]+T*C;
+>     for(int i=2;i<16;i++){
+>         O[i]=o;
+>         int sizes[]={L*C,L*C,L*C*3*C,L*3*C,L*C*C,L*C,L*C,L*C,L*C*FC,L*FC,L*FC*C,L*C,C,C};
+>         o+=sizes[i-2];
+>     }
+> }
+> void ln(float*o,float*x,float*w,float*b){
+>     float m=0,v=0;
+>     for(int i=0;i<C;i++)m+=x[i];
+>     m/=C;
+>     for(int i=0;i<C;i++)v+=(x[i]-m)*(x[i]-m);
+>     v=1.f/sqrtf(v/C+1e-5f);
+>     for(int i=0;i<C;i++)o[i]=(x[i]-m)*v*(w[i]+1)+b[i];
+> }
+> void mm(float*o,float*x,float*w,int ic,int oc){
+>     for(int j=0;j<oc;j++){
+>         float s=0;
+>         for(int i=0;i<ic;i++)s+=x[i]*w[j*ic+i];
+>         o[j]=s;
+>     }
+> }
+> void fwd(float*x,int tok,int pos){
+>     float h[C],q[3*C],a[C],fc[FC],p[C];
+>     for(int i=0;i<C;i++)x[i]=W[O[0]+tok*C+i]+W[O[1]+pos*C+i];
+>     for(int l=0;l<L;l++){
+>         ln(h,x,W+O[2]+l*C,W+O[3]+l*C);
+>         mm(q,h,W+O[4]+(long)l*C*3*C,C,3*C);
+>         for(int i=0;i<3*C;i++)q[i]+=W[O[5]+l*3*C+i];
+>         memcpy(kv[l][pos],q+C,2*C*4);
+>         memset(a,0,C*4);
+>         for(int hd=0;hd<H;hd++){
+>             int ho=hd*HS;
+>             float sc[T],mx=-1e30,se=0;
+>             for(int p=0;p<=pos;p++){
+>                 float s=0;
+>                 for(int i=0;i<HS;i++)s+=q[ho+i]*kv[l][p][ho+i];
+>                 sc[p]=s/sqrtf(HS);
+>                 if(sc[p]>mx)mx=sc[p];
+>             }
+>             for(int p=0;p<=pos;p++){sc[p]=expf(sc[p]-mx);se+=sc[p];}
+>             for(int p=0;p<=pos;p++){
+>                 float w=sc[p]/se;
+>                 for(int i=0;i<HS;i++)a[ho+i]+=w*kv[l][p][C+ho+i];
+>             }
+>         }
+>         mm(p,a,W+O[6]+(long)l*C*C,C,C);
+>         for(int i=0;i<C;i++)x[i]+=p[i]+W[O[7]+l*C+i];
+>         ln(h,x,W+O[8]+l*C,W+O[9]+l*C);
+>         mm(fc,h,W+O[10]+(long)l*C*FC,C,FC);
+>         for(int i=0;i<FC;i++){
+>             fc[i]+=W[O[11]+l*FC+i];
+>             fc[i]=.5f*fc[i]*(1+tanhf(.7978845608f*(fc[i]+.044715f*fc[i]*fc[i]*fc[i])));
+>         }
+>         mm(p,fc,W+O[12]+(long)l*FC*C,FC,C);
+>         for(int i=0;i<C;i++)x[i]+=p[i]+W[O[13]+l*C+i];
+>     }
+>     ln(x,x,W+O[14],W+O[15]);
+> }
+> static int u2b[512];
+> char *toks[V];int ntok;
+> void load_bpe(char*fn){
+>     int bs[512],cs[512],nb=0,n=0;
+>     for(int i='!';i<='~';i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     for(int i=0xa1;i<=0xac;i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     for(int i=0xae;i<=0xff;i++){bs[nb]=i;cs[nb]=i;nb++;}
+>     for(int i=0;i<256;i++){
+>         int f=0;for(int j=0;j<nb;j++)if(bs[j]==i){f=1;break;}
+>         if(!f){bs[nb]=i;cs[nb]=256+n;nb++;n++;}
+>     }
+>     for(int i=0;i<nb;i++)u2b[cs[i]]=bs[i];
+>     for(int i=0;i<256;i++){toks[i]=malloc(2);toks[i][0]=i;toks[i][1]=0;}
+>     ntok=256;
+>     FILE*f=fopen(fn,"r");char buf[256];
+>     fgets(buf,256,f);
+>     while(fgets(buf,256,f)&&ntok<V){
+>         int len=strlen(buf);
+>         if(buf[len-1]=='\n')buf[--len]=0;
+>         char*sp=strchr(buf,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         char mg[256];int mi=0;
+>         for(char*s=buf;*s;){
+>             unsigned c;unsigned char ch=*s;
+>             if(ch<0x80){c=ch;s++;}else if(ch<0xe0){c=((ch&0x1f)<<6)|(s[1]&0x3f);s+=2;}
+>             else{c=((ch&0xf)<<12)|((s[1]&0x3f)<<6)|(s[2]&0x3f);s+=3;}
+>             mg[mi++]=u2b[c];
+>         }
+>         for(char*s=sp+1;*s;){
+>             unsigned c;unsigned char ch=*s;
+>             if(ch<0x80){c=ch;s++;}else if(ch<0xe0){c=((ch&0x1f)<<6)|(s[1]&0x3f);s+=2;}
+>             else{c=((ch&0xf)<<12)|((s[1]&0x3f)<<6)|(s[2]&0x3f);s+=3;}
+>             mg[mi++]=u2b[c];
+>         }
+>         mg[mi]=0;
+>         toks[ntok]=malloc(mi+1);memcpy(toks[ntok],mg,mi+1);ntok++;
+>     }
+>     fclose(f);
+> }
+> int encode(char*text,int*out){
+>     int n=0,len=strlen(text),i=0;
+>     while(i<len){
+>         int best=-1,bl=0;
+>         for(int t=0;t<ntok;t++){
+>             int tl=strlen(toks[t]);
+>             if(tl>bl&&tl<=len-i&&memcmp(text+i,toks[t],tl)==0){best=t;bl=tl;}
+>         }
+>         if(best<0){out[n++]=(unsigned char)text[i];i++;}else{out[n++]=best;i+=bl;}
+>     }
+>     return n;
+> }
+> int main(int ac,char**av){
+>     FILE*f=fopen(av[1],"rb");
+>     fseek(f,0,2);long sz=ftell(f);fseek(f,0,0);
+>     W=malloc(sz);fread(W,1,sz,f);fclose(f);
+>     init();load_bpe(av[2]);
+>     int tk[T],nt=encode(av[3],tk);
+>     float x[C];
+>     for(int i=0;i<nt+20;i++){
+>         fwd(x,tk[i],i);
+>         if(i>=nt-1){
+>             float mx=-1e30;int mi=0;
+>             for(int j=0;j<V;j++){
+>                 float s=0;
+>                 for(int k=0;k<C;k++)s+=x[k]*W[j*C+k];
+>                 if(s>mx){mx=s;mi=j;}
+>             }
+>             printf("%s",toks[mi]);fflush(stdout);
+>             if(i+1<nt+20)tk[i+1]=mi;
+>         }
+>     }
+>     printf("\n");
+> }
+> CEOF
+root@modal:/app#

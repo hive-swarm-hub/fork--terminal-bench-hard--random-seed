@@ -1,0 +1,110 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; C=768; L=12; H=12; T=1024
+> HS = C // H  # 64
+>
+> def get(off, n):
+>     return list(struct.unpack_from(f'<{n}f', m, off*4))
+>
+> # Offsets (llm.c grouped format)
+> wte_o = 0
+> wpe_o = V*C
+> ln1w_o = wpe_o + T*C
+> ln1b_o = ln1w_o + L*C
+> qkvw_o = ln1b_o + L*C
+> qkvb_o = qkvw_o + L*C*3*C
+> aprw_o = qkvb_o + L*3*C  # attn proj weight
+> aprb_o = aprw_o + L*C*C
+> ln2w_o = aprb_o + L*C
+> ln2b_o = ln2w_o + L*C
+> fcw_o = ln2b_o + L*C
+> fcb_o = fcw_o + L*C*4*C
+> fcpw_o = fcb_o + L*4*C
+> fcpb_o = fcpw_o + L*4*C*C
+> lnfw_o = fcpb_o + L*C
+> lnfb_o = lnfw_o + C
+>
+> def ln(x, wo, bo):
+>     n=len(x); mu=sum(x)/n; v=sum((xi-mu)**2 for xi in x)/n; s=1/math.sqrt(v+1e-5)
+>     w=get(wo,n); b=get(bo,n)
+>     return [(xi-mu)*s*(wi+1)+bi for xi,wi,bi in zip(x,w,b)]
+>
+> def matvec(x, wo, oc, ic):
+>     # w[oc][ic], out[j] = sum_i x[i]*w[j*ic+i]
+>     out=[0.0]*oc
+>     for j in range(oc):
+>         base = wo+j*ic
+>         w = get(base, ic)
+>         out[j] = sum(xi*wi for xi,wi in zip(x,w))
+>     return out
+>
+> def gelu(x):
+>     return [0.5*xi*(1+math.tanh(math.sqrt(2/math.pi)*(xi+0.044715*xi**3))) for xi in x]
+>
+> def add(a,b): return [ai+bi for ai,bi in zip(a,b)]
+> def addb(a,bo,n): b=get(bo,n); return [ai+bi for ai,bi in zip(a,b)]
+>
+> # Forward pass for single token at position 0
+> tok = 464  # " the"
+> pos = 0
+>
+> wte = get(wte_o + tok*C, C)
+> wpe = get(wpe_o + pos*C, C)
+> x = add(wte, wpe)
+>
+> for layer in range(L):
+>     # LN1
+>     h = ln(x, ln1w_o + layer*C, ln1b_o + layer*C)
+>     # QKV
+>     qkv = matvec(h, qkvw_o + layer*C*3*C, 3*C, C)
+>     qkv = addb(qkv, qkvb_o + layer*3*C, 3*C)
+>     # Single token, so attention is just softmax of q*k/sqrt(HS) for single position
+>     # For single token at pos 0: attn output = V (since softmax of single element = 1)
+>     # q = qkv[:C], k = qkv[C:2C], v = qkv[2C:3C]
+>     # For each head: attn_out = v_head (single token)
+>     attn_out = qkv[2*C:3*C]  # just the values
+>     # Project
+>     proj = matvec(attn_out, aprw_o + layer*C*C, C, C)
+>     proj = addb(proj, aprb_o + layer*C, C)
+>     x = add(x, proj)
+>     # LN2
+>     h = ln(x, ln2w_o + layer*C, ln2b_o + layer*C)
+>     # MLP fc
+>     fc = matvec(h, fcw_o + layer*C*4*C, 4*C, C)
+>     fc = addb(fc, fcb_o + layer*4*C, 4*C)
+>     fc = gelu(fc)
+>     # MLP proj
+>     mp = matvec(fc, fcpw_o + layer*4*C*C, C, 4*C)
+>     mp = addb(mp, fcpb_o + layer*C, C)
+>     x = add(x, mp)
+>     print(f'Layer {layer} done, x norm: {math.sqrt(sum(xi**2 for xi in x)/C):.4f}')
+>
+> # Final LN
+> x = ln(x, lnfw_o, lnfb_o)
+>
+> # Logits: x @ wte^T
+> # logit[j] = sum_i x[i] * wte[j*C + i]
+> print('Computing logits...')
+> top_val = -1e30
+> top_idx = 0
+> for j in range(V):
+>     wt = get(wte_o + j*C, C)
+>     s = sum(xi*wi for xi,wi in zip(x,wt))
+>     if s > top_val:
+>         top_val = s
+>         top_idx = j
+>
+> print(f'Top token: {top_idx}, logit: {top_val:.4f}')
+>
+> m.close()
+> f.close()
+> PYEOF
+Layer 0 done, x norm: 16.5460
+Layer 1 done, x norm: 26.0791
+

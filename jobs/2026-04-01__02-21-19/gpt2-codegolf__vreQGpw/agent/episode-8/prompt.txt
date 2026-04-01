@@ -1,0 +1,90 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import struct, mmap
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+> total = len(m) // 4
+>
+> def rf(off, n=5):
+>     return [struct.unpack_from('<f', m, (off+i)*4)[0] for i in range(n)]
+>
+> def check_ln(off, label):
+>     vals = rf(off, 768)
+>     avg = sum(vals)/768
+>     mx = max(abs(v-1.0) for v in vals)
+>     mn = min(vals)
+>     print(f'{label} @ {off}: avg={avg:.4f}, max_dev={mx:.4f}, min={mn:.4f}, first5={vals[:5]}')
+>
+> V=50257; C=768; L=12
+>
+> # Try llm.c grouped format
+> off = V*C + 1024*C  # after wte, wpe = 39383808
+> print('=== llm.c grouped format ===')
+> ln1w = off
+> ln1b = ln1w + L*C
+> check_ln(ln1w, 'ln1w[0]')
+> check_ln(ln1w + C, 'ln1w[1]')
+>
+> qkvw = ln1b + L*C
+> qkvb = qkvw + L*C*3*C
+> projw = qkvb + L*3*C
+> projb = projw + L*C*C
+> ln2w = projb + L*C
+> ln2b = ln2w + L*C
+> check_ln(ln2w, 'ln2w[0]')
+>
+> fcw = ln2b + L*C
+> fcb = fcw + L*C*4*C
+> fcpw = fcb + L*4*C
+> fcpb = fcpw + L*4*C*C
+> lnfw = fcpb + L*C
+> lnfb = lnfw + C
+> check_ln(lnfw, 'lnfw')
+> print(f'End: {lnfb + C} == {total}? {lnfb + C == total}')
+>
+> # Also try: maybe there's a header we missed?
+> # Check if first 768 values look like ln weights
+> print('\n=== Checking if data starts at offset 0 as wte ===')
+> print(f'First 5 vals: {rf(0, 5)}')
+> print(f'Vals at 50257*768: {rf(50257*768, 5)}')
+>
+> # Maybe the format has a different order. Let me check if the file has
+> # the Karpathy llm.c format with a 256-byte header
+> print('\n=== Trying with 256-byte (64-int) header ===')
+> hdr_ints = [struct.unpack_from('<i', m, i*4)[0] for i in range(10)]
+> print(f'First 10 ints: {hdr_ints}')
+> # The llm.c header starts with magic number 20240326 or similar
+> print(f'First int as uint: {struct.unpack_from("<I", m, 0)[0]}')
+>
+> # Try header of 256 bytes (64 floats)
+> hdr_off = 64  # 64 int32s = 256 bytes
+> off2 = hdr_off + V*C + 1024*C
+> if off2 + L*C < total:
+>     check_ln(hdr_off + V*C + 1024*C, 'with 64-hdr ln1w[0]')
+>
+> m.close()
+> f.close()
+> EOF
+=== llm.c grouped format ===
+ln1w[0] @ 39383808: avg=0.0147, max_dev=1.4365, min=-0.4365, first5=[0.012613765895366669, 0.1112576425075531, -0.018961146473884583, -0.07971286028623581, -0.1
+944773644208908]
+ln1w[1] @ 39384576: avg=0.0149, max_dev=1.3512, min=-0.3512, first5=[0.2511617839336395, -0.02361348643898964, -0.1021089032292366, -0.03539951518177986, 0.1762
+1077597141266]
+ln2w[0] @ 67750656: avg=0.0119, max_dev=1.3879, min=-0.3879, first5=[0.014073382131755352, 0.1345188021659851, 0.06339684873819351, 0.1973586082458496, 0.051448
+34145903587]
+lnfw @ 124438272: avg=-0.0010, max_dev=1.7493, min=-0.7493, first5=[0.18600820004940033, 0.016657276079058647, 0.04611587151885033, -0.01105660293251276, -0.072
+57743924856186]
+End: 124439808 == 124439808? True
+
+=== Checking if data starts at offset 0 as wte ===
+First 5 vals: [0.4803391396999359, -0.5254325866699219, -0.42926454544067383, -0.2059524953365326, -0.12773379683494568]
+Vals at 50257*768: [0.22745709121227264, 0.02743609994649887, -0.1548915058374405, -0.10033033788204193, 0.13492193818092346]
+
+=== Trying with 256-byte (64-int) header ===
+First 10 ints: [1056304899, -1090092352, -1092892528, -1101863626, -1107112794, -1111265429, -1095456213, -1113810758, -1120140049, -1122388099]
+First int as uint: 1056304899
+with 64-hdr ln1w[0] @ 39383872: avg=0.0156, max_dev=1.4365, min=-0.4365, first5=[-0.09268079698085785, -0.06264876574277878, 0.03843554109334946, -0.02103965915
+7395363, -0.06397280097007751]
+root@modal:/app#

@@ -1,0 +1,180 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background reference
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_gray = cv2.GaussianBlur(bg_gray, (7, 7), 0)
+>
+>     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Process all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     frame_idx = 0
+>     frame_data = []
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray = cv2.GaussianBlur(gray, (7, 7), 0)
+>
+>         diff = cv2.absdiff(bg_gray, gray)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological operations to clean up noise
+>         kernel = np.ones((5, 5), np.uint8)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find contours and filter small ones
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 200]
+>
+>         foot_y = 0
+>         runner_cx = 0
+>         total_area = 0
+>
+>         if big_contours:
+>             total_area = sum(cv2.contourArea(c) for c in big_contours)
+>             M = cv2.moments(thresh)
+>             if M['m00'] > 0:
+>                 runner_cx = int(M['m10'] / M['m00'])
+>
+>             # Look at a vertical strip around the runner's centroid X
+>             x_start = max(0, runner_cx - 80)
+>             x_end = min(frame_width, runner_cx + 80)
+>             strip = thresh[:, x_start:x_end]
+>
+>             # Find the bottom-most white pixel in this strip (foot position)
+>             rows_with_white = np.where(strip.max(axis=1) > 0)[0]
+>             if len(rows_with_white) > 0:
+>                 foot_y = rows_with_white[-1]
+>
+>         frame_data.append({
+>             'frame': frame_idx,
+>             'area': total_area,
+>             'cx': runner_cx,
+>             'foot_y': foot_y,
+>         })
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Identify frames where the runner is present (significant motion)
+>     runner_frames = [d for d in frame_data if d['area'] > 500]
+>
+>     if not runner_frames:
+>         raise ValueError("No runner detected in the video")
+>
+>     # Establish ground level from the running frames
+>     # Ground level is the maximum foot_y observed (when feet are on the track)
+>     foot_y_values = [d['foot_y'] for d in runner_frames]
+>     ground_level = np.percentile(foot_y_values, 85)  # Use high percentile as ground level
+>
+>     # Define threshold for "off ground" - foot must be significantly above ground
+>     # Use a percentage of the ground level as threshold
+>     jump_threshold = ground_level - 30  # At least 30 pixels above ground
+>
+>     # Find the jump phase: consecutive frames where foot_y < jump_threshold
+>     # First, identify the main runner presence window
+>     runner_start = runner_frames[0]['frame']
+>     runner_end = runner_frames[-1]['frame']
+>
+>     # Get foot_y for the runner presence window
+>     foot_y_series = []
+>     for d in frame_data[runner_start:runner_end + 1]:
+>         if d['area'] > 500:
+>             foot_y_series.append((d['frame'], d['foot_y']))
+>
+>     # Find frames where the runner is in the air (foot_y significantly below ground level)
+>     airborne_frames = [(f, fy) for f, fy in foot_y_series if fy < jump_threshold and fy > 0]
+>
+>     if not airborne_frames:
+>         # Lower threshold and try again
+>         jump_threshold = ground_level - 15
+>         airborne_frames = [(f, fy) for f, fy in foot_y_series if fy < jump_threshold and fy > 0]
+>
+>     if not airborne_frames:
+>         raise ValueError("No jump detected in the video")
+>
+>     # Find the peak of the jump (minimum foot_y = highest point)
+>     peak_frame, peak_foot_y = min(airborne_frames, key=lambda x: x[1])
+>
+>     # Find takeoff: last frame before the airborne phase where foot is at ground level
+>     # Walk backwards from the first airborne frame
+>     first_airborne = airborne_frames[0][0]
+>
+>     takeoff_frame = first_airborne
+>     for f, fy in foot_y_series:
+>         if f >= first_airborne:
+>             break
+>         if fy >= ground_level - 15:  # Close to ground
+>             takeoff_frame = f
+>
+>     # The takeoff is the next frame after the last grounded frame
+>     # Actually, takeoff_frame should be the frame where the athlete starts leaving the ground
+>     # Let's find the transition more precisely
+>
+>     # Build a dict for easy lookup
+>     foot_y_dict = dict(foot_y_series)
+>
+>     # Find takeoff: scan from peak backwards, find where foot_y first reaches near ground level
+>     takeoff = first_airborne  # default
+>     for f in range(peak_frame, runner_start - 1, -1):
+>         if f in foot_y_dict and foot_y_dict[f] >= ground_level - 10:
+>             takeoff = f + 1  # Next frame is when feet start leaving
+>             break
+>
+>     # Find landing: scan from peak forwards, find where foot_y first reaches near ground level
+>     last_airborne = airborne_frames[-1][0]
+>     landing = last_airborne  # default
+>     for f in range(peak_frame, runner_end + 1):
+>         if f in foot_y_dict and f > peak_frame and foot_y_dict[f] >= ground_level - 10:
+>             landing = f
+>             break
+>
+>     return takeoff, landing
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame,
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

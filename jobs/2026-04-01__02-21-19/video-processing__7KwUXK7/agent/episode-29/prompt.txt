@@ -1,0 +1,89 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> # Let me check if there are any issues with the current approach
+> # by simulating what happens with different ground_level percentiles
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> ret, bg_frame = cap.read()
+> bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+> bg_gray = cv2.GaussianBlur(bg_gray, (7, 7), 0)
+> frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+> cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+> foot_y_all = []
+> frame_idx = 0
+>
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>     gray = cv2.GaussianBlur(gray, (7, 7), 0)
+>     diff = cv2.absdiff(bg_gray, gray)
+>     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>     kernel = np.ones((5, 5), np.uint8)
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     big_contours = [c for c in contours if cv2.contourArea(c) > 200]
+>
+>     total_area = sum(cv2.contourArea(c) for c in big_contours) if big_contours else 0
+>     foot_y = 0
+>     runner_cx = 0
+>
+>     if big_contours and total_area >= 1000:
+>         M = cv2.moments(thresh)
+>         if M['m00'] > 0:
+>             runner_cx = int(M['m10'] / M['m00'])
+>         x_start = max(0, runner_cx - 80)
+>         x_end = min(frame_width, runner_cx + 80)
+>         strip = thresh[:, x_start:x_end]
+>         rows_with_white = np.where(strip.max(axis=1) > 0)[0]
+>         if len(rows_with_white) > 0:
+>             foot_y = rows_with_white[-1]
+>
+>     if total_area >= 1000 and foot_y > 0:
+>         foot_y_all.append((frame_idx, foot_y))
+>     frame_idx += 1
+>
+> cap.release()
+>
+> # Now simulate the algorithm with different percentiles
+> foot_y_values = np.array([fy for _, fy in foot_y_all])
+> for pct in [75, 80, 85, 90, 95]:
+>     gl = np.percentile(foot_y_values, pct)
+>     peak_idx = np.argmin(foot_y_values)
+>     peak_fy = foot_y_values[peak_idx]
+>     jh = gl - peak_fy
+>     gt = gl - max(15, jh * 0.15)
+>
+>     # Find takeoff
+>     takeoff = foot_y_all[0][0]
+>     for i in range(peak_idx, -1, -1):
+>         f, fy = foot_y_all[i]
+>         if fy >= gt:
+>             if i + 1 < len(foot_y_all):
+>                 takeoff = foot_y_all[i + 1][0]
+>             break
+>
+>     # Find landing
+>     peak_frame = foot_y_all[peak_idx][0]
+>     landing = foot_y_all[-1][0]
+>     for i in range(peak_idx, len(foot_y_all)):
+>         f, fy = foot_y_all[i]
+>         if f > peak_frame and fy >= gt:
+>             landing = f
+>             break
+>
+>     print(f"Percentile={pct}: ground_level={gl:.1f}, peak={peak_fy}, jump_height={jh:.1f}, threshold={gt:.1f}, takeoff={takeoff}, landing={landing}")
+> PYEOF
+Percentile=75: ground_level=362.0, peak=149, jump_height=213.0, threshold=330.1, takeoff=111, landing=119
+Percentile=80: ground_level=363.0, peak=149, jump_height=214.0, threshold=330.9, takeoff=111, landing=119
+Percentile=85: ground_level=363.8, peak=149, jump_height=214.8, threshold=331.6, takeoff=111, landing=119
+Percentile=90: ground_level=364.4, peak=149, jump_height=215.4, threshold=332.1, takeoff=111, landing=119
+Percentile=95: ground_level=366.6, peak=149, jump_height=217.6, threshold=334.0, takeoff=111, landing=119
+root@modal:/app#

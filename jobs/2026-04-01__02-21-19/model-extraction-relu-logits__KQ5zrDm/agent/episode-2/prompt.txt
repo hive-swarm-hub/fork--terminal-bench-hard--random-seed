@@ -1,0 +1,320 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFFILE'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-6):
+>     """Compute numerical gradient of forward at point x."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def find_A1_rows():
+>     """
+>     Extract rows of A1 (up to permutation and scaling) by finding
+>     gradient changes at ReLU boundaries.
+>
+>     For f(x) = A2 * ReLU(A1*x + b1) + b2, the gradient is:
+>     grad_f(x) = A2 * diag(s) * A1  where s_i = 1 if A1[i,:]*x + b1[i] > 0, else 0
+>
+>     When crossing a ReLU boundary for neuron i, the gradient changes by:
+>     delta_grad = ± A2[0,i] * A1[i,:]
+>
+>     So each gradient difference gives us a scaled version of a row of A1.
+>     """
+>
+>     # Collect many gradients at random points
+>     np.random.seed(42)
+>     n_samples = 2000
+>     gradients = []
+>     points = []
+>
+>     for _ in range(n_samples):
+>         x = np.random.randn(10) * 2.0
+>         grad = numerical_gradient(x)
+>         gradients.append(grad)
+>         points.append(x)
+>
+>     gradients = np.array(gradients)
+>
+>     # Find unique gradient differences
+>     # Each gradient is A2 @ diag(activation_pattern) @ A1
+>     # The difference between two gradients corresponds to neurons switching on/off
+>     # If exactly one neuron switches, we get ± A2[0,i] * A1[i,:]
+>
+>     # Strategy: compute all pairwise gradient differences and find ones
+>     # where exactly one neuron switched (these should be rank-1 directions)
+>
+>     # Better approach: find gradient differences between nearby points
+>     # that are likely to cross exactly one boundary
+>
+>     candidate_rows = []
+>
+>     # For each pair of nearby points, compute gradient difference
+>     for i in range(n_samples):
+>         for j in range(i+1, min(i+5, n_samples)):  # Compare with a few neighbors
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:  # Non-zero difference means boundary was crossed
+>                 # Normalize the direction
+>                 candidate_rows.append(diff / norm)
+>
+>     # Now we need to cluster these into 20 directions (each row of A1)
+>     # Two candidates correspond to the same row if they are parallel (same or opposite direction)
+>
+>     candidate_rows = np.array(candidate_rows)
+>
+>     # Use a greedy clustering approach
+>     unique_directions = []
+>     used = np.zeros(len(candidate_rows), dtype=bool)
+>
+>     for i in range(len(candidate_rows)):
+>         if used[i]:
+>             continue
+>         direction = candidate_rows[i]
+>         cluster = [direction]
+>         used[i] = True
+>         for j in range(i+1, len(candidate_rows)):
+>             if used[j]:
+>                 continue
+>             # Check if parallel (dot product close to ±1)
+>             dot = abs(np.dot(direction, candidate_rows[j]))
+>             if dot > 0.999:
+>                 cluster.append(candidate_rows[j])
+>                 used[j] = True
+>         # Average the cluster (align signs first)
+>         aligned = [cluster[0]]
+>         for c in cluster[1:]:
+>             if np.dot(cluster[0], c) < 0:
+>                 aligned.append(-c)
+>             else:
+>                 aligned.append(c)
+>         avg_direction = np.mean(aligned, axis=0)
+>         avg_direction = avg_direction / np.linalg.norm(avg_direction)
+>         unique_directions.append(avg_direction)
+>
+>     print(f"Found {len(unique_directions)} unique directions (expected 20)")
+>
+>     # Now we need to recover the actual scale of each row
+>     # We know that gradient differences are ± A2[0,i] * A1[i,:]
+>     # The norm of A1[i,:] times |A2[0,i]| gives the norm of the gradient diff
+>     # But we can only recover A1 up to permutation and scaling per the task
+>
+>     # So we just need the directions (up to scale)
+>     # But actually, we can recover the relative scaling too
+>     # Let's find the actual gradient differences (not normalized) for each direction
+>
+>     # For each unique direction, find the actual scale from gradient differences
+>     result_rows = []
+>
+>     all_diffs = []
+>     for i in range(n_samples):
+>         for j in range(i+1, min(i+5, n_samples)):
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 all_diffs.append(diff)
+>     all_diffs = np.array(all_diffs)
+>
+>     for direction in unique_directions:
+>         # Find all diffs aligned with this direction
+>         scales = []
+>         for diff in all_diffs:
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 normalized = diff / norm
+>                 dot = abs(np.dot(direction, normalized))
+>                 if dot > 0.999:
+>                     # The scale is the projection onto the direction
+>                     scale = np.dot(diff, direction)
+>                     scales.append(abs(scale))
+>
+>         if scales:
+>             # The minimum non-zero scale corresponds to exactly one neuron switching
+>             # which gives |A2[0,i]| * ||A1[i,:]||
+>             # But multiple neurons could switch giving multiples
+>             # Use the minimum scale
+>             min_scale = np.min(scales)
+>             result_rows.append(direction * min_scale)
+>         else:
+>             result_rows.append(direction)
+>
+>     return np.array(result_rows)
+>
+> # Alternative, more robust approach: use the fact that for a ReLU network,
+> # we can find the critical points along random lines and compute gradient changes
+>
+> def find_A1_rows_v2():
+>     """
+>     More robust extraction using line search along random directions.
+>
+>     For a random line x(t) = x0 + t*d, the function f(x(t)) is piecewise linear in t.
+>     The breakpoints occur where A1[i,:] * x(t) + b1[i] = 0 for some i.
+>     At each breakpoint, the slope changes by A2[0,i] * (A1[i,:] . d).
+>
+>     By using many random directions d, we can solve for A1[i,:] for each neuron.
+>     """
+>     np.random.seed(42)
+>
+>     hidden_dim = 20  # We'll try to detect this
+>     input_dim = 10
+>
+>     # Step 1: Find breakpoints along random lines and record slope changes
+>     # For each breakpoint, we get: slope_change = A2[0,i] * (A1[i,:] . d)
+>     # This is a linear function of d, so by using multiple d's we can solve for A1[i,:]
+>
+>     n_directions = 200  # Use many random directions
+>
+>     # Store (breakpoint_location, slope_change, direction_d, base_point) for each breakpoint found
+>     breakpoint_data = []  # List of (neuron_signature, slope_change, direction)
+>
+>     all_breakpoints_info = []  # (x_at_break, slope_change, d)
+>
+>     for trial in range(n_directions):
+>         x0 = np.random.randn(input_dim) * 1.0
+>         d = np.random.randn(input_dim)
+>         d = d / np.linalg.norm(d)
+>
+>         # Sample f along the line x0 + t*d
+>         # Use fine sampling to find breakpoints
+>         t_values = np.linspace(-10, 10, 10001)
+>         f_values = np.array([forward(x0 + t * d) for t in t_values])
+>
+>         # f is piecewise linear in t, so the second derivative is zero except at breakpoints
+>         # Compute numerical second derivative
+>         dt = t_values[1] - t_values[0]
+>         slopes = np.diff(f_values) / dt  # Slopes between consecutive points
+>         slope_changes = np.diff(slopes)  # Changes in slope
+>
+>         # Find significant slope changes (breakpoints)
+>         threshold = 1e-6
+>         breakpoint_indices = np.where(np.abs(slope_changes) > threshold)[0]
+>
+>         # Merge nearby breakpoints
+>         if len(breakpoint_indices) == 0:
+>             continue
+>
+>         merged = [breakpoint_indices[0]]
+>         for idx in breakpoint_indices[1:]:
+>             if idx - merged[-1] > 5:  # At least 5 samples apart
+>                 merged.append(idx)
+>             else:
+>                 # Keep the one with larger slope change
+>                 if abs(slope_changes[idx]) > abs(slope_changes[merged[-1]]):
+>                     merged[-1] = idx
+>
+>         for idx in merged:
+>             t_break = t_values[idx + 1]  # Approximate breakpoint location
+>             sc = slope_changes[idx]
+>             x_break = x0 + t_break * d
+>             all_breakpoints_info.append((x_break, sc, d, t_break, x0))
+>
+>     print(f"Found {len(all_breakpoints_info)} breakpoints total")
+>
+>     # Step 2: At each breakpoint, we know that A1[i,:] . x_break + b1[i] ≈ 0 for some i
+>     # And the slope change = A2[0,i] * (A1[i,:] . d)
+>     #
+>     # To identify which neuron each breakpoint belongs to, we can use the gradient change.
+>     # Compute the full gradient change at each breakpoint.
+>
+>     # For each breakpoint, compute gradient just before and after
+>     gradient_changes = []
+>     for x_break, sc, d, t_break, x0 in all_breakpoints_info:
+>         eps = 0.01
+>         x_before = x0 + (t_break - eps) * d
+>         x_after = x0 + (t_break + eps) * d
+>         grad_before = numerical_gradient(x_before)
+>         grad_after = numerical_gradient(x_after)
+>         grad_change = grad_after - grad_before
+>         norm = np.linalg.norm(grad_change)
+>         if norm > 1e-8:
+>             gradient_changes.append(grad_change)
+>
+>     print(f"Found {len(gradient_changes)} gradient changes")
+>
+>     # Step 3: Cluster gradient changes by direction (each cluster = one neuron)
+>     gradient_changes = np.array(gradient_changes)
+>
+>     # Normalize
+>     norms = np.linalg.norm(gradient_changes, axis=1, keepdims=True)
+>     normalized = gradient_changes / norms
+>
+>     # Greedy clustering
+>     clusters = []  # Each cluster is a list of indices
+>     cluster_dirs = []  # Representative direction for each cluster
+>
+>     assigned = np.zeros(len(normalized), dtype=bool)
+>
+>     for i in range(len(normalized)):
+>         if assigned[i]:
+>             continue
+>
+>         # Start new cluster
+>         cluster = [i]
+>         assigned[i] = True
+>         ref_dir = normalized[i]
+>
+>         for j in range(i+1, len(normalized)):
+>             if assigned[j]:
+>                 continue
+>             dot = abs(np.dot(ref_dir, normalized[j]))
+>             if dot > 0.99:
+>                 cluster.append(j)
+>                 assigned[j] = True
+>
+>         clusters.append(cluster)
+>
+>         # Compute average direction (align signs)
+>         aligned = [normalized[cluster[0]]]
+>         for idx in cluster[1:]:
+>             if np.dot(normalized[cluster[0]], normalized[idx]) < 0:
+>                 aligned.append(-normalized[idx])
+>             else:
+>                 aligned.append(normalized[idx])
+>         avg = np.mean(aligned, axis=0)
+>         avg = avg / np.linalg.norm(avg)
+>         cluster_dirs.append(avg)
+>
+>     print(f"Found {len(clusters)} clusters (neurons)")
+>
+>     # Step 4: For each cluster, recover the actual row of A1 (up to global scale per neuron)
+>     # The gradient change at a breakpoint for neuron i is: A2[0,i] * A1[i,:]
+>     # So the gradient change directly gives us A2[0,i] * A1[i,:]
+>     # Since we want A1 up to permutation and scaling, we can just use the gradient changes
+>
+>     result_rows = []
+>     for cluster_idx, (cluster, direction) in enumerate(zip(clusters, cluster_dirs)):
+>         # Use the median magnitude to be robust
+>         magnitudes = []
+>         for idx in cluster:
+>             gc = gradient_changes[idx]
+>             sign = np.sign(np.dot(gc, direction))
+>             magnitudes.append(np.dot(gc, direction))
+>
+>         median_mag = np.median(magnitudes)
+>         row = direction * median_mag
+>         result_rows.append(row)
+>
+>     return np.array(result_rows)
+>
+> if __name__ == "__main__":
+>     print("Extracting A1 from the neural network...")
+>     print("This may take a while due to many forward queries...")
+>
+>     A1_stolen = find_A1_rows_v2()
+>
+>     print(f"\nExtracted A1 shape: {A1_stolen.shape}")
+>     print(f"A1 matrix:")
+>     print(A1_stolen)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print(f"\nSaved to /app/stolen_A1.npy")
+> ENDOFFILE
+root@modal:/app#

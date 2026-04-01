@@ -1,0 +1,200 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFFILE'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute numerical gradient of forward at point x using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def extract_A1():
+>     """
+>     Extract A1 (up to permutation and scaling of rows) from a ReLU network
+>     f(x) = A2 * ReLU(A1*x + b1) + b2
+>
+>     Key insight: grad_x f(x) = A2 @ diag(s(x)) @ A1
+>     where s(x)_i = 1 if (A1*x+b1)_i > 0, else 0.
+>
+>     When two points have activation patterns differing in exactly one neuron i,
+>     the gradient difference is exactly ±A2[0,i] * A1[i,:].
+>
+>     We collect many such gradient differences and cluster them by direction
+>     to identify the rows of A1.
+>     """
+>     np.random.seed(42)
+>     input_dim = 10
+>
+>     # Step 1: Compute gradients at many random points
+>     n_points = 500
+>     print(f"Computing gradients at {n_points} random points...")
+>
+>     points = []
+>     gradients = []
+>     for i in range(n_points):
+>         x = np.random.randn(input_dim) * 1.0
+>         grad = numerical_gradient(x)
+>         points.append(x)
+>         gradients.append(grad)
+>         if (i+1) % 100 == 0:
+>             print(f"  {i+1}/{n_points} done")
+>
+>     points = np.array(points)
+>     gradients = np.array(gradients)
+>
+>     # Step 2: Find gradient differences that correspond to single neuron switches
+>     # For nearby points, the activation pattern is likely to differ in 0 or 1 neurons
+>     # We look at all pairs and collect non-zero gradient differences
+>     print("Finding gradient differences...")
+>
+>     candidate_rows = []  # (direction, magnitude) pairs
+>     raw_diffs = []
+>
+>     # Compare each point with several others
+>     # Use a smarter strategy: for each point, find points with similar but not identical gradients
+>     for i in range(n_points):
+>         for j in range(i+1, n_points):
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 raw_diffs.append(diff)
+>
+>     print(f"Found {len(raw_diffs)} non-zero gradient differences")
+>     raw_diffs = np.array(raw_diffs)
+>
+>     # Step 3: Many of these diffs are sums of multiple rows (when multiple neurons switch).
+>     # We need to find the "atomic" directions - the ones that can't be decomposed further.
+>     # These correspond to individual rows of A1.
+>     #
+>     # Strategy: Normalize all diffs and cluster by direction.
+>     # Diffs where exactly one neuron switches will be parallel to a row of A1.
+>     # Diffs where multiple neurons switch will NOT be parallel to any single row.
+>     # So we look for directions that appear frequently.
+>
+>     norms = np.linalg.norm(raw_diffs, axis=1)
+>     normalized = raw_diffs / norms[:, np.newaxis]
+>
+>     # Greedy clustering by direction (considering ±)
+>     print("Clustering gradient differences by direction...")
+>     clusters = []  # list of lists of indices
+>     cluster_dirs = []
+>     assigned = np.zeros(len(normalized), dtype=bool)
+>
+>     # Sort by frequency - directions that appear more often are more likely to be real rows
+>     for i in range(len(normalized)):
+>         if assigned[i]:
+>             continue
+>
+>         cluster = [i]
+>         assigned[i] = True
+>         ref = normalized[i]
+>
+>         for j in range(i+1, len(normalized)):
+>             if assigned[j]:
+>                 continue
+>             dot = abs(np.dot(ref, normalized[j]))
+>             if dot > 0.995:  # Very parallel
+>                 cluster.append(j)
+>                 assigned[j] = True
+>
+>         clusters.append(cluster)
+>
+>         # Compute average direction
+>         aligned = [normalized[cluster[0]]]
+>         for idx in cluster[1:]:
+>             if np.dot(normalized[cluster[0]], normalized[idx]) < 0:
+>                 aligned.append(-normalized[idx])
+>             else:
+>                 aligned.append(normalized[idx])
+>         avg = np.mean(aligned, axis=0)
+>         avg = avg / np.linalg.norm(avg)
+>         cluster_dirs.append(avg)
+>
+>     # Filter: keep only clusters with enough members (real rows should appear many times)
+>     print(f"Total clusters before filtering: {len(clusters)}")
+>     cluster_sizes = [len(c) for c in clusters]
+>     print(f"Cluster sizes: {sorted(cluster_sizes, reverse=True)[:30]}")
+>
+>     # The real single-neuron switches should form the largest clusters
+>     # Multi-neuron switches are less likely to be parallel to each other
+>     # Keep clusters with size >= some threshold
+>     min_size = 3  # At least 3 occurrences
+>
+>     filtered_clusters = []
+>     filtered_dirs = []
+>     for cluster, direction in zip(clusters, cluster_dirs):
+>         if len(cluster) >= min_size:
+>             filtered_clusters.append(cluster)
+>             filtered_dirs.append(direction)
+>
+>     print(f"Clusters after filtering (size >= {min_size}): {len(filtered_clusters)}")
+>
+>     # If we have more than 20, some might be multi-neuron switches
+>     # If we have fewer than 20, we need more data or a lower threshold
+>
+>     # Step 4: For each cluster, compute the actual scaled row
+>     # The gradient difference is A2[0,i] * A1[i,:] for single-neuron switches
+>     # We want A1[i,:] up to scaling, so we can use the gradient differences directly
+>
+>     result_rows = []
+>     for cluster, direction in zip(filtered_clusters, filtered_dirs):
+>         # Get all raw diffs in this cluster, project onto direction
+>         projections = []
+>         for idx in cluster:
+>             proj = np.dot(raw_diffs[idx], direction)
+>             projections.append(proj)
+>
+>         # The magnitude should be consistent for single-neuron switches
+>         # Use median for robustness
+>         median_proj = np.median(projections)
+>         row = direction * median_proj
+>         result_rows.append(row)
+>
+>     result = np.array(result_rows)
+>     print(f"\nExtracted matrix shape: {result.shape}")
+>
+>     return result
+>
+> if __name__ == "__main__":
+>     print("Extracting A1 from the neural network...")
+>     A1_stolen = extract_A1()
+>
+>     print(f"\nStolen A1 shape: {A1_stolen.shape}")
+>     print("Stolen A1:")
+>     print(A1_stolen)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print(f"\nSaved to /app/stolen_A1.npy")
+>
+>     # Verification: compare with actual A1 (for debugging)
+>     # The stolen rows should match actual rows up to permutation and scaling
+>     print("\n--- Verification ---")
+>     from forward import A1 as actual_A1
+>
+>     # For each stolen row, find the best matching actual row
+>     actual_normalized = actual_A1 / np.linalg.norm(actual_A1, axis=1, keepdims=True)
+>     stolen_normalized = A1_stolen / np.linalg.norm(A1_stolen, axis=1, keepdims=True)
+>
+>     matched = set()
+>     for i, srow in enumerate(stolen_normalized):
+>         dots = np.abs(actual_normalized @ srow)
+>         best_j = np.argmax(dots)
+>         best_dot = dots[best_j]
+>         if best_j in matched:
+>             print(f"  Stolen row {i}: best match actual row {best_j} (dot={best_dot:.6f}) [DUPLICATE]")
+>         else:
+>             print(f"  Stolen row {i}: best match actual row {best_j} (dot={best_dot:.6f})")
+>             matched.add(best_j)
+>
+>     print(f"\nMatched {len(matched)}/20 actual rows")
+> ENDOFFILE
+root@modal:/app#

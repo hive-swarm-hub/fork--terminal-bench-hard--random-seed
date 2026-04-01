@@ -1,0 +1,241 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+>
+>
+> def remove_balanced_parens(s, start_pos):
+>     """Starting at s[start_pos] which should be '(', find the matching ')'
+>     accounting for nesting. Returns the index after the closing ')'."""
+>     depth = 1
+>     j = start_pos + 1
+>     while j < len(s) and depth > 0:
+>         if s[j] == '(':
+>             depth += 1
+>         elif s[j] == ')':
+>             depth -= 1
+>         j += 1
+>     return j
+>
+>
+> def decode_html_entities_for_check(s):
+>     """Decode HTML entities in a string for checking purposes only.
+>     This helps detect obfuscated javascript: URIs."""
+>     import html
+>     # Decode numeric and named entities
+>     decoded = html.unescape(s)
+>     # Also remove null bytes and control characters that browsers ignore
+>     decoded = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', decoded)
+>     return decoded
+>
+>
+> def is_dangerous_url(url_str):
+>     """Check if a URL string (possibly with HTML entities) is a javascript/vbscript URL."""
+>     # First check the raw string
+>     stripped = url_str.strip()
+>     # Decode HTML entities for checking
+>     decoded = decode_html_entities_for_check(stripped)
+>     # Remove whitespace/control chars that browsers might ignore between letters
+>     collapsed = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded)
+>     if re.match(r'(?:javascript|vbscript|livescript)\s*:', collapsed, re.IGNORECASE):
+>         return True
+>     # Also check with a more lenient pattern on the decoded version
+>     if re.match(r'\s*(?:javascript|vbscript|livescript)\s*:', decoded, re.IGNORECASE):
+>         return True
+>     return False
+>
+>
+> def clean_style_value(value):
+>     """Remove dangerous constructs from a CSS style value."""
+>     result = []
+>     i = 0
+>     while i < len(value):
+>         # Check for expression(...)
+>         em = re.match(r'expression\s*\(', value[i:], re.IGNORECASE)
+>         if em:
+>             paren_start = i + em.end() - 1
+>             i = remove_balanced_parens(value, paren_start)
+>             continue
+>
+>         # Check for url( with javascript:/vbscript: inside )
+>         um = re.match(r'url\s*\(', value[i:], re.IGNORECASE)
+>         if um:
+>             paren_start = i + um.end() - 1
+>             paren_end = remove_balanced_parens(value, paren_start)
+>             url_content = value[paren_start+1:paren_end-1].strip()
+>             url_inner = url_content.strip().strip("'").strip('"').strip()
+>             if is_dangerous_url(url_inner):
+>                 i = paren_end
+>                 continue
+>
+>         # Check for -moz-binding
+>         if re.match(r'-moz-binding\s*:', value[i:], re.IGNORECASE):
+>             semi = value.find(';', i)
+>             if semi != -1:
+>                 i = semi + 1
+>             else:
+>                 i = len(value)
+>             continue
+>
+>         # Check for behavior
+>         if re.match(r'behavior\s*:', value[i:], re.IGNORECASE):
+>             semi = value.find(';', i)
+>             if semi != -1:
+>                 i = semi + 1
+>             else:
+>                 i = len(value)
+>             continue
+>
+>         result.append(value[i])
+>         i += 1
+>     return ''.join(result)
+>
+>
+> def clean_style_block(style_content):
+>     """Remove dangerous constructs from a <style> block's content."""
+>     # Remove expression(...)
+>     def remove_expr(s):
+>         result = []
+>         i = 0
+>         while i < len(s):
+>             em = re.match(r'expression\s*\(', s[i:], re.IGNORECASE)
+>             if em:
+>                 paren_start = i + em.end() - 1
+>                 i = remove_balanced_parens(s, paren_start)
+>                 continue
+>             result.append(s[i])
+>             i += 1
+>         return ''.join(result)
+>     style_content = remove_expr(style_content)
+>     # Remove url(javascript:...) and url(vbscript:...)
+>     def remove_url_js(s):
+>         result = []
+>         i = 0
+>         while i < len(s):
+>             um = re.match(r'url\s*\(', s[i:], re.IGNORECASE)
+>             if um:
+>                 paren_start = i + um.end() - 1
+>                 paren_end = remove_balanced_parens(s, paren_start)
+>                 url_content = s[paren_start+1:paren_end-1].strip()
+>                 url_inner = url_content.strip().strip("'").strip('"').strip()
+>                 if is_dangerous_url(url_inner):
+>                     i = paren_end
+>                     continue
+>             result.append(s[i])
+>             i += 1
+>         return ''.join(result)
+>     style_content = remove_url_js(style_content)
+>     # Remove -moz-binding
+>     style_content = re.sub(r'-moz-binding\s*:[^;}/]*', '', style_content, flags=re.IGNORECASE)
+>     # Remove behavior
+>     style_content = re.sub(r'behavior\s*:[^;}/]*', '', style_content, flags=re.IGNORECASE)
+>     return style_content
+>
+>
+> def remove_javascript(html):
+>     # Remove <script> tags and their contents (case-insensitive, handles attributes)
+>     html = re.sub(r'<script\b[^>]*>.*?</script\s*>', '', html, flags=re.IGNORECASE | re.DOTALL)
+>     # Remove self-closing script tags
+>     html = re.sub(r'<script\b[^>]*/\s*>', '', html, flags=re.IGNORECASE)
+>     # Remove orphan opening script tags (no closing tag)
+>     html = re.sub(r'<script\b[^>]*>', '', html, flags=re.IGNORECASE)
+>     # Remove orphan closing script tags
+>     html = re.sub(r'</script\s*>', '', html, flags=re.IGNORECASE)
+>
+>     # Clean <style> blocks - remove dangerous CSS constructs
+>     def clean_style_tag(match):
+>         open_tag = match.group(1)
+>         content = match.group(2)
+>         close_tag = match.group(3)
+>         return open_tag + clean_style_block(content) + close_tag
+>     html = re.sub(r'(<style\b[^>]*>)(.*?)(</style\s*>)', clean_style_tag, html, flags=re.IGNORECASE | re.DOTALL)
+>
+>     # Remove event handler attributes (on*="...")
+>     def remove_event_handlers(match):
+>         tag = match.group(0)
+>         # Remove on* attributes with double quotes
+>         tag = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with single quotes
+>         tag = re.sub(r"\s+on\w+\s*=\s*'[^']*'", '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no quotes (value ends at space or >)
+>         tag = re.sub(r'\s+on\w+\s*=\s*[^\s\'">`]+', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no value
+>         tag = re.sub(r'\s+on\w+(?=\s|/?>)', '', tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_event_handlers, html)
+>
+>     # Remove javascript:/vbscript: URLs in any attribute
+>     def remove_js_urls(match):
+>         tag = match.group(0)
+>
+>         # Handle double-quoted attribute values
+>         def check_dq(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + '""'
+>             return m.group(0)
+>         tag = re.sub(r'(\s+\w+\s*=\s*)"([^"]*)"', check_dq, tag)
+>
+>         # Handle single-quoted attribute values
+>         def check_sq(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + "''"
+>             return m.group(0)
+>         tag = re.sub(r"(\s+\w+\s*=\s*)'([^']*)'", check_sq, tag)
+>
+>         # Handle unquoted attribute values for URL-like attributes
+>         def check_uq(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + '""'
+>             return m.group(0)
+>         tag = re.sub(r'(\s+(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite)\s*=\s*)([^\s\'">`]+)', check_uq, tag, flags=re.IG
+NORECASE)
+>
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_js_urls, html)
+>
+>     # Remove dangerous CSS in style attributes
+>     def remove_style_dangers(match):
+>         tag = match.group(0)
+>         def clean_style_attr(style_match):
+>             prefix = style_match.group(1)
+>             value = style_match.group(2)
+>             quote = style_match.group(3)
+>             return prefix + clean_style_value(value) + quote
+>         tag = re.sub(r'(style\s*=\s*")([^"]*)(")', clean_style_attr, tag, flags=re.IGNORECASE)
+>         tag = re.sub(r"(style\s*=\s*')([^']*)(')" , clean_style_attr, tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_style_dangers, html)
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@modal:/app#

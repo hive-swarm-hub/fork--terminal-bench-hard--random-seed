@@ -1,0 +1,115 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; C=768; L=12; H=12; T=1024; HS=64
+>
+> def get(off, n):
+>     return list(struct.unpack_from(f'<{n}f', m, off*4))
+>
+> # Per-layer layout
+> wte_o = 0
+> wpe_o = V*C
+> base = wpe_o + T*C
+>
+> # Compute per-layer offsets
+> layer_off = []  # list of (ln1g, ln1b, cattnw, cattnb, cprojw, cprojb, ln2g, ln2b, fcw, fcb, fpw, fpb)
+> for l in range(L):
+>     o = base
+>     for ll in range(l):
+>         o += C + C + C*3*C + 3*C + C*C + C + C + C + C*4*C + 4*C + 4*C*C + C
+>     ln1g = o; o += C
+>     ln1b = o; o += C
+>     cattnw = o; o += C*3*C
+>     cattnb = o; o += 3*C
+>     cprojw = o; o += C*C
+>     cprojb = o; o += C
+>     ln2g = o; o += C
+>     ln2b = o; o += C
+>     fcw = o; o += C*4*C
+>     fcb = o; o += 4*C
+>     fpw = o; o += 4*C*C
+>     fpb = o; o += C
+>     layer_off.append((ln1g,ln1b,cattnw,cattnb,cprojw,cprojb,ln2g,ln2b,fcw,fcb,fpw,fpb))
+>
+> lnf_g = base + L*(C+C+C*3*C+3*C+C*C+C+C+C+C*4*C+4*C+4*C*C+C)
+> lnf_b = lnf_g + C
+> print(f'lnf_g @ {lnf_g}, lnf_b @ {lnf_b}')
+> print(f'End: {lnf_b + C} == {len(m)//4}? {lnf_b + C == len(m)//4}')
+>
+> def ln(x, wo, bo):
+>     n=len(x); mu=sum(x)/n; v=sum((xi-mu)**2 for xi in x)/n; s=1/math.sqrt(v+1e-5)
+>     w=get(wo,n); b=get(bo,n)
+>     return [(xi-mu)*s*(wi+1)+bi for xi,wi,bi in zip(x,w,b)]
+>
+> def mv(x, wo, ic, oc):
+>     # TF convention: w[ic][oc]
+>     out=[0.0]*oc
+>     for j in range(oc):
+>         s=0
+>         for i in range(ic):
+>             s += x[i] * struct.unpack_from('<f', m, (wo+i*oc+j)*4)[0]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return [0.5*xi*(1+math.tanh(math.sqrt(2/math.pi)*(xi+0.044715*xi**3))) for xi in x]
+>
+> def add(a,b): return [ai+bi for ai,bi in zip(a,b)]
+> def addb(a,bo,n): b=get(bo,n); return [ai+bi for ai,bi in zip(a,b)]
+>
+> # Single token test: "The" = 464
+> tok = 464; pos = 0
+> wte = get(wte_o + tok*C, C)
+> wpe = get(wpe_o + pos*C, C)
+> x = add(wte, wpe)
+>
+> for l in range(L):
+>     ln1g,ln1b,cattnw,cattnb,cprojw,cprojb,ln2g,ln2b,fcw,fcb,fpw,fpb = layer_off[l]
+>     h = ln(x, ln1g, ln1b)
+>     qkv = mv(h, cattnw, C, 3*C)
+>     qkv = addb(qkv, cattnb, 3*C)
+>     # Single token: attn output = v
+>     v = qkv[2*C:3*C]
+>     proj = mv(v, cprojw, C, C)
+>     proj = addb(proj, cprojb, C)
+>     x = add(x, proj)
+>     h = ln(x, ln2g, ln2b)
+>     fc = mv(h, fcw, C, 4*C)
+>     fc = addb(fc, fcb, 4*C)
+>     fc = gelu(fc)
+>     fp = mv(fc, fpw, 4*C, C)
+>     fp = addb(fp, fpb, C)
+>     x = add(x, fp)
+>     print(f'Layer {l}: norm={math.sqrt(sum(xi**2 for xi in x)/C):.4f}')
+>
+> x = ln(x, lnf_g, lnf_b)
+> top_val=-1e30; top_idx=0
+> for j in range(V):
+>     wt=get(wte_o+j*C,C)
+>     s=sum(xi*wi for xi,wi in zip(x,wt))
+>     if s>top_val: top_val=s; top_idx=j
+>
+> def bytes_to_unicode():
+>     bs=list(range(ord('!'),ord('~')+1))+list(range(0xa1,0xad))+list(range(0xae,0x100))
+>     cs=bs[:]; n=0
+>     for b in range(256):
+>         if b not in bs: bs.append(b); cs.append(256+n); n+=1
+>     return dict(zip(bs,[chr(c) for c in cs]))
+> b2u=bytes_to_unicode(); u2b={v:k for k,v in b2u.items()}
+> with open('vocab.bpe','r') as ff: lines=ff.readlines()
+> tokens_str=[b2u[i] for i in range(256)]
+> for line in lines[1:]:
+>     parts=line.rstrip().split(' ')
+>     if len(parts)==2: tokens_str.append(parts[0]+parts[1])
+> def decode(tid): return bytes([u2b[c] for c in tokens_str[tid]])
+> print(f'Top: {top_idx} = {decode(top_idx)}, logit={top_val:.4f}')
+> m.close(); f.close()
+> EOF
+lnf_g @ 124438272, lnf_b @ 124439040
+End: 124439808 == 124439808? True
+

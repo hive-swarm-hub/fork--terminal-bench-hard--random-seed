@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; C=768; L=12; H=12; T=1024; HS=64
+>
+> def get(off, n):
+>     return list(struct.unpack_from(f'<{n}f', m, off*4))
+>
+> wte_o = 0; wpe_o = V*C
+> ln1w_o = wpe_o + T*C; ln1b_o = ln1w_o + L*C
+> qkvw_o = ln1b_o + L*C; qkvb_o = qkvw_o + L*C*3*C
+> aprw_o = qkvb_o + L*3*C; aprb_o = aprw_o + L*C*C
+> ln2w_o = aprb_o + L*C; ln2b_o = ln2w_o + L*C
+> fcw_o = ln2b_o + L*C; fcb_o = fcw_o + L*C*4*C
+> fcpw_o = fcb_o + L*4*C; fcpb_o = fcpw_o + L*4*C*C
+> lnfw_o = fcpb_o + L*C; lnfb_o = lnfw_o + C
+>
+> def ln(x, wo, bo):
+>     n=len(x); mu=sum(x)/n; v=sum((xi-mu)**2 for xi in x)/n; s=1/math.sqrt(v+1e-5)
+>     w=get(wo,n); b=get(bo,n)
+>     return [(xi-mu)*s*(wi+1)+bi for xi,wi,bi in zip(x,w,b)]
+>
+> def mv(x, wo, oc, ic):
+>     out=[0.0]*oc
+>     for j in range(oc):
+>         w = get(wo+j*ic, ic)
+>         out[j] = sum(xi*wi for xi,wi in zip(x,w))
+>     return out
+>
+> def gelu(x):
+>     return [0.5*xi*(1+math.tanh(math.sqrt(2/math.pi)*(xi+0.044715*xi**3))) for xi in x]
+>
+> def add(a,b): return [ai+bi for ai,bi in zip(a,b)]
+> def addb(a,bo,n): b=get(bo,n); return [ai+bi for ai,bi in zip(a,b)]
+>
+> # Multi-token forward pass with KV cache for attention
+> tokens = [15496, 11]  # "Hello" ","
+> NT = len(tokens)
+>
+> # Store all K,V for each layer
+> all_k = [[None]*T for _ in range(L)]  # all_k[layer][pos] = list of C floats
+> all_v = [[None]*T for _ in range(L)]
+>
+> for t in range(NT):
+>     tok = tokens[t]
+>     wte = get(wte_o + tok*C, C)
+>     wpe = get(wpe_o + t*C, C)
+>     x = add(wte, wpe)
+>
+>     for layer in range(L):
+>         h = ln(x, ln1w_o + layer*C, ln1b_o + layer*C)
+>         qkv = mv(h, qkvw_o + layer*C*3*C, 3*C, C)
+>         qkv = addb(qkv, qkvb_o + layer*3*C, 3*C)
+>         q = qkv[:C]; k = qkv[C:2*C]; v = qkv[2*C:3*C]
+>         all_k[layer][t] = k
+>         all_v[layer][t] = v
+>
+>         # Multi-head attention
+>         attn_out = [0.0]*C
+>         for head in range(H):
+>             ho = head*HS
+>             # Compute attention scores for all positions up to t
+>             scores = []
+>             for p in range(t+1):
+>                 s = sum(q[ho+i]*all_k[layer][p][ho+i] for i in range(HS)) / math.sqrt(HS)
+>                 scores.append(s)
+>             # Softmax
+>             mx = max(scores)
+>             e = [math.exp(si-mx) for si in scores]
+>             se = sum(e)
+>             e = [ei/se for ei in e]
+>             # Weighted sum of values
+>             for i in range(HS):
+>                 attn_out[ho+i] = sum(e[p]*all_v[layer][p][ho+i] for p in range(t+1))
+>
+>         proj = mv(attn_out, aprw_o + layer*C*C, C, C)
+>         proj = addb(proj, aprb_o + layer*C, C)
+>         x = add(x, proj)
+>         h = ln(x, ln2w_o + layer*C, ln2b_o + layer*C)
+>         fc = mv(h, fcw_o + layer*C*4*C, 4*C, C)
+>         fc = addb(fc, fcb_o + layer*4*C, 4*C)
+>         fc = gelu(fc)
+>         mp = mv(fc, fcpw_o + layer*4*C*C, C, 4*C)
+>         mp = addb(mp, fcpb_o + layer*C, C)
+>         x = add(x, mp)
+>
+>     print(f'Token {t} ({tokens[t]}) done, x norm: {math.sqrt(sum(xi**2 for xi in x)/C):.4f}')
+>
+> # Final LN and get top prediction
+> x = ln(x, lnfw_o, lnfb_o)
+> top_val = -1e30; top_idx = 0
+> for j in range(V):
+>     wt = get(wte_o + j*C, C)
+>     s = sum(xi*wi for xi,wi in zip(x,wt))
+>     if s > top_val:
+>         top_val = s; top_idx = j
+>
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]; n = 0
+>     for b in range(256):
+>         if b not in bs: bs.append(b); cs.append(256+n); n+=1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> b2u = bytes_to_unicode(); u2b = {v:k for k,v in b2u.items()}
+> with open('vocab.bpe','r') as ff: lines=ff.readlines()
+> tokens_str = [b2u[i] for i in range(256)]
+> for line in lines[1:]:
+>     parts = line.rstrip().split(' ')
+>     if len(parts)==2: tokens_str.append(parts[0]+parts[1])
+>
+> def decode(tid):
+>     return bytes([u2b[c] for c in tokens_str[tid]])
+>
+> print(f'Top token: {top_idx} = {decode(top_idx)}, logit: {top_val:.4f}')
+> m.close(); f.close()
+> EOF
+

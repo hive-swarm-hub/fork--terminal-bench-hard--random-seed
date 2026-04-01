@@ -1,0 +1,253 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/convert_masks.py << 'SCRIPT_EOF'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> from PIL import Image
+> from tqdm import tqdm
+> import torch
+> import warnings
+> warnings.filterwarnings('ignore')
+>
+> from mobile_sam import sam_model_registry, SamPredictor
+>
+>
+> def parse_args():
+>     parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to the weights for MobileSAM')
+>     parser.add_argument('output_path', type=str, help='Path to the output folder/file where the new masks will be saved')
+>     parser.add_argument('rgb_path', type=str, help='Path to the rgb image')
+>     parser.add_argument('csv_path', type=str, help='Path to the metadata csv')
+>     return parser.parse_args()
+>
+>
+> def load_model(weights_path):
+>     """Load MobileSAM model."""
+>     model_type = 'vit_t'
+>     device = 'cpu'
+>     sam = sam_model_registry[model_type](checkpoint=weights_path)
+>     sam.to(device=device)
+>     sam.eval()
+>     predictor = SamPredictor(sam)
+>     return predictor
+>
+>
+> def get_mask_for_cell(predictor, bbox):
+>     """Get mask for a single cell using bounding box prompt.
+>
+>     Args:
+>         predictor: SamPredictor with image already set
+>         bbox: [xmin, ymin, xmax, ymax]
+>
+>     Returns:
+>         mask: binary mask for the cell
+>         score: confidence score
+>     """
+>     input_box = np.array(bbox)
+>
+>     masks, scores, logits = predictor.predict(
+>         point_coords=None,
+>         point_labels=None,
+>         box=input_box[None, :],
+>         multimask_output=True,
+>     )
+>
+>     # Pick the mask with the highest score
+>     best_idx = np.argmax(scores)
+>     return masks[best_idx], scores[best_idx]
+>
+>
+> def resolve_overlaps(masks, scores):
+>     """Resolve overlapping masks by assigning each pixel to the highest scoring mask.
+>
+>     Args:
+>         masks: list of binary masks (H, W)
+>         scores: list of confidence scores
+>
+>     Returns:
+>         resolved_masks: list of binary masks with no overlaps
+>     """
+>     if len(masks) == 0:
+>         return masks
+>
+>     h, w = masks[0].shape
+>     n = len(masks)
+>
+>     # Create a score map: for each pixel, track which mask has the highest score
+>     assignment = np.full((h, w), -1, dtype=np.int32)
+>     best_score = np.full((h, w), -1.0, dtype=np.float64)
+>
+>     for i in range(n):
+>         mask_pixels = masks[i] > 0
+>         better = mask_pixels & (scores[i] > best_score)
+>         assignment[better] = i
+>         best_score[better] = scores[i]
+>
+>     # Create resolved masks
+>     resolved_masks = []
+>     for i in range(n):
+>         resolved_mask = (assignment == i).astype(np.uint8)
+>         resolved_masks.append(resolved_mask)
+>
+>     return resolved_masks
+>
+>
+> def ensure_contiguous(mask):
+>     """Keep only the largest connected component of a mask.
+>
+>     Args:
+>         mask: binary mask (H, W) as uint8
+>
+>     Returns:
+>         mask with only the largest connected component
+>     """
+>     if mask.sum() == 0:
+>         return mask
+>
+>     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+>
+>     if num_labels <= 1:
+>         return mask
+>
+>     # Find the largest component (skip label 0 which is background)
+>     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>     result = np.zeros_like(mask)
+>     result[labels == largest_label] = 1
+>     return result
+>
+>
+> def mask_to_polyline(mask):
+>     """Convert a binary mask to polyline coordinates.
+>
+>     Args:
+>         mask: binary mask (H, W) as uint8
+>
+>     Returns:
+>         coords_x: list of x coordinates
+>         coords_y: list of y coordinates
+>         xmin, ymin, xmax, ymax: bounding box
+>     """
+>     if mask.sum() == 0:
+>         return [], [], 0, 0, 0, 0
+>
+>     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>     if len(contours) == 0:
+>         return [], [], 0, 0, 0, 0
+>
+>     # Use the largest contour
+>     contour = max(contours, key=cv2.contourArea)
+>
+>     # Simplify the contour slightly to reduce noise
+>     epsilon = 0.5
+>     contour = cv2.approxPolyDP(contour, epsilon, True)
+>
+>     # Extract coordinates
+>     coords_x = contour[:, 0, 0].tolist()
+>     coords_y = contour[:, 0, 1].tolist()
+>
+>     # Close the polyline (first point == last point)
+>     if len(coords_x) > 0 and (coords_x[0] != coords_x[-1] or coords_y[0] != coords_y[-1]):
+>         coords_x.append(coords_x[0])
+>         coords_y.append(coords_y[0])
+>
+>     # Compute bounding box from the mask
+>     ys, xs = np.where(mask > 0)
+>     xmin = int(xs.min())
+>     xmax = int(xs.max())
+>     ymin = int(ys.min())
+>     ymax = int(ys.max())
+>
+>     return coords_x, coords_y, xmin, ymin, xmax, ymax
+>
+>
+> def main():
+>     args = parse_args()
+>
+>     # Load image
+>     image = cv2.imread(args.rgb_path)
+>     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+>
+>     # Load CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     # Load model
+>     print("Loading MobileSAM model...")
+>     predictor = load_model(args.weights_path)
+>
+>     # Set image for predictor
+>     print("Setting image...")
+>     predictor.set_image(image_rgb)
+>
+>     # Generate masks for all cells
+>     print("Generating masks for all cells...")
+>     all_masks = []
+>     all_scores = []
+>
+>     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Predicting masks"):
+>         bbox = [int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])]
+>         mask, score = get_mask_for_cell(predictor, bbox)
+>         all_masks.append(mask.astype(np.uint8))
+>         all_scores.append(float(score))
+>
+>     # Resolve overlaps
+>     print("Resolving overlaps...")
+>     resolved_masks = resolve_overlaps(all_masks, all_scores)
+>
+>     # Ensure contiguity and convert to polylines
+>     print("Converting masks to polylines...")
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_xmin = []
+>     new_ymin = []
+>     new_xmax = []
+>     new_ymax = []
+>
+>     for i in tqdm(range(len(resolved_masks)), desc="Converting to polylines"):
+>         mask = ensure_contiguous(resolved_masks[i])
+>         coords_x, coords_y, xmin, ymin, xmax, ymax = mask_to_polyline(mask)
+>
+>         # Format as comma-separated strings
+>         new_coords_x.append(','.join(map(str, coords_x)))
+>         new_coords_y.append(','.join(map(str, coords_y)))
+>         new_xmin.append(xmin)
+>         new_ymin.append(ymin)
+>         new_xmax.append(xmax)
+>         new_ymax.append(ymax)
+>
+>     # Update dataframe
+>     df['xmin'] = new_xmin
+>     df['ymin'] = new_ymin
+>     df['xmax'] = new_xmax
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = 'polyline'
+>
+>     # Determine output path - handle both file and directory cases
+>     output_path = args.output_path
+>
+>     # If output_path looks like a directory (no file extension or is existing dir)
+>     if os.path.isdir(output_path) or (not output_path.endswith('.csv') and not os.path.exists(output_path) and not os.path.splitext(output_path)[1]):
+>         os.makedirs(output_path, exist_ok=True)
+>         # Use same filename as input
+>         input_filename = os.path.basename(args.csv_path)
+>         output_path = os.path.join(output_path, input_filename)
+>     else:
+>         # It's a file path - ensure parent directory exists
+>         output_dir = os.path.dirname(output_path)
+>         if output_dir and not os.path.exists(output_dir):
+>             os.makedirs(output_dir, exist_ok=True)
+>
+>     df.to_csv(output_path, index=False)
+>     print(f"Saved output to {output_path}")
+>     print(f"Total cells processed: {len(df)}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT_EOF
+root@modal:/app#

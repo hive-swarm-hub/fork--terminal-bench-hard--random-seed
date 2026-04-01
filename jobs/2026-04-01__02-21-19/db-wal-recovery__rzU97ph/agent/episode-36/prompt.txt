@@ -1,0 +1,98 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import sqlite3
+> import os
+> import shutil
+>
+> # First, create a clean 5-record database to use as base
+> base_path = '/tmp/base5.db'
+> for ext in ['', '-wal', '-shm']:
+>     p = base_path + ext
+>     if os.path.exists(p):
+>         os.remove(p)
+>
+> conn = sqlite3.connect(base_path)
+> conn.execute('PRAGMA journal_mode=WAL')
+> conn.execute('''CREATE TABLE items (
+>         id INTEGER PRIMARY KEY,
+>         name TEXT,
+>         value INTEGER
+>     )''')
+> conn.execute("INSERT INTO items VALUES (1, 'apple', 100)")
+> conn.execute("INSERT INTO items VALUES (2, 'banana', 200)")
+> conn.execute("INSERT INTO items VALUES (3, 'cherry', 300)")
+> conn.execute("INSERT INTO items VALUES (4, 'date', 400)")
+> conn.execute("INSERT INTO items VALUES (5, 'elderberry', 500)")
+> conn.commit()
+> conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+> conn.close()
+>
+> print(f'Base DB size: {os.path.getsize(base_path)}')
+>
+> # Now test different commit patterns
+> def test_pattern(batches):
+>     db_path = '/tmp/pat_test.db'
+>     for ext in ['', '-wal', '-shm']:
+>         p = db_path + ext
+>         if os.path.exists(p):
+>             os.remove(p)
+>     shutil.copy2(base_path, db_path)
+>
+>     conn = sqlite3.connect(db_path)
+>     all_records = [
+>         (6, 'fig', 600), (7, 'grape', 700), (8, 'honeydew', 800),
+>         (9, 'imbe', 900), (10, 'jackfruit', 1000), (11, 'kiwi', 1100)
+>     ]
+>
+>     idx = 0
+>     for batch_size in batches:
+>         for i in range(batch_size):
+>             r = all_records[idx]
+>             conn.execute(f"INSERT INTO items VALUES ({r[0]}, '{r[1]}', {r[2]})")
+>             idx += 1
+>         conn.commit()
+>
+>     wal_path = db_path + '-wal'
+>     wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+>     conn.close()
+>     return wal_size
+>
+> # Test key patterns
+> patterns = [
+>     [6],           # all in one commit
+>     [1,5],         # 1+5
+>     [2,4],         # 2+4
+>     [3,3],         # 3+3
+>     [1,1,4],       # 1+1+4
+>     [1,2,3],       # 1+2+3
+>     [2,2,2],       # 2+2+2
+>     [1,1,1,3],     # 1+1+1+3
+>     [1,1,2,2],     # 1+1+2+2
+>     [1,2,1,2],     # 1+2+1+2
+>     [2,1,1,2],     # 2+1+1+2
+>     [1,1,1,1,2],   # 1+1+1+1+2
+>     [1,1,1,1,1,1], # all separate
+> ]
+>
+> for p in patterns:
+>     wal_size = test_pattern(p)
+>     marker = ' *** TARGET ***' if wal_size == 16512 else ''
+>     print(f'Pattern {p}: WAL={wal_size}{marker}')
+>
+> PYEOF
+Base DB size: 8192
+Pattern [6]: WAL=4152
+Pattern [1, 5]: WAL=8272
+Pattern [2, 4]: WAL=8272
+Pattern [3, 3]: WAL=8272
+Pattern [1, 1, 4]: WAL=12392
+Pattern [1, 2, 3]: WAL=12392
+Pattern [2, 2, 2]: WAL=12392
+Pattern [1, 1, 1, 3]: WAL=16512 *** TARGET ***
+Pattern [1, 1, 2, 2]: WAL=16512 *** TARGET ***
+Pattern [1, 2, 1, 2]: WAL=16512 *** TARGET ***
+Pattern [2, 1, 1, 2]: WAL=16512 *** TARGET ***
+Pattern [1, 1, 1, 1, 2]: WAL=20632
+Pattern [1, 1, 1, 1, 1, 1]: WAL=24752
+root@modal:/app#

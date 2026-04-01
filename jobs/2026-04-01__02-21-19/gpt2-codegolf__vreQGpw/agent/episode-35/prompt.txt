@@ -1,0 +1,81 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import struct, mmap
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(off, n=5):
+>     return [struct.unpack_from('<f', m, (off+i)*4)[0] for i in range(n)]
+>
+> def stats(off, n):
+>     vals = rf(off, n)
+>     return f'min={min(vals):.4f} max={max(vals):.4f} mean={sum(vals)/n:.4f} std={sum((v-sum(vals)/n)**2 for v in vals)**.5/n**.5:.4f}'
+>
+> # Check ln_f/g at alphabetical offset 85055232
+> print(f'ln_f/g @ 85055232: {stats(85055232, 768)}')
+> print(f'  first10: {rf(85055232, 10)}')
+>
+> # Check ln_f/b at 85054464
+> print(f'ln_f/b @ 85054464: {stats(85054464, 768)}')
+> print(f'  first10: {rf(85054464, 10)}')
+>
+> # These are at offset 85054464 and 85055232
+> # In the per-layer format, after all 12 layers, we'd be at:
+> per_layer_size = 768+768+768*2304+2304+768*768+768+768+768+3072+768*3072+768+3072*768
+> print(f'\nPer layer size: {per_layer_size}')
+> print(f'12 layers: {12*per_layer_size}')
+> print(f'12 layers + lnf: {12*per_layer_size + 768 + 768}')
+> print(f'12 layers + lnf + wpe: {12*per_layer_size + 768 + 768 + 1024*768}')
+> print(f'12 layers + lnf + wpe + wte: {12*per_layer_size + 768 + 768 + 1024*768 + 50257*768}')
+> print(f'Total expected: 124439808')
+>
+> # So in alphabetical order, h layers come first (sorted as 0,1,10,11,2,...,9)
+> # Then ln_f, then wpe, then wte
+> # But wait - the layer order in the file is 0,1,10,11,2,3,4,5,6,7,8,9
+> # Let me verify: h1 should end at offset 7087872+per_layer_size
+> # And h10 should start right after h1
+>
+> # h0 starts at 0, size = per_layer_size = 7087872
+> print(f'\nh0 ends at: {per_layer_size}')
+> print(f'h1 starts at: {per_layer_size}, ends at: {2*per_layer_size}')
+> print(f'h10 should start at: {2*per_layer_size}')
+>
+> # Check h10/attn/c_attn/b at 2*per_layer_size (should be a bias)
+> off_h10 = 2*per_layer_size
+> print(f'\nh10/attn/c_attn/b @ {off_h10}: {stats(off_h10, 2304)}')
+>
+> # Check h10/ln_1/g
+> off_h10_ln1g = off_h10 + 2304 + 768*2304 + 768 + 768*768 + 768  # after c_attn/b, c_attn/w, c_proj/b, c_proj/w, ln_1/b
+> off_h10_ln1g += 0  # this is ln_1/b, need to add 768 for ln_1/g
+> # Actually: c_attn/b(2304) + c_attn/w(768*2304) + c_proj/b(768) + c_proj/w(768*768) + ln_1/b(768) + ln_1/g(768)
+> off_after_cproj_w = off_h10 + 2304 + 768*2304 + 768 + 768*768
+> print(f'h10/ln_1/b @ {off_after_cproj_w}: {stats(off_after_cproj_w, 768)}')
+> print(f'h10/ln_1/g @ {off_after_cproj_w+768}: {stats(off_after_cproj_w+768, 768)}')
+>
+> m.close()
+> f.close()
+> EOF
+ln_f/g @ 85055232: min=0.0044 max=17.4193 mean=1.5078 std=1.3902
+  first10: [1.397080421447754, 1.3749529123306274, 1.886956810951233, 1.1688368320465088, 1.2723848819732666, 1.2508119344711304, 9.419819831848145, 1.437055945
+3964233, 1.4527461528778076, 1.1855772733688354]
+ln_f/b @ 85054464: min=-4.1918 max=7.3683 mean=-0.0031 std=0.4194
+  first10: [0.0010871647391468287, 0.036529384553432465, -0.06729616224765778, 0.00016416051948908716, -0.06744395196437836, -0.07135111838579178, 0.50393414497
+37549, 0.09172336012125015, -0.04933987930417061, 0.0032621801365166903]
+
+Per layer size: 7087872
+12 layers: 85054464
+12 layers + lnf: 85056000
+12 layers + lnf + wpe: 85842432
+12 layers + lnf + wpe + wte: 124439808
+Total expected: 124439808
+
+h0 ends at: 7087872
+h1 starts at: 7087872, ends at: 14175744
+h10 should start at: 14175744
+
+h10/attn/c_attn/b @ 14175744: min=-0.9162 max=0.7710 mean=0.0016 std=0.1452
+h10/ln_1/b @ 16538112: min=-0.6528 max=1.0895 mean=0.0186 std=0.0550
+h10/ln_1/g @ 16538880: min=0.0751 max=0.9214 mean=0.3782 std=0.0557
+root@modal:/app#

@@ -1,0 +1,147 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+>
+>
+> def remove_balanced_parens(s, start_pos):
+>     """Starting at s[start_pos] which should be '(', find the matching ')'
+>     accounting for nesting. Returns the index after the closing ')'."""
+>     depth = 1
+>     j = start_pos + 1
+>     while j < len(s) and depth > 0:
+>         if s[j] == '(':
+>             depth += 1
+>         elif s[j] == ')':
+>             depth -= 1
+>         j += 1
+>     return j
+>
+>
+> def clean_style_value(value):
+>     """Remove dangerous constructs from a CSS style value."""
+>     result = []
+>     i = 0
+>     lower_val = value.lower()
+>     while i < len(value):
+>         # Check for expression(...)
+>         em = re.match(r'expression\s*\(', value[i:], re.IGNORECASE)
+>         if em:
+>             # Skip past the balanced parens
+>             paren_start = i + em.end() - 1  # position of '('
+>             i = remove_balanced_parens(value, paren_start)
+>             continue
+>
+>         # Check for url( with javascript:/vbscript: inside )
+>         um = re.match(r'url\s*\(', value[i:], re.IGNORECASE)
+>         if um:
+>             paren_start = i + um.end() - 1  # position of '('
+>             paren_end = remove_balanced_parens(value, paren_start)
+>             # Extract content inside url(...)
+>             url_content = value[paren_start+1:paren_end-1].strip()
+>             # Strip quotes from url content
+>             url_inner = url_content.strip().strip("'").strip('"').strip()
+>             if re.match(r'\s*(?:javascript|vbscript)\s*:', url_inner, re.IGNORECASE):
+>                 # Skip the entire url(...) construct
+>                 i = paren_end
+>                 continue
+>
+>         # Check for -moz-binding
+>         if re.match(r'-moz-binding\s*:', value[i:], re.IGNORECASE):
+>             # Skip to next ; or end
+>             semi = value.find(';', i)
+>             if semi != -1:
+>                 i = semi + 1
+>             else:
+>                 i = len(value)
+>             continue
+>
+>         # Check for behavior
+>         if re.match(r'behavior\s*:', value[i:], re.IGNORECASE):
+>             semi = value.find(';', i)
+>             if semi != -1:
+>                 i = semi + 1
+>             else:
+>                 i = len(value)
+>             continue
+>
+>         result.append(value[i])
+>         i += 1
+>     return ''.join(result)
+>
+>
+> def remove_javascript(html):
+>     # Remove <script> tags and their contents (case-insensitive, handles attributes)
+>     html = re.sub(r'<script\b[^>]*>.*?</script\s*>', '', html, flags=re.IGNORECASE | re.DOTALL)
+>     # Remove self-closing script tags
+>     html = re.sub(r'<script\b[^>]*/\s*>', '', html, flags=re.IGNORECASE)
+>     # Remove orphan opening script tags (no closing tag)
+>     html = re.sub(r'<script\b[^>]*>', '', html, flags=re.IGNORECASE)
+>
+>     # Remove event handler attributes (on*="...")
+>     def remove_event_handlers(match):
+>         tag = match.group(0)
+>         # Remove on* attributes with double quotes
+>         tag = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with single quotes
+>         tag = re.sub(r"\s+on\w+\s*=\s*'[^']*'", '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no quotes (value ends at space or >)
+>         tag = re.sub(r'\s+on\w+\s*=\s*[^\s\'">`]+', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no value
+>         tag = re.sub(r'\s+on\w+(?=\s|/?>)', '', tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_event_handlers, html)
+>
+>     # Remove javascript:/vbscript: URLs in any attribute
+>     def remove_js_urls(match):
+>         tag = match.group(0)
+>         # Replace javascript:/vbscript: URLs in double-quoted attributes
+>         tag = re.sub(r'(\s+\w+\s*=\s*)"\s*(?:javascript|vbscript)\s*:[^"]*"', r'\1""', tag, flags=re.IGNORECASE)
+>         # Replace in single-quoted attributes
+>         tag = re.sub(r"(\s+\w+\s*=\s*)'\s*(?:javascript|vbscript)\s*:[^']*'", r"\1''", tag, flags=re.IGNORECASE)
+>         # Replace in unquoted attributes
+>         tag = re.sub(r'(\s+(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite)\s*=\s*)(?:javascript|vbscript):[^\s>]*', r'\1""',
+ tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_js_urls, html)
+>
+>     # Remove dangerous CSS in style attributes
+>     def remove_style_dangers(match):
+>         tag = match.group(0)
+>         def clean_style_dq(style_match):
+>             prefix = style_match.group(1)
+>             value = style_match.group(2)
+>             quote = style_match.group(3)
+>             return prefix + clean_style_value(value) + quote
+>         tag = re.sub(r'(style\s*=\s*")([^"]*)(")', clean_style_dq, tag, flags=re.IGNORECASE)
+>         tag = re.sub(r"(style\s*=\s*')([^']*)(')" , clean_style_dq, tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_style_dangers, html)
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@modal:/app#

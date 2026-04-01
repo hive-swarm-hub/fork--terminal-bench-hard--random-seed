@@ -1,0 +1,100 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; C=768; L=12; H=12; T=1024; HS=64
+>
+> def get(off, n):
+>     return list(struct.unpack_from(f'<{n}f', m, off*4))
+>
+> wte_o = 0; wpe_o = V*C
+> ln1w_o = wpe_o + T*C; ln1b_o = ln1w_o + L*C
+> qkvw_o = ln1b_o + L*C; qkvb_o = qkvw_o + L*C*3*C
+> aprw_o = qkvb_o + L*3*C; aprb_o = aprw_o + L*C*C
+> ln2w_o = aprb_o + L*C; ln2b_o = ln2w_o + L*C
+> fcw_o = ln2b_o + L*C; fcb_o = fcw_o + L*C*4*C
+> fcpw_o = fcb_o + L*4*C; fcpb_o = fcpw_o + L*4*C*C
+> lnfw_o = fcpb_o + L*C; lnfb_o = lnfw_o + C
+>
+> # Check some ln weights more carefully
+> ln1w_vals = get(ln1w_o, 20)
+> print(f'ln1w layer0 first 20: {ln1w_vals}')
+> print(f'ln1w layer0 stats: min={min(get(ln1w_o,768)):.4f} max={max(get(ln1w_o,768)):.4f} mean={sum(get(ln1w_o,768))/768:.4f}')
+>
+> lnfw_vals = get(lnfw_o, 20)
+> print(f'lnfw first 20: {lnfw_vals}')
+> print(f'lnfw stats: min={min(get(lnfw_o,768)):.4f} max={max(get(lnfw_o,768)):.4f} mean={sum(get(lnfw_o,768))/768:.4f}')
+>
+> # Check if these look like they should have +1 added
+> # In a trained GPT-2, ln gamma is typically near 1.0 with some variation
+> # If stored as gamma-1, the mean would be near 0 and values would be small
+> # ln1w mean is 0.0147, which is consistent with gamma-1 interpretation
+> # But the max deviation from 0 is up to 0.4, which means gamma ranges from 0.6 to 1.4
+>
+> # Let's check: what if this is NOT llm.c format but rather the TF variable order?
+> # TF GPT-2 variables in order might be:
+> # model/wte, model/wpe, model/h0/ln_1/g, model/h0/ln_1/b, model/h0/attn/c_attn/w, model/h0/attn/c_attn/b, ...
+> # In TF GPT-2, c_attn/w has shape [768, 2304] and c_proj/w has shape [768, 768]
+> # The TF convention stores w as [in, out] so matmul is x @ w
+> # That means output[j] = sum_i x[i] * w[i*out + j] = sum_i x[i] * w[i*2304 + j]
+> # This is DIFFERENT from llm.c which stores w[out][in]
+>
+> print('\n=== Testing with TF matmul convention (w[in][out]) ===')
+>
+> def mv_tf(x, wo, ic, oc):
+>     # w[ic][oc], out[j] = sum_i x[i]*w[i*oc+j]
+>     out=[0.0]*oc
+>     for j in range(oc):
+>         s = 0.0
+>         for i in range(ic):
+>             s += x[i] * struct.unpack_from('<f', m, (wo + i*oc + j)*4)[0]
+>         out[j] = s
+>     return out
+>
+> def ln_noadd(x, wo, bo):
+>     n=len(x); mu=sum(x)/n; v=sum((xi-mu)**2 for xi in x)/n; s=1/math.sqrt(v+1e-5)
+>     w=get(wo,n); b=get(bo,n)
+>     return [(xi-mu)*s*wi+bi for xi,wi,bi in zip(x,w,b)]
+>
+> def ln_add1(x, wo, bo):
+>     n=len(x); mu=sum(x)/n; v=sum((xi-mu)**2 for xi in x)/n; s=1/math.sqrt(v+1e-5)
+>     w=get(wo,n); b=get(bo,n)
+>     return [(xi-mu)*s*(wi+1)+bi for xi,wi,bi in zip(x,w,b)]
+>
+> def add(a,b): return [ai+bi for ai,bi in zip(a,b)]
+> def addb(a,bo,n): b=get(bo,n); return [ai+bi for ai,bi in zip(a,b)]
+>
+> # Test single token with TF convention
+> tok = 464  # "The"
+> wte = get(wte_o + tok*C, C)
+> wpe = get(wpe_o + 0*C, C)
+> x = add(wte, wpe)
+>
+> # Try TF convention matmul with +1 ln
+> h = ln_add1(x, ln1w_o, ln1b_o)
+> qkv_tf = mv_tf(h, qkvw_o, C, 3*C)
+> qkv_tf = addb(qkv_tf, qkvb_o, 3*C)
+> v_tf = qkv_tf[2*C:3*C]
+> proj_tf = mv_tf(v_tf, aprw_o, C, C)
+> proj_tf = addb(proj_tf, aprb_o, C)
+> x_tf = add(x, proj_tf)
+> print(f'After layer 0 attn (TF, +1 ln): norm={math.sqrt(sum(xi**2 for xi in x_tf)/C):.4f}')
+>
+> m.close(); f.close()
+> EOF
+ln1w layer0 first 20: [0.012613765895366669, 0.1112576425075531, -0.018961146473884583, -0.07971286028623581, -0.1944773644208908, -0.022865435108542442, -0.045
+44481635093689, 0.048737768083810806, 0.039336930960416794, 0.10603900253772736, 0.11374630033969879, 0.032197318971157074, 0.33875906467437744, 0.1594123691320
+4193, -0.06322687119245529, 0.06359272450208664, 0.15191376209259033, 0.021930141374468803, -0.005870906636118889, -0.06905064731836319]
+ln1w layer0 stats: min=-0.4365 max=0.4971 mean=0.0147
+lnfw first 20: [0.18600820004940033, 0.016657276079058647, 0.04611587151885033, -0.01105660293251276, -0.07257743924856186, 0.032385680824518204, -0.40236061811
+447144, 0.05776678025722504, -0.017245370894670486, -0.19353945553302765, -0.022215167060494423, 0.15324454009532928, -0.09517776966094971, 0.03303661569952965,
+ 0.06889408081769943, 0.11838442832231522, -0.06162145733833313, 0.14233556389808655, -0.10250087082386017, 0.19357514381408691]
+lnfw stats: min=-0.7493 max=0.4104 mean=-0.0010
+
+=== Testing with TF matmul convention (w[in][out]) ===
+After layer 0 attn (TF, +1 ln): norm=11.1980
+root@modal:/app#

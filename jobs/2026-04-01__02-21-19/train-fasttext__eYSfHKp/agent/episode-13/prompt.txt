@@ -1,0 +1,76 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train.py << 'EOF'
+> import pyarrow.parquet as pq
+> import fasttext
+> import re
+>
+> # Read training data
+> print("Reading training data...")
+> train_table = pq.read_table('data/train-00000-of-00001.parquet')
+> train_df = train_table.to_pandas()
+> print(f"Training samples: {len(train_df)}")
+> print(f"Label distribution:\n{train_df['label'].value_counts().sort_index()}")
+>
+> # Preprocess and write fasttext format
+> def clean_text(text):
+>     text = text.lower()
+>     text = re.sub(r'[^\w\s]', ' ', text)
+>     text = re.sub(r'\s+', ' ', text).strip()
+>     return text
+>
+> print("Writing training file...")
+> with open('/tmp/train.txt', 'w') as f:
+>     for _, row in train_df.iterrows():
+>         label = row['label']
+>         text = clean_text(str(row['text']))
+>         f.write(f'__label__{label} {text}\n')
+>
+> print("Training fasttext model...")
+> model = fasttext.train_supervised(
+>     input='/tmp/train.txt',
+>     lr=0.5,
+>     epoch=10,
+>     wordNgrams=2,
+>     dim=50,
+>     loss='softmax',
+>     bucket=500000,
+>     minCount=5,
+>     thread=4
+> )
+>
+> # Save the model
+> model.save_model('/app/model.bin')
+>
+> import os
+> size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+> print(f"Model size: {size_mb:.1f} MB")
+>
+> if size_mb > 150:
+>     print("Model too large, quantizing...")
+>     model.quantize(input='/tmp/train.txt', retrain=True)
+>     model.save_model('/app/model.bin')
+>     size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+>     print(f"Quantized model size: {size_mb:.1f} MB")
+>
+> # Quick test on test set
+> print("\nEvaluating on test set...")
+> test_table = pq.read_table('data/test-00000-of-00001.parquet')
+> test_df = test_table.to_pandas()
+>
+> correct = 0
+> total = 0
+> for _, row in test_df.iterrows():
+>     text = clean_text(str(row['text']))
+>     pred = model.predict(text)
+>     pred_label = int(pred[0][0].replace('__label__', ''))
+>     if pred_label == row['label']:
+>         correct += 1
+>     total += 1
+>
+> print(f"Test accuracy: {correct/total:.4f} ({correct}/{total})")
+> print("Done!")
+> EOF
+root@modal:/app# python3 /app/train.py
+Reading training data...
+

@@ -1,0 +1,200 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFFILE'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute numerical gradient of forward at point x using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def slope_along_line(x0, d, t):
+>     """Compute the directional derivative of f along direction d at x0 + t*d."""
+>     eps = 1e-7
+>     f_plus = forward(x0 + (t + eps) * d)
+>     f_minus = forward(x0 + (t - eps) * d)
+>     return (f_plus - f_minus) / (2 * eps)
+>
+> def find_breakpoints_on_line(x0, d, t_min=-5, t_max=5, n_initial=200):
+>     """
+>     Find breakpoints of f(x0 + t*d) as a function of t.
+>     The function is piecewise linear in t, so we look for slope changes.
+>     Returns list of (t_break, slope_before, slope_after).
+>     """
+>     # Sample slopes at evenly spaced points
+>     t_vals = np.linspace(t_min, t_max, n_initial)
+>     slopes = np.array([slope_along_line(x0, d, t) for t in t_vals])
+>
+>     # Find intervals where slope changes significantly
+>     breakpoints = []
+>     for i in range(len(slopes) - 1):
+>         if abs(slopes[i+1] - slopes[i]) > 1e-6:
+>             # Binary search for the exact breakpoint
+>             t_lo, t_hi = t_vals[i], t_vals[i+1]
+>             s_lo, s_hi = slopes[i], slopes[i+1]
+>
+>             for _ in range(40):  # Binary search iterations
+>                 t_mid = (t_lo + t_hi) / 2
+>                 s_mid = slope_along_line(x0, d, t_mid)
+>                 if abs(s_mid - s_lo) < 1e-8:
+>                     t_lo = t_mid
+>                     s_lo = s_mid
+>                 else:
+>                     t_hi = t_mid
+>                     s_hi = s_mid
+>
+>             breakpoints.append((t_lo, s_lo, s_hi))
+>
+>     return breakpoints
+>
+> def extract_A1():
+>     """
+>     Extract A1 (up to permutation and scaling) from a ReLU network.
+>
+>     Strategy:
+>     1. Along random lines, find breakpoints where ReLU activations change
+>     2. At each breakpoint, compute the gradient on both sides
+>     3. The gradient difference = ±A2[0,i] * A1[i,:] for the switching neuron
+>     4. Cluster these to find the 20 rows of A1
+>     """
+>     np.random.seed(42)
+>     input_dim = 10
+>
+>     gradient_changes = []  # List of gradient change vectors at breakpoints
+>
+>     n_lines = 50  # Number of random lines to probe
+>     print(f"Probing {n_lines} random lines for breakpoints...")
+>
+>     for line_idx in range(n_lines):
+>         x0 = np.random.randn(input_dim) * 1.0
+>         d = np.random.randn(input_dim)
+>         d = d / np.linalg.norm(d)
+>
+>         breakpoints = find_breakpoints_on_line(x0, d, t_min=-5, t_max=5, n_initial=100)
+>
+>         for t_break, s_before, s_after in breakpoints:
+>             # Compute full gradient on both sides of the breakpoint
+>             eps = 0.001
+>             x_before = x0 + (t_break - eps) * d
+>             x_after = x0 + (t_break + eps) * d
+>
+>             grad_before = numerical_gradient(x_before)
+>             grad_after = numerical_gradient(x_after)
+>
+>             grad_change = grad_after - grad_before
+>             norm = np.linalg.norm(grad_change)
+>             if norm > 1e-8:
+>                 gradient_changes.append(grad_change)
+>
+>         if (line_idx + 1) % 10 == 0:
+>             print(f"  Line {line_idx+1}/{n_lines}: found {len(gradient_changes)} gradient changes so far")
+>
+>     print(f"\nTotal gradient changes found: {len(gradient_changes)}")
+>     gradient_changes = np.array(gradient_changes)
+>
+>     # Cluster gradient changes by direction
+>     # Each gradient change is ±A2[0,i] * A1[i,:] for some neuron i
+>     # Parallel gradient changes (same or opposite direction) correspond to the same neuron
+>
+>     norms = np.linalg.norm(gradient_changes, axis=1)
+>     normalized = gradient_changes / norms[:, np.newaxis]
+>
+>     # Greedy clustering
+>     print("Clustering...")
+>     clusters = []
+>     cluster_dirs = []
+>     assigned = np.zeros(len(normalized), dtype=bool)
+>
+>     for i in range(len(normalized)):
+>         if assigned[i]:
+>             continue
+>
+>         cluster = [i]
+>         assigned[i] = True
+>         ref = normalized[i]
+>
+>         for j in range(i+1, len(normalized)):
+>             if assigned[j]:
+>                 continue
+>             dot = abs(np.dot(ref, normalized[j]))
+>             if dot > 0.99:
+>                 cluster.append(j)
+>                 assigned[j] = True
+>
+>         clusters.append(cluster)
+>
+>         # Compute average direction (align signs)
+>         aligned = [normalized[cluster[0]]]
+>         for idx in cluster[1:]:
+>             if np.dot(normalized[cluster[0]], normalized[idx]) < 0:
+>                 aligned.append(-normalized[idx])
+>             else:
+>                 aligned.append(normalized[idx])
+>         avg = np.mean(aligned, axis=0)
+>         avg = avg / np.linalg.norm(avg)
+>         cluster_dirs.append(avg)
+>
+>     print(f"Found {len(clusters)} clusters")
+>     sizes = sorted([len(c) for c in clusters], reverse=True)
+>     print(f"Cluster sizes: {sizes[:30]}")
+>
+>     # Keep the top clusters (should be ~20 for 20 hidden neurons)
+>     # Filter by minimum size
+>     min_size = 2
+>     filtered = [(c, d) for c, d in zip(clusters, cluster_dirs) if len(c) >= min_size]
+>     print(f"Clusters with size >= {min_size}: {len(filtered)}")
+>
+>     # Build result matrix
+>     result_rows = []
+>     for cluster, direction in filtered:
+>         # Get the actual scaled gradient change (not normalized)
+>         # All entries in this cluster should have similar magnitude
+>         projections = [np.dot(gradient_changes[idx], direction) for idx in cluster]
+>         # Use median magnitude, keep sign consistent
+>         median_proj = np.median(projections)
+>         row = direction * median_proj
+>         result_rows.append(row)
+>
+>     result = np.array(result_rows)
+>     print(f"\nExtracted matrix shape: {result.shape}")
+>     return result
+>
+> if __name__ == "__main__":
+>     print("Extracting A1 from the neural network...")
+>     A1_stolen = extract_A1()
+>
+>     print(f"\nStolen A1 shape: {A1_stolen.shape}")
+>     print("Stolen A1:")
+>     print(A1_stolen)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print(f"\nSaved to /app/stolen_A1.npy")
+>
+>     # Verification
+>     print("\n--- Verification ---")
+>     from forward import A1 as actual_A1
+>
+>     actual_normalized = actual_A1 / np.linalg.norm(actual_A1, axis=1, keepdims=True)
+>     stolen_normalized = A1_stolen / np.linalg.norm(A1_stolen, axis=1, keepdims=True)
+>
+>     matched = set()
+>     for i, srow in enumerate(stolen_normalized):
+>         dots = np.abs(actual_normalized @ srow)
+>         best_j = np.argmax(dots)
+>         best_dot = dots[best_j]
+>         status = "[DUPLICATE]" if best_j in matched else ""
+>         print(f"  Stolen row {i}: best match actual row {best_j} (dot={best_dot:.6f}) {status}")
+>         matched.add(best_j)
+>
+>     print(f"\nMatched {len(matched)}/20 actual rows")
+> ENDOFFILE
+root@modal:/app#

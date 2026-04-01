@@ -1,0 +1,102 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; C=768; L=12; H=12; T=1024
+> HS = C // H  # 64
+>
+> def get(off, n):
+>     return list(struct.unpack_from(f'<{n}f', m, off*4))
+>
+> # llm.c grouped format
+> wte_off = 0
+> wpe_off = V*C
+> ln1w_off = wpe_off + T*C
+> ln1b_off = ln1w_off + L*C
+> qkvw_off = ln1b_off + L*C
+> qkvb_off = qkvw_off + L*C*3*C
+> projw_off = qkvb_off + L*3*C
+> projb_off = projw_off + L*C*C
+> ln2w_off = projb_off + L*C
+> ln2b_off = ln2w_off + L*C
+> fcw_off = ln2b_off + L*C
+> fcb_off = fcw_off + L*C*4*C
+> fcpw_off = fcb_off + L*4*C
+> fcpb_off = fcpw_off + L*4*C*C
+> lnfw_off = fcpb_off + L*C
+> lnfb_off = lnfw_off + C
+>
+> def layer_norm(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     s = 1.0 / math.sqrt(var + 1e-5)
+>     w = get(w_off, n)
+>     b = get(b_off, n)
+>     return [(xi - mean) * s * (wi + 1.0) + bi for xi, wi, bi in zip(x, w, b)]  # try +1.0
+>
+> def layer_norm_no_add(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     s = 1.0 / math.sqrt(var + 1e-5)
+>     w = get(w_off, n)
+>     b = get(b_off, n)
+>     return [(xi - mean) * s * wi + bi for xi, wi, bi in zip(x, w, b)]
+>
+> def matmul(x, w_off, rows, cols):
+>     # w is rows x cols, stored row-major
+>     # output = x @ W^T  or  output[j] = sum(x[i] * w[i*cols+j]) ?
+>     # Actually in llm.c: w[OC][IC], output[j] = sum_i x[i] * w[j][i]
+>     # So w_off + j*IC + i
+>     out = [0.0] * cols
+>     for j in range(cols):
+>         s = 0.0
+>         for i in range(rows):
+>             s += x[i] * struct.unpack_from('<f', m, (w_off + j*rows + i)*4)[0]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return [0.5 * xi * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (xi + 0.044715 * xi**3))) for xi in x]
+>
+> def softmax(x):
+>     mx = max(x)
+>     e = [math.exp(xi - mx) for xi in x]
+>     s = sum(e)
+>     return [ei/s for ei in e]
+>
+> # Test with token 464 = " the"
+> tokens = [464]  # " the"
+> pos = 0
+>
+> # Get embedding
+> x = [get(wte_off + tokens[0]*C + i, 1)[0] + get(wpe_off + pos*C + i, 1)[0] for i in range(C)]
+>
+> print(f'Embedding norm: {math.sqrt(sum(xi**2 for xi in x)/C):.4f}')
+> print(f'Embedding first 5: {x[:5]}')
+>
+> # Try layer norm with +1
+> ln_out = layer_norm(x, ln1w_off, ln1b_off)
+> print(f'LN1 (with +1) first 5: {ln_out[:5]}')
+> print(f'LN1 (with +1) norm: {math.sqrt(sum(xi**2 for xi in ln_out)/C):.4f}')
+>
+> # Try layer norm without +1
+> ln_out2 = layer_norm_no_add(x, ln1w_off, ln1b_off)
+> print(f'LN1 (no +1) first 5: {ln_out2[:5]}')
+> print(f'LN1 (no +1) norm: {math.sqrt(sum(xi**2 for xi in ln_out2)/C):.4f}')
+>
+> m.close()
+> f.close()
+> PYEOF
+Embedding norm: 0.1388
+Embedding first 5: [0.2452052067965269, -0.04250799119472504, -0.14770378777757287, 0.0009227916598320007, 0.21411432325839996]
+LN1 (with +1) first 5: [2.124973532848167, -0.027480362358704477, -0.8531075761888117, 0.22083442163056463, 1.358093356280858]
+LN1 (with +1) norm: 1.0404
+LN1 (no +1) first 5: [0.050140892981002855, 0.035831787583090115, -0.008031343320734099, -0.03860991900969214, -0.48568693314938116]
+LN1 (no +1) norm: 0.1904
+root@modal:/app#
