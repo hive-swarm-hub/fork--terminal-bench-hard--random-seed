@@ -1,0 +1,80 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 << 'EOF'
+> import struct, mmap, array, math
+>
+> V=50257; E=768; L=12; C=1024; H=12; HE=E//H
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> w = array.array('f')
+> w.frombytes(f.read())
+> f.close()
+>
+> off = 0
+> def take(n):
+>     global off
+>     r = off; off += n; return r
+>
+> WTE=take(V*E); WPE=take(C*E)
+> LN1W=take(L*E); LN1B=take(L*E)
+> QKVW=take(L*E*3*E); QKVB=take(L*3*E)
+> ATTPW=take(L*E*E); ATTPB=take(L*E)
+> LN2W=take(L*E); LN2B=take(L*E)
+> FCW=take(L*E*4*E); FCB=take(L*4*E)
+> FCPW=take(L*4*E*E); FCPB=take(L*E)
+> LNFW=take(E); LNFB=take(E)
+>
+> def layernorm(x, woff, boff):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((v-mean)**2 for v in x)/n
+>     s = 1.0/math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)*s*w[woff+i]+w[boff+i] for i in range(n)]
+>
+> # Test with token 464 ("The"), just layer 0 ln + first few elements of QKV
+> x = [w[WTE + 464*E + i] + w[WPE + 0*E + i] for i in range(E)]
+> ln1 = layernorm(x, LN1W + 0*E, LN1B + 0*E)
+>
+> # Try both orderings for QKV matmul, just first 3 outputs
+> print("QKV matmul with W[i*no+j] (current):")
+> for j in range(3):
+>     s = w[QKVB + j]
+>     for i in range(E):
+>         s += ln1[i] * w[QKVW + i*3*E + j]
+>     print(f"  out[{j}] = {s:.6f}")
+>
+> print("QKV matmul with W[j*ni+i] (transposed):")
+> for j in range(3):
+>     s = w[QKVB + j]
+>     for i in range(E):
+>         s += ln1[i] * w[QKVW + j*E + i]
+>     print(f"  out[{j}] = {s:.6f}")
+>
+> print("\nChecking magnitudes...")
+> # Check if outputs are reasonable
+> out1 = []
+> out2 = []
+> for j in range(10):
+>     s1 = w[QKVB + j]
+>     s2 = w[QKVB + j]
+>     for i in range(E):
+>         s1 += ln1[i] * w[QKVW + i*3*E + j]
+>         s2 += ln1[i] * w[QKVW + j*E + i]
+>     out1.append(s1)
+>     out2.append(s2)
+> print(f"W[i*no+j] range: {min(out1):.4f} to {max(out1):.4f}")
+> print(f"W[j*ni+i] range: {min(out2):.4f} to {max(out2):.4f}")
+> EOF
+QKV matmul with W[i*no+j] (current):
+  out[0] = 0.443766
+  out[1] = 0.160746
+  out[2] = 0.306514
+QKV matmul with W[j*ni+i] (transposed):
+  out[0] = 1.889191
+  out[1] = 0.404314
+  out[2] = -0.630706
+
+Checking magnitudes...
+W[i*no+j] range: -0.9090 to 1.2768
+W[j*ni+i] range: -1.4385 to 1.8892
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

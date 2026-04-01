@@ -1,0 +1,148 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# cat > /tmp/ref_gpt2.py << 'PYEOF'
+> import numpy as np
+> import math
+>
+> V=50257; E=768; L=12; C=1024; H=12; D=E//H
+>
+> w = np.fromfile('gpt2-124M.ckpt', dtype=np.float32)
+> print(f'Loaded {len(w)} floats')
+>
+> # Grouped layout
+> off = 0
+> def take(shape):
+>     global off
+>     n = 1
+>     for s in shape: n *= s
+>     r = w[off:off+n].reshape(shape)
+>     off += n
+>     return r
+>
+> wte = take((V, E))
+> wpe = take((C, E))
+> ln1w = take((L, E))
+> ln1b = take((L, E))
+> qkvw = take((L, E, 3*E))
+> qkvb = take((L, 3*E))
+> attpw = take((L, E, E))
+> attpb = take((L, E))
+> ln2w = take((L, E))
+> ln2b = take((L, E))
+> fcw = take((L, E, 4*E))
+> fcb = take((L, 4*E))
+> fcpw = take((L, 4*E, E))
+> fcpb = take((L, E))
+> lnfw = take((E,))
+> lnfb = take((E,))
+> assert off == len(w)
+>
+> print(f'ln1w[0] stats: mean={ln1w[0].mean():.4f} std={ln1w[0].std():.4f}')
+> print(f'lnfw stats: mean={lnfw.mean():.4f} std={lnfw.std():.4f}')
+>
+> def layernorm(x, g, b):
+>     mean = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return g * (x - mean) / np.sqrt(var + 1e-5) + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x, axis=-1):
+>     e = np.exp(x - x.max(axis=axis, keepdims=True))
+>     return e / e.sum(axis=axis, keepdims=True)
+>
+> def forward(tokens):
+>     T = len(tokens)
+>     x = wte[tokens] + wpe[:T]  # (T, E)
+>
+>     for l in range(L):
+>         # Layer norm 1
+>         h = layernorm(x, ln1w[l], ln1b[l])  # (T, E)
+>
+>         # QKV projection
+>         qkv = h @ qkvw[l] + qkvb[l]  # (T, 3*E)
+>         q, k, v = np.split(qkv, 3, axis=-1)  # each (T, E)
+>
+>         # Reshape for multi-head attention
+>         q = q.reshape(T, H, D)  # (T, H, D)
+>         k = k.reshape(T, H, D)
+>         v = v.reshape(T, H, D)
+>
+>         # Attention scores
+>         # (T, H, D) x (T, H, D) -> (H, T, T)
+>         scores = np.einsum('thd,shd->hts', q, k) / np.sqrt(D)
+>
+>         # Causal mask
+>         mask = np.triu(np.ones((T, T)), k=1) * -1e10
+>         scores += mask
+>
+>         attn = softmax(scores, axis=-1)  # (H, T, T)
+>
+>         # Apply attention to values
+>         out = np.einsum('hts,shd->thd', attn, v)  # (T, H, D)
+>         out = out.reshape(T, E)  # (T, E)
+>
+>         # Attention projection
+>         out = out @ attpw[l] + attpb[l]  # (T, E)
+>         x = x + out  # residual
+>
+>         # Layer norm 2
+>         h = layernorm(x, ln2w[l], ln2b[l])  # (T, E)
+>
+>         # MLP
+>         fc = h @ fcw[l] + fcb[l]  # (T, 4*E)
+>         fc = gelu(fc)
+>         proj = fc @ fcpw[l] + fcpb[l]  # (T, E)
+>         x = x + proj  # residual
+>
+>     # Final layer norm
+>     x = layernorm(x, lnfw, lnfb)  # (T, E)
+>
+>     # Logits (weight tying)
+>     logits = x @ wte.T  # (T, V)
+>
+>     return logits
+>
+> # Test with "The" = token 464
+> print("\nForward pass with token 464 ('The')...")
+> logits = forward([464])
+> top10 = np.argsort(logits[0])[-10:][::-1]
+> print(f"Top 10 tokens: {top10}")
+> print(f"Top 10 logits: {logits[0][top10]}")
+>
+> # Also decode the tokens
+> f = open('vocab.bpe','r')
+> lines = f.readlines()[1:]
+> f.close()
+> tokens_list = []
+> b2c = {}
+> n = 0
+> for i in range(256):
+>     if (33<=i<=126) or (161<=i<=172) or (174<=i<=255):
+>         b2c[i] = chr(i)
+>     else:
+>         b2c[i] = chr(256+n)
+>         n += 1
+> for i in range(256):
+>     tokens_list.append(b2c[i])
+> for line in lines:
+>     parts = line.strip().split(' ')
+>     if len(parts) == 2:
+>         tokens_list.append(parts[0]+parts[1])
+> tokens_list.append('<|endoftext|>')
+>
+> c2b = {}
+> for i in range(256):
+>     c2b[b2c[i]] = i
+>
+> def decode(tid):
+>     s = tokens_list[tid]
+>     return bytes([c2b.get(c, ord(c)) for c in s]).decode('utf-8', errors='replace')
+>
+> print("\nTop 10 decoded:")
+> for t in top10:
+>     print(f"  {t}: {repr(decode(t))} logit={logits[0][t]:.4f}")
+> PYEOF
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 /tmp/ref_gpt2.py
+

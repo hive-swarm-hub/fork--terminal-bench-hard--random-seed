@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 << 'EOF'
+> import struct, mmap, array, math
+>
+> V=50257; E=768; L=12; C=1024; H=12
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> w = array.array('f')
+> w.frombytes(f.read())
+> f.close()
+>
+> # Per-layer layout:
+> # wte[V*E], wpe[C*E], then for each layer:
+> #   ln1w[E], ln1b[E], qkvw[E*3E], qkvb[3E], attprojw[E*E], attprojb[E],
+> #   ln2w[E], ln2b[E], fcw[E*4E], fcb[4E], fcprojw[4E*E], fcprojb[E]
+> # Then lnfw[E], lnfb[E]
+>
+> per_layer = E + E + E*3*E + 3*E + E*E + E + E + E + E*4*E + 4*E + 4*E*E + E
+> print(f'Per layer: {per_layer}')
+> total = V*E + C*E + L*per_layer + E + E
+> print(f'Total: {total}, actual: {len(w)}')
+>
+> # Check ln1w values for layer 0 in per-layer layout
+> off = V*E + C*E
+> vals = [w[off+i] for i in range(E)]
+> mean = sum(vals)/E
+> print(f'Per-layer layout, layer 0 ln1w: mean={mean:.4f}')
+>
+> # Check ln1b
+> off2 = off + E
+> vals = [w[off2+i] for i in range(E)]
+> mean = sum(vals)/E
+> print(f'Per-layer layout, layer 0 ln1b: mean={mean:.4f}')
+>
+> # The values are the same since both layouts start the same way for the first layer
+> # The difference is in how subsequent layers' data is organized
+>
+> # Let me try another approach: use a known reference to compare
+> # Let me compute the full forward pass for "The" (token 464) using the per-layer layout
+> # and compare the logits
+>
+> def layernorm(x, woff, boff):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((v-mean)**2 for v in x)/n
+>     s = 1.0/math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)*s*w[woff+i]+w[boff+i] for i in range(n)]
+>
+> def matmul(x, woff, boff, ni, no):
+>     out = [0.0]*no
+>     for j in range(no):
+>         s = w[boff+j] if boff >= 0 else 0.0
+>         for i in range(ni):
+>             s += x[i] * w[woff + i*no + j]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(math.sqrt(2.0/math.pi)*(x+0.044715*x*x*x)))
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(v-m) for v in x]
+>     s = sum(e)
+>     return [v/s for v in e]
+>
+> # Forward pass with grouped layout
+> off_g = 0
+> def take_g(n):
+>     global off_g
+>     r = off_g; off_g += n; return r
+>
+> WTE=take_g(V*E); WPE=take_g(C*E)
+> LN1W=take_g(L*E); LN1B=take_g(L*E)
+> QKVW=take_g(L*E*3*E); QKVB=take_g(L*3*E)
+> ATTPW=take_g(L*E*E); ATTPB=take_g(L*E)
+> LN2W=take_g(L*E); LN2B=take_g(L*E)
+> FCW=take_g(L*E*4*E); FCB=take_g(L*4*E)
+> FCPW=take_g(L*4*E*E); FCPB=take_g(L*E)
+> LNFW=take_g(E); LNFB=take_g(E)
+>
+> token = 464
+> x = [w[WTE + token*E + i] + w[WPE + i] for i in range(E)]
+>
+> # Just do layer 0
+> l = 0
+> h = layernorm(x, LN1W + l*E, LN1B + l*E)
+> qkv = matmul(h, QKVW + l*E*3*E, QKVB + l*3*E, E, 3*E)
+>
+> # Attention (single token, so attention is trivial - just softmax of single score = 1.0)
+> attn_out = [0.0]*E
+> for head in range(H):
+>     ho = head * (E//H)
+>     # Single token: attention weight is 1.0
+>     for i in range(E//H):
+>         attn_out[ho+i] = qkv[2*E+ho+i]  # value
+>
+> proj = matmul(attn_out, ATTPW + l*E*E, ATTPB + l*E, E, E)
+> x = [x[i] + proj[i] for i in range(E)]
+>
+> print(f'After layer 0 attn, x[0:5] = {x[0:5]}')
+> print(f'After layer 0 attn, x mean = {sum(x)/E:.6f}')
+>
+> # MLP
+> h = layernorm(x, LN2W + l*E, LN2B + l*E)
+> fc = matmul(h, FCW + l*E*4*E, FCB + l*4*E, E, 4*E)
+> fc = [gelu(v) for v in fc]
+> proj = matmul(fc, FCPW + l*4*E*E, FCPB + l*E, 4*E, E)
+> x = [x[i] + proj[i] for i in range(E)]
+>
+> print(f'After layer 0 MLP, x[0:5] = {x[0:5]}')
+> print(f'After layer 0 MLP, x mean = {sum(x)/E:.6f}')
+> EOF
+Per layer: 7087872
+Total: 124439808, actual: 124439808
+Per-layer layout, layer 0 ln1w: mean=0.0147
+Per-layer layout, layer 0 ln1b: mean=0.0149
+After layer 0 attn, x[0:5] = [0.9282808781004505, 1.9515698400934733, -2.9046470139963723, 0.004583627069680046, 4.1871580084420215]
+After layer 0 attn, x mean = 0.016315
+After layer 0 MLP, x[0:5] = [6.904703992829074, -14.255065148117051, 41.942740333848505, -10.215631397950688, 6.910687872314903]
+After layer 0 MLP, x mean = 0.076545
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

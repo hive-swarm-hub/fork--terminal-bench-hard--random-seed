@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def grads_same(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def binary_search_switch(xa, xb, ga, gb, depth=15):
+>     """Binary search to isolate a single neuron switch between xa and xb.
+>     Returns gradient difference across the switch."""
+>     for _ in range(depth):
+>         xm = (xa + xb) / 2.0
+>         gm = compute_gradient(xm)
+>         if grads_same(gm, ga):
+>             xa, ga = xm, gm
+>         else:
+>             xb, gb = xm, gm
+>     return gb - ga, xa, xb, ga, gb
+>
+> def is_new_direction(d, existing, tol=0.99):
+>     n = np.linalg.norm(d)
+>     if n < 1e-9:
+>         return False
+>     dn = d / n
+>     for e in existing:
+>         if abs(np.dot(dn, e)) > tol:
+>             return False
+>     return True
+>
+> np.random.seed(42)
+> found_dirs = []
+> found_rows = []
+>
+> print("Phase 1: Collecting gradients at random points...")
+> # Collect gradients at random points
+> N = 200
+> all_grads = []
+> all_points = []
+> for i in range(N):
+>     x = np.random.randn(10) * 3.0
+>     g = compute_gradient(x)
+>     all_grads.append(g)
+>     all_points.append(x)
+>
+> print(f"Computed {N} gradients.")
+>
+> # Find unique gradients
+> unique_grads = [all_grads[0]]
+> unique_points = [all_points[0]]
+> for i in range(1, N):
+>     is_new = True
+>     for ug in unique_grads:
+>         if grads_same(all_grads[i], ug):
+>             is_new = False
+>             break
+>     if is_new:
+>         unique_grads.append(all_grads[i])
+>         unique_points.append(all_points[i])
+>
+> print(f"Found {len(unique_grads)} unique gradient regions.")
+>
+> # For each pair of points with different gradients,
+> # binary search along the line between them to find single-neuron switches
+> print("\nPhase 2: Binary searching between gradient region pairs...")
+>
+> for i in range(len(unique_grads)):
+>     if len(found_dirs) >= 20:
+>         break
+>     for j in range(i+1, len(unique_grads)):
+>         if len(found_dirs) >= 20:
+>             break
+>         if grads_same(unique_grads[i], unique_grads[j]):
+>             continue
+>
+>         # Binary search between these two points
+>         xa, xb = unique_points[i].copy(), unique_points[j].copy()
+>         ga, gb = unique_grads[i].copy(), unique_grads[j].copy()
+>
+>         # There might be multiple switches between xa and xb
+>         # We need to find them one at a time
+>         # Start by finding the first switch from xa's side
+>         diff, xa_new, xb_new, ga_new, gb_new = binary_search_switch(xa, xb, ga, gb, depth=15)
+>
+>         norm = np.linalg.norm(diff)
+>         if norm > 1e-6 and is_new_direction(diff, found_dirs):
+>             found_dirs.append(diff / norm)
+>             found_rows.append(diff)
+>             print(f"  Found row {len(found_dirs)}/20, norm={norm:.6f}")
+>
+>         # Also search from the other side if gradients still differ
+>         if not grads_same(gb_new, gb):
+>             diff2, _, _, _, _ = binary_search_switch(xb_new, xb, gb_new, gb, depth=15)
+>             norm2 = np.linalg.norm(diff2)
+>             if norm2 > 1e-6 and is_new_direction(diff2, found_dirs):
+>                 found_dirs.append(diff2 / norm2)
+>                 found_rows.append(diff2)
+>                 print(f"  Found row {len(found_dirs)}/20, norm={norm2:.6f}")
+>
+> print(f"\nFound {len(found_dirs)} directions so far.")
+>
+> # If we still need more, do targeted search
+> if len(found_dirs) < 20:
+>     print("Phase 3: Additional targeted search...")
+>     for attempt in range(500):
+>         if len(found_dirs) >= 20:
+>             break
+>         x0 = np.random.randn(10) * 5.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         # Check two endpoints
+>         xa = x0 - 5.0 * d
+>         xb = x0 + 5.0 * d
+>         ga = compute_gradient(xa)
+>         gb = compute_gradient(xb)
+>
+>         if not grads_same(ga, gb):
+>             diff, _, _, _, _ = binary_search_switch(xa, xb, ga, gb, depth=15)
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-6 and is_new_direction(diff, found_dirs):
+>                 found_dirs.append(diff / norm)
+>                 found_rows.append(diff)
+>                 print(f"  Found row {len(found_dirs)}/20 (extra attempt {attempt}), norm={norm:.6f}")
+>
+> print(f"\nTotal found: {len(found_dirs)}")
+>
+> # Build A1
+> A1_stolen = np.array(found_rows[:20])
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as true_A1
+> print("\nVerification:")
+> matched = set()
+> for i in range(min(20, len(found_rows))):
+>     ri = found_rows[i] / np.linalg.norm(found_rows[i])
+>     best_cos, best_j = 0, -1
+>     for j in range(20):
+>         td = true_A1[j] / np.linalg.norm(true_A1[j])
+>         c = abs(np.dot(ri, td))
+>         if c > best_cos:
+>             best_cos, best_j = c, j
+>     matched.add(best_j)
+>     print(f"  Row {i} -> true row {best_j}, |cos|={best_cos:.8f}")
+> print(f"\nMatched {len(matched)} unique true rows out of 20")
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#

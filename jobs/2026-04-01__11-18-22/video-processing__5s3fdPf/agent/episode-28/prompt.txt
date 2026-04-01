@@ -1,0 +1,97 @@
+New Terminal Output:
+
+root@b47b8696-56f3-4565-89a1-0c6cf4efd2bd:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+:>5} {d['mcx']:>5} {d['mcy']:>5} {d['top']:>5} {d['bot']:>5} {d['p05_top']:>6} {d['p95_bot']:>6} {d['height']:>6}")
+    elif d['mcx'] > 0:
+        print(f"{d['frame']:>5} {d['mcx']:>5} {d['mcy']:>5}  (no vertical extent)")
+PYEOF
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> frames = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     frames.append(frame)
+> cap.release()
+>
+> bg = frames[0].astype(np.float32)
+> bg_blur = cv2.GaussianBlur(bg, (11,11), 0)
+>
+> # For each frame, compute motion from previous frame AND bg subtraction
+> # Use the intersection to get cleaner detection
+> prev_gray = cv2.GaussianBlur(cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY), (5,5), 0).astype(np.float32)
+>
+> tracking_data = []
+>
+> for i in range(1, len(frames)):
+>     gray = cv2.GaussianBlur(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY), (5,5), 0).astype(np.float32)
+>
+>     # Frame-to-frame diff
+>     fdiff = np.abs(gray - prev_gray)
+>     fmask = (fdiff > 12).astype(np.uint8)
+>
+>     # Background subtraction
+>     frame_blur = cv2.GaussianBlur(frames[i].astype(np.float32), (11,11), 0)
+>     bdiff = np.max(np.abs(frame_blur - bg_blur), axis=2)
+>     bmask = (bdiff > 20).astype(np.uint8)
+>
+>     # Combine: use bg subtraction but weighted by motion
+>     # Focus on the region where motion is detected
+>     motion_total = np.sum(fmask)
+>
+>     if motion_total > 100:
+>         # Find motion center
+>         mys, mxs = np.where(fmask > 0)
+>         mcx = int(np.mean(mxs))
+>         mcy = int(np.mean(mys))
+>
+>         # Use bg subtraction in a window around motion
+>         # But also look at the vertical profile of the bg subtraction
+>         # in a column around the athlete
+>         x1 = max(0, mcx - 120)
+>         x2 = min(960, mcx + 120)
+>
+>         # Get the column of bg subtraction values
+>         col_diff = bdiff[:, x1:x2]
+>         col_mask = (col_diff > 25).astype(np.uint8) * 255
+>
+>         kernel = np.ones((3,3), np.uint8)
+>         col_mask = cv2.morphologyEx(col_mask, cv2.MORPH_OPEN, kernel)
+>         col_mask = cv2.morphologyEx(col_mask, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find the vertical extent of the athlete in this column
+>         row_sums = np.sum(col_mask, axis=1)
+>         active_rows = np.where(row_sums > 20 * 255)[0]  # rows with >20 active pixels
+>
+>         if len(active_rows) > 5:
+>             bot = active_rows[-1]
+>             top = active_rows[0]
+>             # Also compute the bottom using a percentile for robustness
+>             p95_bot = int(np.percentile(active_rows, 95))
+>             p05_top = int(np.percentile(active_rows, 5))
+>
+>             tracking_data.append({
+>                 'frame': i,
+>                 'mcx': mcx, 'mcy': mcy,
+>                 'top': top, 'bot': bot,
+>                 'p05_top': p05_top, 'p95_bot': p95_bot,
+>                 'height': bot - top
+>             })
+>         else:
+>             tracking_data.append({'frame': i, 'mcx': mcx, 'mcy': mcy, 'top': -1, 'bot': -1})
+>     else:
+>         tracking_data.append({'frame': i, 'mcx': -1, 'mcy': -1, 'top': -1, 'bot': -1})
+>
+>     prev_gray = gray
+>
+> print(f"{'Frame':>5} {'MCX':>5} {'MCY':>5} {'Top':>5} {'Bot':>5} {'P05Top':>6} {'P95Bot':>6} {'Height':>6}")
+> for d in tracking_data:
+>     if d.get('top', -1) > 0:
+>         print(f"{d['frame']:>5} {d['mcx']:>5} {d['mcy']:>5} {d['top']:>5} {d['bot']:>5} {d['p05_top']:>6} {d['p95_bot']:>6} {d['height']:>6}")
+>     elif d['mcx'] > 0:
+>         print(f"{d['frame']:>5} {d['mcx']:>5} {d['mcy']:>5}  (no vertical extent)")
+> PYEOF
+

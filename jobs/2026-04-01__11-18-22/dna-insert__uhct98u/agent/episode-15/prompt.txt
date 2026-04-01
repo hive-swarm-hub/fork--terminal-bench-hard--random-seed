@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app# cat > /app/design_primers3.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def calc_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Clean insertion at position 213
+> # output = input[0:213] + insertion + input[213:]
+> P = 213
+> insertion = "agtagattagaagaagaattaagaagaagattaacagaa"
+>
+> # Verify
+> assert input_seq[:P] + insertion + input_seq[P:] == output_seq, "Reconstruction failed!"
+> print("Reconstruction verified!")
+> print(f"Split point: {P}")
+> print(f"Insertion: {insertion} ({len(insertion)} bases)")
+>
+> # Forward primer annealing: input_seq[P:P+fwd_len]
+> # Reverse primer annealing: reverse_complement(input_seq[P-rev_len:P])
+>
+> print("\n--- Scanning forward primer annealing lengths ---")
+> fwd_candidates = []
+> for fwd_len in range(15, 46):
+>     anneal_seq = input_seq[P:P+fwd_len]
+>     try:
+>         tm = calc_tm(anneal_seq)
+>         fwd_candidates.append((fwd_len, tm, anneal_seq))
+>         if 58 <= tm <= 72:
+>             print(f"  len={fwd_len}, Tm={tm:.2f}, seq={anneal_seq}")
+>     except:
+>         pass
+>
+> print("\n--- Scanning reverse primer annealing lengths ---")
+> rev_candidates = []
+> for rev_len in range(15, 46):
+>     anneal_region = input_seq[P-rev_len:P]
+>     anneal_seq = reverse_complement(anneal_region)
+>     try:
+>         tm = calc_tm(anneal_seq)
+>         rev_candidates.append((rev_len, tm, anneal_seq))
+>         if 58 <= tm <= 72:
+>             print(f"  len={rev_len}, Tm={tm:.2f}, seq={anneal_seq}")
+>     except:
+>         pass
+>
+> # Find best pair: both Tm in [58,72], difference <= 5, minimize difference
+> print("\n--- Finding best primer pair ---")
+> best_pair = None
+> best_diff = 999
+> for fwd_len, fwd_tm, fwd_anneal in fwd_candidates:
+>     if not (58 <= fwd_tm <= 72):
+>         continue
+>     for rev_len, rev_tm, rev_seq in rev_candidates:
+>         if not (58 <= rev_tm <= 72):
+>             continue
+>         diff = abs(fwd_tm - rev_tm)
+>         if diff <= 5:
+>             if diff < best_diff:
+>                 best_diff = diff
+>                 best_pair = (fwd_len, fwd_tm, fwd_anneal, rev_len, rev_tm, rev_seq)
+>
+> if best_pair:
+>     fwd_len, fwd_tm, fwd_anneal, rev_len, rev_tm, rev_seq = best_pair
+>     # Forward primer = insertion + annealing portion
+>     fwd_primer = insertion + fwd_anneal
+>     # Reverse primer = just the reverse complement annealing portion
+>     rev_primer = rev_seq
+>
+>     print(f"Forward primer annealing: len={fwd_len}, Tm={fwd_tm:.2f}")
+>     print(f"Reverse primer annealing: len={rev_len}, Tm={rev_tm:.2f}")
+>     print(f"Tm difference: {abs(fwd_tm-rev_tm):.2f}")
+>     print(f"Forward primer (full): {fwd_primer} (total len={len(fwd_primer)})")
+>     print(f"Reverse primer (full): {rev_primer} (total len={len(rev_primer)})")
+>
+>     # Verify the PCR product
+>     # Linear product: fwd_tail + input[P:] + input[:P]
+>     # Circularized: input[:P] + fwd_tail + input[P:] = output
+>     product = input_seq[:P] + insertion + input_seq[P:]
+>     assert product == output_seq, "Product verification failed!"
+>     print("\nPCR product matches output sequence! VERIFIED!")
+>
+>     # Write output
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("Primers written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app# python3 /app/design_primers3.py
+Reconstruction verified!
+Split point: 213
+Insertion: agtagattagaagaagaattaagaagaagattaacagaa (39 bases)
+
+--- Scanning forward primer annealing lengths ---
+  len=15, Tm=59.54, seq=agcaagggcgaggag
+  len=16, Tm=63.48, seq=agcaagggcgaggagc
+  len=17, Tm=65.14, seq=agcaagggcgaggagct
+  len=18, Tm=66.27, seq=agcaagggcgaggagctg
+  len=19, Tm=67.95, seq=agcaagggcgaggagctgt
+  len=20, Tm=68.19, seq=agcaagggcgaggagctgtt
+  len=21, Tm=68.71, seq=agcaagggcgaggagctgttc
+  len=22, Tm=70.07, seq=agcaagggcgaggagctgttca
+  len=23, Tm=70.69, seq=agcaagggcgaggagctgttcac
+
+--- Scanning reverse primer annealing lengths ---
+  len=30, Tm=58.08, seq=catatgtatatctccttcttaaagttaaac
+  len=31, Tm=59.31, seq=catatgtatatctccttcttaaagttaaaca
+  len=32, Tm=59.74, seq=catatgtatatctccttcttaaagttaaacaa
+  len=33, Tm=60.15, seq=catatgtatatctccttcttaaagttaaacaaa
+  len=34, Tm=60.53, seq=catatgtatatctccttcttaaagttaaacaaaa
+  len=35, Tm=60.76, seq=catatgtatatctccttcttaaagttaaacaaaat
+  len=36, Tm=61.10, seq=catatgtatatctccttcttaaagttaaacaaaatt
+  len=37, Tm=60.95, seq=catatgtatatctccttcttaaagttaaacaaaatta
+  len=38, Tm=61.15, seq=catatgtatatctccttcttaaagttaaacaaaattat
+  len=39, Tm=61.46, seq=catatgtatatctccttcttaaagttaaacaaaattatt
+  len=40, Tm=61.75, seq=catatgtatatctccttcttaaagttaaacaaaattattt
+  len=41, Tm=62.23, seq=catatgtatatctccttcttaaagttaaacaaaattatttc
+  len=42, Tm=62.93, seq=catatgtatatctccttcttaaagttaaacaaaattatttct
+  len=43, Tm=62.75, seq=catatgtatatctccttcttaaagttaaacaaaattatttcta
+  len=44, Tm=63.17, seq=catatgtatatctccttcttaaagttaaacaaaattatttctag
+  len=45, Tm=63.81, seq=catatgtatatctccttcttaaagttaaacaaaattatttctaga
+
+--- Finding best primer pair ---
+Forward primer annealing: len=15, Tm=59.54
+Reverse primer annealing: len=32, Tm=59.74
+Tm difference: 0.21
+Forward primer (full): agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag (total len=54)
+Reverse primer (full): catatgtatatctccttcttaaagttaaacaa (total len=32)
+
+PCR product matches output sequence! VERIFIED!
+Primers written to primers.fasta
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app#

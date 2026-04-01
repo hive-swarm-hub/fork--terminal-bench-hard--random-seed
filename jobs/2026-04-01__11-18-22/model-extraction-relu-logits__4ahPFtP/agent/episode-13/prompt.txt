@@ -1,0 +1,157 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def gradients_equal(g1, g2, tol=1e-5):
+>     """Check if two gradients are approximately equal."""
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def find_single_switch(x0, x1, g0, g1, max_depth=40):
+>     """
+>     Binary search along line from x0 to x1 to find a single neuron switch.
+>     Returns the gradient difference across the switch, or None if can't isolate.
+>     """
+>     # Binary search to narrow down to a single switch point
+>     for _ in range(max_depth):
+>         xm = (x0 + x1) / 2.0
+>         gm = compute_gradient(xm)
+>         if gradients_equal(gm, g0):
+>             x0 = xm
+>             g0 = gm
+>         else:
+>             x1 = xm
+>             g1 = gm
+>
+>     # g0 and g1 are gradients on either side of a single switch
+>     diff = g1 - g0
+>     return diff
+>
+> def is_new_direction(direction, existing_directions, tol=0.99):
+>     """Check if direction is not parallel to any existing direction."""
+>     norm = np.linalg.norm(direction)
+>     if norm < 1e-10:
+>         return False
+>     d = direction / norm
+>     for ed in existing_directions:
+>         if abs(np.dot(d, ed)) > tol:
+>             return False
+>     return True
+>
+> # Collect rows of A1 (up to scaling)
+> np.random.seed(123)
+> found_directions = []  # normalized directions
+> found_rows = []  # unnormalized (= A2[0,j] * A1[j,:])
+>
+> max_attempts = 300
+> attempt = 0
+>
+> print("Searching for neuron boundaries...")
+> while len(found_directions) < 20 and attempt < max_attempts:
+>     attempt += 1
+>
+>     # Random line - use larger scale to cross more boundaries
+>     x0 = np.random.randn(10) * 5.0
+>     d = np.random.randn(10)
+>     d = d / np.linalg.norm(d)
+>
+>     # Sample multiple points along the line to find individual switches
+>     num_line_samples = 20
+>     t_values = np.linspace(-10, 10, num_line_samples)
+>     line_points = [x0 + t * d for t in t_values]
+>     line_grads = [compute_gradient(p) for p in line_points]
+>
+>     # Find consecutive pairs where gradient changes
+>     for k in range(len(line_grads) - 1):
+>         if len(found_directions) >= 20:
+>             break
+>         if not gradients_equal(line_grads[k], line_grads[k+1]):
+>             # Binary search between these two points
+>             diff = find_single_switch(
+>                 line_points[k], line_points[k+1],
+>                 line_grads[k], line_grads[k+1]
+>             )
+>
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8 and is_new_direction(diff, found_directions):
+>                 found_directions.append(diff / norm)
+>                 found_rows.append(diff)
+>                 print(f"  Found row {len(found_directions)}/20 (attempt {attempt}), norm={norm:.8f}")
+>
+> print(f"\nTotal found: {len(found_directions)} directions in {attempt} attempts")
+>
+> if len(found_directions) < 20:
+>     print(f"WARNING: Only found {len(found_directions)} out of 20 rows!")
+>     # Try with even larger scale
+>     for extra in range(500):
+>         attempt += 1
+>         x0 = np.random.randn(10) * 20.0
+>         d = np.random.randn(10)
+>         d = d / np.linalg.norm(d)
+>
+>         num_line_samples = 30
+>         t_values = np.linspace(-20, 20, num_line_samples)
+>         line_points = [x0 + t * d for t in t_values]
+>         line_grads = [compute_gradient(p) for p in line_points]
+>
+>         for k in range(len(line_grads) - 1):
+>             if len(found_directions) >= 20:
+>                 break
+>             if not gradients_equal(line_grads[k], line_grads[k+1]):
+>                 diff = find_single_switch(
+>                     line_points[k], line_points[k+1],
+>                     line_grads[k], line_grads[k+1]
+>                 )
+>                 norm = np.linalg.norm(diff)
+>                 if norm > 1e-8 and is_new_direction(diff, found_directions):
+>                     found_directions.append(diff / norm)
+>                     found_rows.append(diff)
+>                     print(f"  Found row {len(found_directions)}/20 (attempt {attempt}), norm={norm:.8f}")
+>
+>         if len(found_directions) >= 20:
+>             break
+>     print(f"Total found after extra: {len(found_directions)}")
+>
+> # Build the stolen A1 matrix
+> # Each found_row = A2[0,j] * A1[j,:], so it's A1[j,:] up to scaling
+> A1_stolen = np.array(found_rows[:20])
+>
+> print(f"\nStolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as true_A1
+> print("\nVerification (matching recovered rows to true A1 rows):")
+> matched_true = set()
+> for i in range(min(20, len(found_rows))):
+>     best_cos = 0
+>     best_j = -1
+>     ri = found_rows[i]
+>     ri_norm = ri / np.linalg.norm(ri)
+>     for j in range(20):
+>         true_dir = true_A1[j] / np.linalg.norm(true_A1[j])
+>         cos_val = abs(np.dot(ri_norm, true_dir))
+>         if cos_val > best_cos:
+>             best_cos = cos_val
+>             best_j = j
+>     matched_true.add(best_j)
+>     print(f"  Recovered row {i} -> true row {best_j}, |cos|={best_cos:.8f}")
+>
+> print(f"\nMatched {len(matched_true)} unique true rows out of 20")
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#

@@ -1,0 +1,41 @@
+Content: 
+
+Now I can see the pattern more clearly. Looking at the BlobBot (bottom of the largest contour) and P90Bot (95th percentile of y-coordinates, more robust):
+
+The P90Bot values show:
+- Frame 47-53: 297-348 (running, on ground, some variation)
+- Frame 54: 211 ← sudden drop (feet going UP)
+- Frame 55: 199 ← continuing up
+- Frame 56: 194 ← near peak
+- Frame 57: 200 
+- Frame 58: 213
+- Frame 59: 250 ← coming down
+- Frame 60: 279 ← coming down more
+- Frame 61: 322 ← nearly landed
+- Frame 62: 344 ← on ground
+
+But this doesn't match the visual analysis which said frames 58-61 are airborne. The issue is that the background subtraction is picking up different things depending on the frame - sometimes the blob includes shadow/trail artifacts that extend downward.
+
+Let me think about this differently. The visual analysis clearly showed:
+- Frame 55: On ground, approaching
+- Frame 56: Starting takeoff
+- Frame 57: Takeoff
+- Frame 58: In the air
+- Frame 59: In the air, over hurdle
+- Frame 60: Still airborne
+- Frame 61: Still airborne, clearing hurdle
+- Frame 62-63: Still airborne or just landing
+- Frame 64: Just landing
+
+The problem is my blob detection isn't reliable enough. Let me try a completely different approach - use the vertical position of the TOP of the athlete's body. During a jump, the head/top goes UP (lower y value).
+
+Tool Calls: [
+  {
+    "id": "toolu_01N8fzM81aFqNuYshgDjKBAL",
+    "type": "function",
+    "function": {
+      "name": "execute_commands",
+      "arguments": "{\"analysis\": \"The blob detection is unreliable because of noise and shadows. Let me try a different approach entirely.\\n\\nLooking at the frame-to-frame motion data again (from earlier):\\n- The CY (center of motion) shows the vertical center of where motion is happening\\n- During the jump, the motion center should shift upward (lower CY)\\n\\nFrom the frame-to-frame data:\\nFrame 53: CY=184, 54: 182, 55: 169, 56: 159, 57: 149, 58: 147, 59: 150, 60: 154, 61: 162, 62: 176, 63: 175, 64: 183, 65: 195\\n\\nThe CY dips from ~184 to a minimum of ~147-149 around frames 57-58, then rises back. This makes sense - the motion center goes up during the jump.\\n\\nBut I need the takeoff and landing frames, not the peak. Let me think about what defines takeoff and landing:\\n- Takeoff: last frame where feet are on the ground before becoming airborne\\n- Landing: first frame where feet touch the ground after being airborne\\n\\nFrom the visual analysis:\\n- Takeoff: around frame 56-57 (the image reader said frame 55 was still on ground)\\n- Landing: around frame 63-64 (the image reader said frame 64 was \\\"just landing\\\")\\n\\nLet me now build the algorithm. I think the best approach is:\\n1. Detect the athlete using frame-to-frame differencing\\n2. Track the vertical center of mass of the motion\\n3. Find the jump as the dip in CY\\n4. Takeoff = where CY starts decreasing significantly\\n5. Landing = where CY returns to baseline\\n\\nBut I need this to be robust for other videos too. Let me think about a general approach.\", \"plan\": \"Let me build the algorithm step by step:\\n1. Use background subtraction (first frame as bg) with Gaussian blur and color diff\\n2. Track the athlete's position using the largest foreground blob\\n3. Detect the jump by tracking the vertical position of the athlete's top (head)\\n4. The top of the head will have a characteristic dip during the jump\\n5. Find takeoff and landing based on this profile\\n\\nActually, a better approach might be to look at the bottom of the athlete more carefully. Let me try using the motion-based tracking (frame-to-frame) and focus on the bottom of the motion region.\", \"commands\": [{\"keystrokes\": \"python3 << 'PYEOF'\\nimport cv2\\nimport numpy as np\\n\\ncap = cv2.VideoCapture('/app/example_video.mp4')\\nframes = []\\nwhile True:\\n    ret, frame = cap.read()\\n    if not ret:\\n        break\\n    frames.append(frame)\\ncap.release()\\n\\nbg = frames[0].astype(np.float32)\\nbg_blur = cv2.GaussianBlur(bg, (11,11), 0)\\n\\n# For each frame, compute motion from previous frame AND bg subtraction\\n# Use the intersection to get cleaner detection\\nprev_gray = cv2.GaussianBlur(cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY), (5,5), 0).astype(np.float32)\\n\\ntracking_data = []\\n\\nfor i in range(1, len(frames)):\\n    gray = cv2.GaussianBlur(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY), (5,5), 0).astype(np.float32)\\n    \\n    # Frame-to-frame diff\\n    fdiff = np.abs(gray - prev_gray)\\n    fmask = (fdiff > 12).astype(np.uint8)\\n    \\n    # Background subtraction\\n    frame_blur = cv2.GaussianBlur(frames[i].astype(np.float32), (11,11), 0)\\n    bdiff = np.max(np.abs(frame_blur - bg_blur), axis=2)\\n    bmask = (bdiff > 20).astype(np.uint8)\\n    \\n    # Combine: use bg subtraction but weighted by motion\\n    # Focus on the region where motion is detected\\n    motion_total = np.sum(fmask)\\n    \\n    if motion_total > 100:\\n        # Find motion center\\n        mys, mxs = np.where(fmask > 0)\\n        mcx = int(np.mean(mxs))\\n        mcy = int(np.mean(mys))\\n        \\n        # Use bg subtraction in a window around motion\\n        # But also look at the vertical profile of the bg subtraction\\n        # in a column around the athlete\\n        x1 = max(0, mcx - 120)\\n        x2 = min(960, mcx + 120)\\n        \\n        # Get the column of bg subtraction values\\n        col_diff = bdiff[:, x1:x2]\\n        col_mask = (col_diff > 25).astype(np.uint8) * 255\\n        \\n        kernel = np.ones((3,3), np.uint8)\\n        col_mask = cv2.morphologyEx(col_mask, cv2.MORPH_OPEN, kernel)\\n        col_mask = cv2.morphologyEx(col_mask, cv2.MORPH_CLOSE, kernel)\\n        \\n        # Find the vertical extent of the athlete in this column\\n        row_sums = np.sum(col_mask, axis=1)\\n        active_rows = np.where(row_sums > 20 * 255)[0]  # rows with >20 active pixels\\n        \\n        if len(active_rows) > 5:\\n            bot = active_rows[-1]\\n            top = active_rows[0]\\n            # Also compute the bottom using a percentile for robustness\\n            p95_bot = int(np.percentile(active_rows, 95))\\n            p05_top = int(np.percentile(active_rows, 5))\\n            \\n            tracking_data.append({\\n                'frame': i,\\n                'mcx': mcx, 'mcy': mcy,\\n                'top': top, 'bot': bot,\\n                'p05_top': p05_top, 'p95_bot': p95_bot,\\n                'height': bot - top\\n            })\\n        else:\\n            tracking_data.append({'frame': i, 'mcx': mcx, 'mcy': mcy, 'top': -1, 'bot': -1})\\n    else:\\n        tracking_data.append({'frame': i, 'mcx': -1, 'mcy': -1, 'top': -1, 'bot': -1})\\n    \\n    prev_gray = gray\\n\\nprint(f\\\"{'Frame':>5} {'MCX':>5} {'MCY':>5} {'Top':>5} {'Bot':>5} {'P05Top':>6} {'P95Bot':>6} {'Height':>6}\\\")\\nfor d in tracking_data:\\n    if d.get('top', -1) > 0:\\n        print(f\\\"{d['frame']:>5} {d['mcx']:>5} {d['mcy']:>5} {d['top']:>5} {d['bot']:>5} {d['p05_top']:>6} {d['p95_bot']:>6} {d['height']:>6}\\\")\\n    elif d['mcx'] > 0:\\n        print(f\\\"{d['frame']:>5} {d['mcx']:>5} {d['mcy']:>5}  (no vertical extent)\\\")\\nPYEOF\\n\", \"duration\": 8}]}"
+    }
+  }
+]

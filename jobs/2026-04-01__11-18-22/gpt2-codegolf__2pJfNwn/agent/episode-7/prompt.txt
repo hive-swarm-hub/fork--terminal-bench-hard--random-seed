@@ -1,0 +1,75 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 << 'EOF'
+> import struct, mmap
+>
+> V=50257; E=768; L=12; C=1024
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def read_floats(offset, count):
+>     return struct.unpack_from(f'<{count}f', m, offset*4)
+>
+> total = len(m)//4
+>
+> # Try the llm.c layout from Karpathy:
+> # wte, wpe, ln1w, ln1b, qkvw, qkvb, attprojw, attprojb, ln2w, ln2b, fcw, fcb, fcprojw, fcprojb, lnfw, lnfb
+> # But with all layers grouped: all ln1w together, all ln1b together, etc.
+>
+> off = V*E + C*E  # after wte, wpe
+>
+> # If all ln1w are stored together: 12*768 = 9216 floats
+> vals = read_floats(off, E)
+> mean = sum(vals)/E
+> print(f'off={off}: mean={mean:.6f}')
+>
+> # Maybe the layout groups all same-type params:
+> # all_ln1w: L*E, all_ln1b: L*E, all_qkvw: L*E*3E, ...
+> print('\nChecking grouped layout...')
+> off = V*E + C*E
+> for layer in range(1):
+>     vals = read_floats(off + layer*E, E)
+>     mean = sum(vals)/E
+>     print(f'  Layer {layer} ln1w? mean={mean:.4f}')
+>
+> # Let me check if the first E values after wte+wpe are layer 0 ln1w
+> # and the next E are layer 1 ln1w, etc.
+> for i in range(12):
+>     vals = read_floats(off + i*E, E)
+>     mean = sum(vals)/E
+>     print(f'  Block {i}: mean={mean:.4f}')
+>
+> # Hmm, let me try a different approach - check if there's a header
+> vals = read_floats(0, 20)
+> print(f'\nFirst 20 values: {[f"{v:.6f}" for v in vals]}')
+>
+> # Maybe it starts with wpe, wte?
+> off = C*E  # after wpe
+> vals = read_floats(off, 10)
+> print(f'After C*E: {[f"{v:.6f}" for v in vals]}')
+>
+> m.close()
+> f.close()
+> EOF
+off=39383808: mean=0.014674
+
+Checking grouped layout...
+  Layer 0 ln1w? mean=0.0147
+  Block 0: mean=0.0147
+  Block 1: mean=0.0149
+  Block 2: mean=0.0156
+  Block 3: mean=0.0097
+  Block 4: mean=-0.0075
+  Block 5: mean=-0.0133
+  Block 6: mean=-0.0108
+  Block 7: mean=-0.0131
+  Block 8: mean=-0.0177
+  Block 9: mean=-0.0244
+  Block 10: mean=-0.0169
+  Block 11: mean=-0.0112
+
+First 20 values: ['0.480339', '-0.525433', '-0.429265', '-0.205952', '-0.127734', '-0.095427', '-0.352861', '-0.076463', '-0.045903', '-0.037529', '-0.013764',
+'-0.184783', '-0.119844', '0.043963', '0.042387', '-0.313024', '0.016617', '0.349092', '-0.390350', '-0.029889']
+After C*E: ['-0.120908', '-0.221607', '-0.071667', '0.279176', '-0.300449', '0.021672', '0.339759', '0.186234', '0.088784', '-0.281291']
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

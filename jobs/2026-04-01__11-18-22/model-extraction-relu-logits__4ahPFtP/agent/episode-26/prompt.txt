@@ -1,0 +1,130 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def grads_same(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> # ============================================================
+> # Strategy:
+> # For f(x) = A2 * ReLU(A1*x + b1) + b2, the gradient is:
+> #   grad_f(x) = sum_{j: A1[j,:]@x+b1[j]>0} A2[0,j] * A1[j,:]
+> #
+> # Walking along a line x(t) = x0 + t*d, each neuron j has
+> # pre-activation A1[j,:]@x(t) + b1[j] which is linear in t.
+> # So each neuron switches (activates/deactivates) at exactly
+> # one value of t. At that switch point, the gradient changes
+> # by exactly A2[0,j] * A1[j,:].
+> #
+> # By using a small step size along random lines, we ensure
+> # at most one neuron switches per step. The gradient difference
+> # between consecutive steps then gives us A2[0,j]*A1[j,:],
+> # which is A1[j,:] up to a scalar factor.
+> #
+> # Collecting these across many lines and clustering by direction
+> # recovers all rows of A1 (up to permutation and scaling).
+> # ============================================================
+>
+> np.random.seed(42)
+>
+> # Phase 1: Walk along random lines and collect gradient differences
+> all_diffs = []  # (direction_normalized, raw_diff)
+>
+> print("Phase 1: Walking along random lines to collect gradient differences...")
+>
+> for line_idx in range(50):
+>     x0 = np.random.randn(10) * 5.0
+>     d = np.random.randn(10)
+>     d = d / np.linalg.norm(d)
+>
+>     t_start, t_end = -5, 5
+>     step = 0.05  # Small step to ensure single neuron switches
+>
+>     t = t_start
+>     prev_x = x0 + t * d
+>     prev_g = compute_gradient(prev_x)
+>
+>     while t < t_end:
+>         t += step
+>         curr_x = x0 + t * d
+>         curr_g = compute_gradient(curr_x)
+>
+>         if not grads_same(prev_g, curr_g):
+>             diff = curr_g - prev_g
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-7:
+>                 all_diffs.append((diff / norm, diff))
+>
+>         prev_x = curr_x
+>         prev_g = curr_g
+>
+> print(f"Collected {len(all_diffs)} gradient differences.")
+>
+> # Phase 2: Cluster the differences by direction
+> print("Phase 2: Clustering by direction...")
+> clusters = []
+>
+> for d_norm, d_raw in all_diffs:
+>     found = False
+>     for cluster in clusters:
+>         if abs(np.dot(d_norm, cluster[0][0])) > 0.99:
+>             cluster.append((d_norm, d_raw))
+>             found = True
+>             break
+>     if not found:
+>         clusters.append([(d_norm, d_raw)])
+>
+> print(f"Found {len(clusters)} clusters.")
+>
+> # Phase 3: Select the best representative from each cluster
+> print("Phase 3: Selecting best rows...")
+> clusters.sort(key=len, reverse=True)
+>
+> found_dirs = []
+> found_rows = []
+>
+> for cluster in clusters:
+>     if len(found_dirs) >= 20:
+>         break
+>
+>     raw_diffs = np.array([x[1] for x in cluster])
+>     norms = np.array([np.linalg.norm(x[1]) for x in cluster])
+>     median_idx = np.argmin(np.abs(norms - np.median(norms)))
+>     representative = raw_diffs[median_idx]
+>     rep_dir = representative / np.linalg.norm(representative)
+>
+>     is_new = True
+>     for fd in found_dirs:
+>         if abs(np.dot(rep_dir, fd)) > 0.995:
+>             is_new = False
+>             break
+>
+>     if is_new:
+>         found_dirs.append(rep_dir)
+>         found_rows.append(representative)
+>
+> print(f"Found {len(found_dirs)} unique rows of A1.")
+>
+> # Build and save the stolen A1 matrix
+> A1_stolen = np.array(found_rows)
+> print(f"\nStolen A1 shape: {A1_stolen.shape}")
+> print("Stolen A1 matrix (up to permutation and scaling):")
+> print(A1_stolen)
+>
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("\nSaved to /app/stolen_A1.npy")
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#

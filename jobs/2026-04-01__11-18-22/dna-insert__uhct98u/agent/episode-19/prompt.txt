@@ -1,0 +1,171 @@
+New Terminal Output:
+
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+A> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def calc_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Parse primers
+> primers = parse_fasta('primers.fasta')
+> primer_names = list(primers.keys())
+> print(f"Primer names: {primer_names}")
+> print(f"Number of primer pairs: {len(primer_names)//2}")
+>
+> fwd_primer = primers[primer_names[0]]
+> rev_primer = primers[primer_names[1]]
+> print(f"\nForward primer: {fwd_primer} (len={len(fwd_primer)})")
+> print(f"Reverse primer: {rev_primer} (len={len(rev_primer)})")
+>
+> # Double the input for circular search
+> input_double = input_seq + input_seq
+>
+> # Find where forward primer anneals (try all suffix lengths 15-45)
+> fwd_anneal_pos = None
+> fwd_anneal_len = None
+> fwd_tail = None
+> for alen in range(15, 46):
+>     anneal = fwd_primer[-alen:]
+>     pos = input_double.find(anneal)
+>     if pos != -1 and pos < len(input_seq):
+>         fwd_anneal_pos = pos % len(input_seq)
+>         fwd_anneal_len = alen
+>         fwd_tail = fwd_primer[:-alen]
+>         break  # Take the shortest annealing match
+>
+> print(f"\nFwd annealing portion: {fwd_primer[-fwd_anneal_len:]} (len={fwd_anneal_len})")
+> print(f"Fwd annealing position on input: {fwd_anneal_pos}")
+> print(f"Fwd 5' tail: {fwd_tail} (len={len(fwd_tail)})")
+>
+> # Find where reverse primer anneals
+> rev_anneal_pos = None
+> rev_anneal_len = len(rev_primer)  # entire rev primer should anneal
+> rev_rc = rc(rev_primer)
+> pos = input_double.find(rev_rc)
+> if pos != -1:
+>     rev_anneal_pos = pos % len(input_seq)
+>     print(f"\nRev annealing portion: {rev_primer} (len={rev_anneal_len})")
+>     print(f"Rev anneals to input region [{rev_anneal_pos}:{rev_anneal_pos+rev_anneal_len}]: {rev_rc}")
+>     print(f"Rev annealing end position: {rev_anneal_pos + rev_anneal_len}")
+>
+> # Verify Tm constraints
+> fwd_tm = calc_tm(fwd_primer[-fwd_anneal_len:])
+> rev_tm = calc_tm(rev_primer)
+> print(f"\n--- Tm Verification ---")
+> print(f"Fwd annealing Tm: {fwd_tm:.2f} (range: 58-72)")
+> print(f"Rev annealing Tm: {rev_tm:.2f} (range: 58-72)")
+> print(f"Tm difference: {abs(fwd_tm-rev_tm):.2f} (max: 5)")
+> assert 58 <= fwd_tm <= 72, f"Fwd Tm {fwd_tm} out of range!"
+> assert 58 <= rev_tm <= 72, f"Rev Tm {rev_tm} out of range!"
+> assert abs(fwd_tm - rev_tm) <= 5, f"Tm diff {abs(fwd_tm-rev_tm)} > 5!"
+> assert 15 <= fwd_anneal_len <= 45, f"Fwd anneal len {fwd_anneal_len} out of range!"
+> assert 15 <= rev_anneal_len <= 45, f"Rev anneal len {rev_anneal_len} out of range!"
+> print("All Tm and length constraints PASSED!")
+>
+> # Simulate Q5 SDM PCR product
+> # Back-to-back primers: fwd starts at fwd_anneal_pos, rev ends at rev_anneal_pos + rev_anneal_len
+> # The split point is where the primers meet back-to-back
+> # Rev primer's 3' end corresponds to the start of rev_rc region (rev_anneal_pos)
+> # Fwd primer's annealing starts at fwd_anneal_pos
+>
+> print(f"\n--- PCR Product Simulation ---")
+> print(f"Fwd annealing starts at: {fwd_anneal_pos}")
+> print(f"Rev annealing region: [{rev_anneal_pos}:{rev_anneal_pos+rev_anneal_len}]")
+> print(f"Rev 3' end points to input position: {rev_anneal_pos}")
+>
+> # The linear PCR product (read 5'->3' on the top strand):
+> # fwd_tail + input[fwd_anneal_pos : ... around circle ... : rev_anneal_pos + rev_anneal_len]
+> # Since primers are back-to-back:
+> if fwd_anneal_pos >= rev_anneal_pos + rev_anneal_len:
+>     # Normal case: fwd is downstream of rev end
+>     template_region = input_seq[fwd_anneal_pos:] + input_seq[:rev_anneal_pos + rev_anneal_len]
+> else:
+>     template_region = input_seq[fwd_anneal_pos:rev_anneal_pos + rev_anneal_len]
+>
+> linear_product = fwd_tail + template_region
+> print(f"Linear product length: {len(linear_product)}")
+> print(f"Output length: {len(output_seq)}")
+>
+> # Check circular match
+> product_double = linear_product + linear_product
+> if output_seq in product_double:
+>     print("\n*** OUTPUT SEQUENCE FOUND IN CIRCULAR PCR PRODUCT - VERIFIED! ***")
+> else:
+>     print("\nWARNING: Output not found in circular product!")
+>     # Try alternative: the product might need different construction
+>     # For back-to-back: product = fwd_tail + input[fwd_pos:] + input[:split_end]
+>     # where split_end = rev_anneal_pos + rev_anneal_len (but mod input length)
+>     end_pos = (rev_anneal_pos + rev_anneal_len) % len(input_seq)
+>     print(f"end_pos: {end_pos}, fwd_pos: {fwd_anneal_pos}")
+>     if end_pos <= fwd_anneal_pos:
+>         alt_product = fwd_tail + input_seq[fwd_anneal_pos:] + input_seq[:end_pos]
+>     else:
+>         alt_product = fwd_tail + input_seq[fwd_anneal_pos:end_pos]
+>     alt_double = alt_product + alt_product
+>     if output_seq in alt_double:
+>         print("*** ALTERNATIVE CONSTRUCTION VERIFIED! ***")
+>     else:
+>         print("Alternative also failed")
+>         print(f"alt_product len: {len(alt_product)}")
+>
+> PYEOF
+Primer names: ['forward_primer', 'reverse_primer']
+Number of primer pairs: 1
+
+Forward primer: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag (len=54)
+Reverse primer: catatgtatatctccttcttaaagttaaacaa (len=32)
+
+Fwd annealing portion: agcaagggcgaggag (len=15)
+Fwd annealing position on input: 213
+Fwd 5' tail: agtagattagaagaagaattaagaagaagattaacagaa (len=39)
+
+Rev annealing portion: catatgtatatctccttcttaaagttaaacaa (len=32)
+Rev anneals to input region [181:213]: ttgtttaactttaagaaggagatatacatatg
+Rev annealing end position: 213
+
+--- Tm Verification ---
+Fwd annealing Tm: 59.54 (range: 58-72)
+Rev annealing Tm: 59.74 (range: 58-72)
+Tm difference: 0.21 (max: 5)
+All Tm and length constraints PASSED!
+
+--- PCR Product Simulation ---
+Fwd annealing starts at: 213
+Rev annealing region: [181:213]
+Rev 3' end points to input position: 181
+Linear product length: 3630
+Output length: 3630
+
+*** OUTPUT SEQUENCE FOUND IN CIRCULAR PCR PRODUCT - VERIFIED! ***
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app#

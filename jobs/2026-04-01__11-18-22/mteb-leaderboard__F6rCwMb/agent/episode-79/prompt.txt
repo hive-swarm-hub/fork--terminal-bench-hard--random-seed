@@ -1,0 +1,204 @@
+New Terminal Output:
+
+root@dfdc05c2-a651-4ded-887c-a432745a1c92:/app# cat /usr/local/lib/python3.10/site-packages/mteb/leaderboard/app.py | head -200
+from __future__ import annotations
+
+import itertools
+import json
+import logging
+import tempfile
+import time
+import warnings
+from pathlib import Path
+from typing import Literal, get_args
+from urllib.parse import urlencode
+
+import cachetools
+import gradio as gr
+import pandas as pd
+
+import mteb
+from mteb.abstasks.TaskMetadata import TASK_DOMAIN, TASK_TYPE
+from mteb.custom_validators import MODALITIES
+from mteb.leaderboard.benchmark_selector import (
+    BENCHMARK_ENTRIES,
+    DEFAULT_BENCHMARK_NAME,
+    make_selector,
+)
+from mteb.leaderboard.figures import performance_size_plot, radar_chart
+from mteb.leaderboard.table import create_tables
+from mteb.leaderboard.text_segments import ACKNOWLEDGEMENT, FAQ
+
+logger = logging.getLogger(__name__)
+
+
+LANGUAGE: list[str] = list({l for t in mteb.get_tasks() for l in t.metadata.languages})
+ALL_MODELS = {meta.name for meta in mteb.get_model_metas()}
+
+
+def load_results():
+    results_cache_path = Path(__file__).parent.joinpath("__cached_results.json")
+    if not results_cache_path.exists():
+        all_results = mteb.load_results(
+            only_main_score=True, require_model_meta=False, models=ALL_MODELS
+        ).filter_models()
+        all_results.to_disk(results_cache_path)
+        return all_results
+    else:
+        with results_cache_path.open() as cache_file:
+            return mteb.BenchmarkResults.from_validated(**json.load(cache_file))
+
+
+def produce_benchmark_link(benchmark_name: str, request: gr.Request) -> str:
+    """Produces a URL for the selected benchmark."""
+    params = urlencode(
+        {
+            "benchmark_name": benchmark_name,
+        }
+    )
+    base_url = request.request.base_url
+    url = f"{base_url}?{params}"
+    md = f"```\n{url}\n```"
+    return md
+
+
+def set_benchmark_on_load(request: gr.Request):
+    query_params = request.query_params
+    return query_params.get("benchmark_name", DEFAULT_BENCHMARK_NAME)
+
+
+def download_table(table: pd.DataFrame) -> str:
+    file = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+    table.to_csv(file)
+    return file.name
+
+
+def update_citation(benchmark_name: str) -> str:
+    benchmark = mteb.get_benchmark(benchmark_name)
+    if benchmark.citation is not None:
+        citation = f"```bibtex\n{benchmark.citation}\n```"
+    else:
+        citation = ""
+    return citation
+
+
+def update_description(
+    benchmark_name: str, languages: list[str], task_types: list[str], domains: list[str]
+) -> str:
+    benchmark = mteb.get_benchmark(benchmark_name)
+    description = f"{benchmark.description}\n"
+    n_languages = len(languages)
+    n_task_types = len(task_types)
+    n_tasks = len(benchmark.tasks)
+    n_domains = len(domains)
+    description += f" - **Number of languages**: {n_languages}\n"
+    description += f" - **Number of tasks**: {n_tasks}\n"
+    description += f" - **Number of task types**: {n_task_types}\n"
+    description += f" - **Number of domains**: {n_domains}\n"
+    if benchmark.reference is not None:
+        description += f"\n[Click for More Info]({benchmark.reference})"
+
+    return description
+
+
+def format_list(props: list[str]):
+    if props is None:
+        return ""
+    if len(props) > 3:
+        return ", ".join(props[:3]) + "..."
+    return ", ".join(props)
+
+
+def update_task_info(task_names: str) -> gr.DataFrame:
+    tasks = mteb.get_tasks(tasks=task_names)
+    df = tasks.to_dataframe(
+        properties=[
+            "name",
+            "type",
+            "languages",
+            "domains",
+            "reference",
+            "main_score",
+            "modalities",
+        ]
+    )
+    df["languages"] = df["languages"].map(format_list)
+    df = df.sort_values("name")
+    df["domains"] = df["domains"].map(format_list)
+    df["name"] = "[" + df["name"] + "](" + df["reference"] + ")"
+    df["modalities"] = df["modalities"].map(format_list)
+    df = df.rename(
+        columns={
+            "name": "Task Name",
+            "type": "Task Type",
+            "languages": "Languages",
+            "domains": "Domains",
+            "main_score": "Metric",
+            "modalities": "Modality",
+        }
+    )
+    df = df.drop(columns="reference")
+    return gr.DataFrame(
+        df,
+        datatype=["markdown"] + ["str"] * (len(df.columns) - 1),
+        show_copy_button=True,
+        show_fullscreen_button=True,
+        show_search="filter",
+    )
+
+
+# Model sizes in million parameters
+MIN_MODEL_SIZE, MAX_MODEL_SIZE = 0, 100_000
+
+
+def filter_models(
+    model_names: list[str],
+    task_select: list[str],
+    availability: bool | None,
+    compatibility: list[str],
+    instructions: bool | None,
+    max_model_size: int,
+    zero_shot_setting: Literal["only_zero_shot", "allow_all", "remove_unknown"],
+):
+    lower, upper = 0, max_model_size
+    # Setting to None, when the user doesn't specify anything
+    if (lower == MIN_MODEL_SIZE) or (lower is None):
+        lower = None
+    else:
+        # Multiplying by millions
+        lower = lower * 1e6
+    if (upper == MAX_MODEL_SIZE) or (upper is None):
+        upper = None
+    else:
+        upper = upper * 1e6
+    model_metas = mteb.get_model_metas(
+        model_names=model_names,
+        open_weights=availability,
+        use_instructions=instructions,
+        frameworks=compatibility,
+        n_parameters_range=(lower, upper),
+    )
+
+    models_to_keep = set()
+    for model_meta in model_metas:
+        is_model_zero_shot = model_meta.is_zero_shot_on(task_select)
+        if is_model_zero_shot is None:
+            if zero_shot_setting in ["remove_unknown", "only_zero_shot"]:
+                continue
+        elif not is_model_zero_shot:
+            if zero_shot_setting == "only_zero_shot":
+                continue
+        models_to_keep.add(model_meta.name)
+    return list(models_to_keep)
+
+
+def get_leaderboard_app() -> gr.Blocks:
+    logger.info("Loading all benchmark results")
+    all_results = load_results()
+
+    benchmarks = sorted(
+        mteb.get_benchmarks(display_on_leaderboard=True), key=lambda x: x.name
+    )
+    all_benchmark_results = {
+        benchmark.name: benchmark.load_results(
+root@dfdc05c2-a651-4ded-887c-a432745a1c92:/app#

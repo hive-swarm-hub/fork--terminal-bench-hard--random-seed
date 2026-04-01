@@ -1,0 +1,71 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 << 'EOF'
+> V=50257; E=768; L=12; C=1024; E4=3072
+> sizes = [V*E, C*E, L*E, L*E, L*E*3*E, L*3*E, L*E*E, L*E, L*E, L*E, L*E*E4, L*E4, L*E4*E, L*E, E, E]
+> names = ['wte','wpe','ln1w','ln1b','qkvw','qkvb','apw','apb','ln2w','ln2b','fcw','fcb','fpw','fpb','lnfw','lnfb']
+> off = 0
+> for i in range(16):
+>     print(f'{names[i]:6s}: offset={off:>12d} size={sizes[i]:>12d}')
+>     off += sizes[i]
+> print(f'Total: {off}')
+>
+> # Check if any intermediate product overflows int32
+> print(f'\nV*E = {V*E} ({V*E < 2**31})')
+> print(f'L*E*3*E = {L*E*3*E} ({L*E*3*E < 2**31})')
+> print(f'L*E*E4 = {L*E*E4} ({L*E*E4 < 2**31})')
+> print(f'L*E4*E = {L*E4*E} ({L*E4*E < 2**31})')
+>
+> # Check max offset
+> print(f'Max offset: {off} < 2^31={2**31}: {off < 2**31}')
+>
+> # But in C, the expression L*E*3*E is computed as int multiplication
+> # L=12, E=768, 3, E=768
+> # 12*768 = 9216
+> # 9216*3 = 27648
+> # 27648*768 = 21,233,664 - OK
+> # But V*E = 50257*768 = 38,597,376 - OK
+> print(f'\nAll intermediate products fit in int32: OK')
+>
+> # But wait - in the C code, the offsets are stored as int.
+> # The max offset is about 124M which fits in int32.
+> # But when computing P[0]+j*E+i for the logits (j up to 50257),
+> # P[0]=0, j*E = 50256*768 = 38,596,608 which is fine.
+>
+> # Let me check if maybe the issue is with how I access the QKV weights
+> # In the grouped layout, QKVW stores all 12 layers' QKV weights contiguously
+> # Layer l's QKV weight starts at QKVW + l*E*3*E
+> # The weight is [E, 3*E] = 768 rows, 2304 columns
+> # So W[QKVW + l*E*3*E + i*3*E + j] for row i, col j
+> print(f'\nQKVW offset: {sizes[0]+sizes[1]+sizes[2]+sizes[3]}')
+> print(f'QKVW size per layer: {E*3*E} = {E}x{3*E}')
+> EOF
+wte   : offset=           0 size=    38597376
+wpe   : offset=    38597376 size=      786432
+ln1w  : offset=    39383808 size=        9216
+ln1b  : offset=    39393024 size=        9216
+qkvw  : offset=    39402240 size=    21233664
+qkvb  : offset=    60635904 size=       27648
+apw   : offset=    60663552 size=     7077888
+apb   : offset=    67741440 size=        9216
+ln2w  : offset=    67750656 size=        9216
+ln2b  : offset=    67759872 size=        9216
+fcw   : offset=    67769088 size=    28311552
+fcb   : offset=    96080640 size=       36864
+fpw   : offset=    96117504 size=    28311552
+fpb   : offset=   124429056 size=        9216
+lnfw  : offset=   124438272 size=         768
+lnfb  : offset=   124439040 size=         768
+Total: 124439808
+
+V*E = 38597376 (True)
+L*E*3*E = 21233664 (True)
+L*E*E4 = 28311552 (True)
+L*E4*E = 28311552 (True)
+Max offset: 124439808 < 2^31=2147483648: True
+
+All intermediate products fit in int32: OK
+
+QKVW offset: 39402240
+QKVW size per layer: 1769472 = 768x2304
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

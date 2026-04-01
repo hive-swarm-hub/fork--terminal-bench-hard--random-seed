@@ -1,0 +1,91 @@
+New Terminal Output:
+
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app# cat > /app/design_primers2.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def calc_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # The key insight: for Q5 SDM with back-to-back primers on a circular template,
+> # we pick a split point on the input template. The forward primer anneals downstream
+> # of the split, the reverse primer anneals upstream of the split.
+> # Any non-template sequence (insertion) goes on the 5' tail of the forward primer.
+> #
+> # For the split point at position P in the input:
+> # - Forward primer anneals to input[P:P+fwd_len]
+> # - Reverse primer = reverse_complement(input[P-rev_len:P])
+> # - PCR product (circular) = input[0:P] + fwd_tail + input[P:]
+> #   Wait no: PCR product linear = fwd_tail + input[P:] + input[:P]
+> #   Circularized = input[:P] + fwd_tail + input[P:]
+> #
+> # We need: output = input[:P] + fwd_tail + input[P:]
+> # So: fwd_tail = output[P : P + (len(output) - len(input))]
+> # But this only works if the output matches input[:P] at the start
+> # and input[P:] at the end.
+>
+> # From our analysis:
+> # output = input[0:215] + "tagattagaagaagaattaagaagaagattaacagaa" + input[213:]
+> # This means the split can't simply be at one position.
+> #
+> # Actually, let me think about this differently.
+> # The output has 39 more bases than input.
+> # Let me find the exact region that's inserted by checking all possible split points.
+>
+> # For each possible split point P on the input:
+> # Check if output = input[:P] + something + input[P:]
+> # The "something" would be the insertion
+>
+> for P in range(210, 220):
+>     # Check if input[:P] matches output[:P]
+>     if input_seq[:P] == output_seq[:P]:
+>         # Check if input[P:] matches output[P+39:] (since output is 39 longer)
+>         if input_seq[P:] == output_seq[P+39:]:
+>             insertion = output_seq[P:P+39]
+>             print(f"Clean insertion at position {P}: {insertion}")
+>             print(f"Insertion length: {len(insertion)}")
+>             break
+>     # Also check with overlap
+>     prefix_match = input_seq[:P] == output_seq[:P]
+>     suffix_match = input_seq[P:] == output_seq[P+39:]
+>     if P <= 215:
+>         print(f"P={P}: prefix_match={prefix_match}, suffix_match={suffix_match}")
+>
+> PYEOF
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app# python3 /app/design_primers2.py
+P=210: prefix_match=True, suffix_match=False
+P=211: prefix_match=True, suffix_match=False
+P=212: prefix_match=True, suffix_match=False
+Clean insertion at position 213: agtagattagaagaagaattaagaagaagattaacagaa
+Insertion length: 39
+root@4e9a8b94-5624-4389-a40a-91df741c4a41:/app#

@@ -1,0 +1,98 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 << 'EOF'
+> import array, math
+>
+> V=50257; E=768; L=12; C=1024; H=12; E4=3072
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> w = array.array('f')
+> w.frombytes(f.read())
+> f.close()
+>
+> # Let me try to find the correct layout by testing if certain blocks
+> # look like layer norm weights (should have values clustered near 1.0 after training)
+> # or biases (near 0.0)
+>
+> # The total is: V*E + C*E + L*(2*E + E*3E + 3E + E*E + E + 2*E + E*4E + 4E + 4E*E + E) + 2*E
+> # = 38597376 + 786432 + 12*7087872 + 1536 = 124439808 ✓
+>
+> # What if the order within each layer group is different?
+> # TF GPT-2 variable names typically are:
+> # model/h0/ln_1/g, model/h0/ln_1/b
+> # model/h0/attn/c_attn/w, model/h0/attn/c_attn/b
+> # model/h0/attn/c_proj/w, model/h0/attn/c_proj/b
+> # model/h0/ln_2/g, model/h0/ln_2/b
+> # model/h0/mlp/c_fc/w, model/h0/mlp/c_fc/b
+> # model/h0/mlp/c_proj/w, model/h0/mlp/c_proj/b
+> # model/ln_f/g, model/ln_f/b
+> # model/wpe, model/wte
+>
+> # In alphabetical order (which is how TF often saves):
+> # model/h0/attn/c_attn/b [2304]
+> # model/h0/attn/c_attn/w [768, 2304]
+> # model/h0/attn/c_proj/b [768]
+> # model/h0/attn/c_proj/w [768, 768]
+> # model/h0/ln_1/b [768]
+> # model/h0/ln_1/g [768]
+> # model/h0/ln_2/b [768]
+> # model/h0/ln_2/g [768]
+> # model/h0/mlp/c_fc/b [3072]
+> # model/h0/mlp/c_fc/w [768, 3072]
+> # model/h0/mlp/c_proj/b [768]
+> # model/h0/mlp/c_proj/w [3072, 768]
+> # ... (repeat for h1-h11)
+> # model/ln_f/b [768]
+> # model/ln_f/g [768]
+> # model/wpe [1024, 768]
+> # model/wte [50257, 768]
+>
+> # Let me try this alphabetical per-layer layout:
+> # For each layer: attn_b, attn_w, proj_b, proj_w, ln1_b, ln1_g, ln2_b, ln2_g, fc_b, fc_w, fcproj_b, fcproj_w
+> # Then: lnf_b, lnf_g, wpe, wte
+>
+> per_layer_alpha = 3*E + E*3*E + E + E*E + E + E + E + E + E4 + E*E4 + E + E4*E
+> print(f'Per layer (alpha): {per_layer_alpha}')
+> total_alpha = L*per_layer_alpha + E + E + C*E + V*E
+> print(f'Total (alpha): {total_alpha}, actual: {len(w)}')
+>
+> # Check ln1_g in alphabetical layout (offset: attn_b + attn_w + proj_b + proj_w + ln1_b)
+> off = 3*E + E*3*E + E + E*E + E  # after attn_b, attn_w, proj_b, proj_w, ln1_b
+> vals = [w[off+i] for i in range(E)]
+> mean = sum(vals)/E
+> std = (sum((v-mean)**2 for v in vals)/E)**0.5
+> print(f'Alpha layout, layer 0 ln1_g: mean={mean:.4f} std={std:.4f} first3={vals[:3]}')
+>
+> # Check ln1_b (before ln1_g)
+> off2 = 3*E + E*3*E + E + E*E
+> vals = [w[off2+i] for i in range(E)]
+> mean = sum(vals)/E
+> std = (sum((v-mean)**2 for v in vals)/E)**0.5
+> print(f'Alpha layout, layer 0 ln1_b: mean={mean:.4f} std={std:.4f}')
+>
+> # Check lnf_g (at the end before wpe and wte)
+> off3 = L*per_layer_alpha + E  # after lnf_b
+> vals = [w[off3+i] for i in range(E)]
+> mean = sum(vals)/E
+> std = (sum((v-mean)**2 for v in vals)/E)**0.5
+> print(f'Alpha layout, lnf_g: mean={mean:.4f} std={std:.4f}')
+>
+> # Check wte at end
+> off4 = L*per_layer_alpha + 2*E + C*E
+> vals = [w[off4+i] for i in range(100)]
+> mean = sum(vals)/100
+> print(f'Alpha layout, wte first 100: mean={mean:.4f}')
+> print(f'Alpha layout, wte first 5: {vals[:5]}')
+>
+> # Compare with known wte values from beginning
+> print(f'Known wte first 5: {[w[i] for i in range(5)]}')
+> EOF
+Per layer (alpha): 7087872
+Total (alpha): 124439808, actual: 124439808
+Alpha layout, layer 0 ln1_g: mean=0.1804 std=0.0413 first3=[0.2232203334569931, 0.1819586604833603, 0.1534324586391449]
+Alpha layout, layer 0 ln1_b: mean=-0.0066 std=0.0358
+Alpha layout, lnf_g: mean=1.5078 std=1.3902
+Alpha layout, wte first 100: mean=-0.0107
+Alpha layout, wte first 5: [-0.11010301113128662, -0.03926672413945198, 0.03310750797390938, 0.13382644951343536, -0.04847569391131401]
+Known wte first 5: [0.4803391396999359, -0.5254325866699219, -0.42926454544067383, -0.2059524953365326, -0.12773379683494568]
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

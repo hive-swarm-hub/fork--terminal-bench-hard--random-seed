@@ -1,0 +1,143 @@
+New Terminal Output:
+
+>     df = pd.read_csv(args.csv_path)
+>     print(f"Loaded {len(df)} masks ({(df['type'] == 'rectangle').sum()} rectangles, {(df['type'] == 'polyline').sum()} polylines)")
+>
+>     # Step 1: Generate SAM masks for ALL cells using bounding box prompts
+>     all_masks = []
+>     all_scores = []
+>     all_logits = []
+>
+>     print("Generating SAM masks for all cells...")
+>     for idx, row in tqdm(df.iterrows(), total=len(df)):
+>         xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>         box = [xmin, ymin, xmax, ymax]
+>         mask, score, logit = get_mask_for_box(predictor, box, (h, w))
+>         all_masks.append(mask)
+>         all_scores.append(score)
+>         all_logits.append(logit)
+>
+>     # Step 2: Resolve overlaps - assign each pixel to the mask with highest logit score
+>     print("Resolving overlaps...")
+>     # Stack all logits to find per-pixel winner
+>     logits_stack = np.stack(all_logits, axis=0)  # (N, H, W)
+>     masks_stack = np.stack(all_masks, axis=0)  # (N, H, W) bool
+>
+>     # Create a combined mask: for each pixel, which mask index has the highest logit?
+>     # Only consider pixels where at least one mask is True
+>     any_mask = masks_stack.any(axis=0)  # (H, W)
+>
+>     # For pixels with no mask, set logits to -inf
+>     logits_for_assignment = logits_stack.copy()
+>     # Only assign pixels where the mask is actually True
+>     logits_for_assignment[~masks_stack] = -np.inf
+>
+>     # Winner takes all
+>     winner_idx = np.argmax(logits_for_assignment, axis=0)  # (H, W)
+>
+>     # Create resolved masks
+>     resolved_masks = []
+>     for i in range(len(df)):
+>         resolved = (winner_idx == i) & any_mask
+>         # Keep only largest connected component
+>         if resolved.any():
+>             resolved = mask_to_largest_component(resolved)
+>         resolved_masks.append(resolved)
+>
+>     # Step 3: Convert masks to polylines and update DataFrame
+>     print("Converting masks to polylines...")
+>     new_xmin = []
+>     new_ymin = []
+>     new_xmax = []
+>     new_ymax = []
+>     new_coords_x = []
+>     new_coords_y = []
+>
+>     for i, mask in enumerate(tqdm(resolved_masks)):
+>         coords_x, coords_y = mask_to_polyline(mask)
+>
+>         if len(coords_x) == 0:
+>             # Fallback: if mask is empty after resolution, use original SAM mask
+>             # without overlap resolution
+>             fallback_mask = mask_to_largest_component(all_masks[i])
+>             coords_x, coords_y = mask_to_polyline(fallback_mask)
+>
+>         if len(coords_x) == 0:
+>             # If still empty, keep original coordinates
+>             coords_x = [int(x) for x in str(df.iloc[i]['coords_x']).split(',')]
+>             coords_y = [int(y) for y in str(df.iloc[i]['coords_y']).split(',')]
+>             xmin_val = int(df.iloc[i]['xmin'])
+>             ymin_val = int(df.iloc[i]['ymin'])
+>             xmax_val = int(df.iloc[i]['xmax'])
+>             ymax_val = int(df.iloc[i]['ymax'])
+>         else:
+>             xmin_val = min(coords_x)
+>             ymin_val = min(coords_y)
+>             xmax_val = max(coords_x)
+>             ymax_val = max(coords_y)
+>
+>         new_xmin.append(xmin_val)
+>         new_ymin.append(ymin_val)
+>         new_xmax.append(xmax_val)
+>         new_ymax.append(ymax_val)
+>         new_coords_x.append(','.join(str(c) for c in coords_x))
+>         new_coords_y.append(','.join(str(c) for c in coords_y))
+>
+>     # Update DataFrame
+>     df['xmin'] = new_xmin
+>     df['ymin'] = new_ymin
+>     df['xmax'] = new_xmax
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = 'polyline'
+>
+>     # Save output
+>     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
+>     df.to_csv(args.output_path, index=False)
+>     print(f"Saved output to {args.output_path}")
+>     print("Done!")
+>
+>
+> if __name__ == "__main__":
+>     main()
+> SCRIPT_EOF
+root@d5bee3a2-83aa-4076-8920-2f4fb0d36612:/app# echo 'Script written'
+Script written
+root@d5bee3a2-83aa-4076-8920-2f4fb0d36612:/app# mkdir -p /app/output && python3 /app/convert_masks.py /app/mobile_sam.pt /app/output/demo_output.csv /app/demo_r
+gb.png /app/demo_metadata.csv 2>&1 | tee /tmp/run_output.log
+Traceback (most recent call last):
+  File "/app/convert_masks.py", line 5, in <module>
+    import cv2
+  File "/usr/local/lib/python3.11/site-packages/cv2/__init__.py", line 181, in <module>
+    bootstrap()
+  File "/usr/local/lib/python3.11/site-packages/cv2/__init__.py", line 153, in bootstrap
+    native_module = importlib.import_module("cv2")
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ImportError: libGL.so.1: cannot open shared object file: No such file or directory
+root@d5bee3a2-83aa-4076-8920-2f4fb0d36612:/app# pip install opencv-python-headless --force-reinstall > /tmp/pip_cv2.log 2>&1 && echo 'DONE'
+DONE
+root@d5bee3a2-83aa-4076-8920-2f4fb0d36612:/app# python3 /app/convert_masks.py /app/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png /app/demo_metadat
+a.csv 2>&1 | tee /tmp/run_output.log
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/usr/local/lib/python3.11/site-packages/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.t
+iny_vit_sam.tiny_vit_5m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/usr/local/lib/python3.11/site-packages/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.
+tiny_vit_sam.tiny_vit_11m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/usr/local/lib/python3.11/site-packages/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.
+tiny_vit_sam.tiny_vit_21m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/usr/local/lib/python3.11/site-packages/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.
+tiny_vit_sam.tiny_vit_21m_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/usr/local/lib/python3.11/site-packages/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.

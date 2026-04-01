@@ -1,0 +1,172 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> # Strategy:
+> # The gradient at any point x is: grad = A2 @ diag(mask) @ A1
+> # where mask[j] = 1 if A1[j,:]@x + b1[j] > 0, else 0
+> # So grad = sum over active j of A2[0,j] * A1[j,:]
+> #
+> # If we find two points where exactly one neuron differs in activation,
+> # their gradient difference = +/- A2[0,j] * A1[j,:] for some j.
+> # This gives us A1[j,:] up to scaling.
+>
+> np.random.seed(42)
+>
+> # Collect many gradients at random points
+> num_samples = 500
+> gradients = []
+> points = []
+>
+> for i in range(num_samples):
+>     x = np.random.randn(10) * 2.0
+>     g = compute_gradient(x)
+>     gradients.append(g)
+>     points.append(x)
+>
+> gradients = np.array(gradients)
+> points = np.array(points)
+>
+> # Compute pairwise differences of gradients
+> # Each difference should be a scalar multiple of a row of A1 (when exactly one neuron differs)
+> candidate_rows = []
+>
+> for i in range(len(gradients)):
+>     for j in range(i+1, len(gradients)):
+>         diff = gradients[i] - gradients[j]
+>         norm = np.linalg.norm(diff)
+>         if norm > 1e-8:  # Non-trivial difference
+>             # Normalize to get direction
+>             candidate_rows.append(diff / norm)
+>
+> candidate_rows = np.array(candidate_rows)
+> print(f"Number of candidate rows: {len(candidate_rows)}")
+>
+> # Now cluster these candidates. Rows of A1 (normalized) should appear as clusters.
+> # Two candidates are the same row if they are parallel (dot product ~1 or ~-1)
+>
+> # Use a greedy clustering approach
+> clusters = []  # List of (direction, list_of_indices)
+>
+> for idx, row in enumerate(candidate_rows):
+>     found = False
+>     for c in clusters:
+>         dot = np.dot(c[0], row)
+>         if abs(dot) > 0.99:  # Nearly parallel
+>             c[1].append(idx)
+>             found = True
+>             break
+>     if not found:
+>         clusters.append((row.copy(), [idx]))
+>
+> print(f"Number of clusters: {len(clusters)}")
+>
+> # Sort clusters by size (largest first) and take top 20
+> clusters.sort(key=lambda c: len(c[1]), reverse=True)
+>
+> # Extract the directions for the top clusters
+> # We need to recover the actual scale too.
+> # The gradient difference = A2[0,j] * A1[j,:]
+> # We want A1[j,:] up to arbitrary scaling, so we can just use the unnormalized differences
+>
+> # Actually, let's be more careful. We want A1 up to permutation and per-row scaling.
+> # So we just need the direction of each row of A1.
+> # But let's try to recover the actual A1 rows.
+>
+> # For each cluster, collect the unnormalized differences
+> recovered_rows = []
+> for ci, (direction, indices) in enumerate(clusters[:20]):
+>     # Collect all unnormalized differences that belong to this cluster
+>     diffs = []
+>     for idx in indices:
+>         # Reconstruct the original i,j pair
+>         # Actually we lost that info. Let's just use the direction and find the scale.
+>         pass
+>     recovered_rows.append(direction)
+>
+> # Actually, since we only need A1 up to per-row scaling, the normalized directions suffice.
+> # But we should try to get the actual scale.
+>
+> # Better approach: recompute with unnormalized differences
+> print("Recomputing with unnormalized differences...")
+>
+> # Let's redo this more carefully
+> # For each pair of gradients, compute the difference and check if it's rank-1 like
+> row_directions = []  # normalized directions
+> row_scales = []  # the norms (= |A2[0,j]| * ||A1[j,:]||)
+>
+> for i in range(len(gradients)):
+>     for j in range(i+1, len(gradients)):
+>         diff = gradients[i] - gradients[j]
+>         norm = np.linalg.norm(diff)
+>         if norm > 1e-8:
+>             direction = diff / norm
+>             # Check if this is a single-neuron difference by seeing if it aligns with existing directions
+>             found = False
+>             for k, d in enumerate(row_directions):
+>                 dot = abs(np.dot(d, direction))
+>                 if dot > 0.99:
+>                     found = True
+>                     break
+>             if not found:
+>                 row_directions.append(direction)
+>                 row_scales.append(norm)
+>
+> print(f"Found {len(row_directions)} unique directions")
+>
+> # Now we need to figure out the actual A1 rows.
+> # The gradient at point x is: g(x) = sum_{j: active} A2[0,j] * A1[j,:]
+> # A gradient difference when one neuron switches: A2[0,j] * A1[j,:]
+> # The norm of this is |A2[0,j]| * ||A1[j,:]||
+> # The direction is sign(A2[0,j]) * A1[j,:] / ||A1[j,:]||
+>
+> # Since we want A1 up to per-row scaling, we can output the directions.
+> # But we should try to get the correct relative scaling.
+>
+> # Let's try a different approach: use the gradient at a point where ALL neurons are active
+> # Then g = A2 @ A1, which is a single vector.
+> # We can also find the gradient at a point where all but one neuron is active.
+> # The difference gives us A2[0,j] * A1[j,:] for the one that turned off.
+>
+> # For now, let's just output the directions as rows of A1 (up to scaling)
+> if len(row_directions) >= 20:
+>     A1_stolen = np.array(row_directions[:20])
+> else:
+>     print(f"Warning: only found {len(row_directions)} directions, expected 20")
+>     A1_stolen = np.array(row_directions)
+>
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verify by comparing directions with actual A1
+> # (This is just for debugging - in a real attack we wouldn't have access)
+> from forward import A1 as true_A1
+> print("\nVerification:")
+> for i in range(min(20, len(row_directions))):
+>     best_match = 0
+>     best_j = -1
+>     for j in range(20):
+>         true_dir = true_A1[j] / np.linalg.norm(true_A1[j])
+>         dot = abs(np.dot(row_directions[i], true_dir))
+>         if dot > best_match:
+>             best_match = dot
+>             best_j = j
+>     print(f"  Recovered row {i} best matches true row {best_j} with |cos|={best_match:.6f}")
+>
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#

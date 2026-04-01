@@ -1,0 +1,145 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def grads_same(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def direction_match(d1, d2, tol=0.999):
+>     """Check if two unit vectors are parallel."""
+>     return abs(np.dot(d1, d2)) > tol
+>
+> np.random.seed(42)
+>
+> # Collect ALL gradient differences from line walks
+> all_diffs = []  # (direction_normalized, raw_diff)
+>
+> print("Phase 1: Walking along random lines to collect gradient differences...")
+>
+> for line_idx in range(50):
+>     x0 = np.random.randn(10) * 5.0
+>     d = np.random.randn(10)
+>     d = d / np.linalg.norm(d)
+>
+>     t_start, t_end = -5, 5
+>     step = 0.05  # Very small step to ensure single neuron switches
+>
+>     t = t_start
+>     prev_x = x0 + t * d
+>     prev_g = compute_gradient(prev_x)
+>
+>     while t < t_end:
+>         t += step
+>         curr_x = x0 + t * d
+>         curr_g = compute_gradient(curr_x)
+>
+>         if not grads_same(prev_g, curr_g):
+>             diff = curr_g - prev_g
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-7:
+>                 all_diffs.append((diff / norm, diff))
+>
+>         prev_x = curr_x
+>         prev_g = curr_g
+>
+> print(f"Collected {len(all_diffs)} gradient differences.")
+>
+> # Phase 2: Cluster the differences by direction
+> print("\nPhase 2: Clustering by direction...")
+> clusters = []  # Each cluster: list of (direction, raw_diff)
+>
+> for d_norm, d_raw in all_diffs:
+>     found = False
+>     for cluster in clusters:
+>         if abs(np.dot(d_norm, cluster[0][0])) > 0.99:
+>             cluster.append((d_norm, d_raw))
+>             found = True
+>             break
+>     if not found:
+>         clusters.append([(d_norm, d_raw)])
+>
+> print(f"Found {len(clusters)} clusters.")
+> for i, c in enumerate(sorted(clusters, key=len, reverse=True)[:25]):
+>     avg_norm = np.mean([np.linalg.norm(x[1]) for x in c])
+>     print(f"  Cluster {i}: {len(c)} members, avg norm={avg_norm:.6f}")
+>
+> # Phase 3: Select the best representative from each cluster
+> # True single-neuron switches should have consistent norms within a cluster
+> # Multi-neuron switches will have different norms
+> print("\nPhase 3: Selecting best rows...")
+>
+> # Sort clusters by size (most observed = most likely real)
+> clusters.sort(key=len, reverse=True)
+>
+> found_dirs = []
+> found_rows = []
+>
+> for cluster in clusters:
+>     if len(found_dirs) >= 20:
+>         break
+>
+>     # Use the median raw diff as representative (robust to outliers)
+>     raw_diffs = np.array([x[1] for x in cluster])
+>
+>     # Check norm consistency - true single-neuron switches should have same norm
+>     norms = np.array([np.linalg.norm(x[1]) for x in cluster])
+>
+>     # Use the representative with median norm
+>     median_idx = np.argmin(np.abs(norms - np.median(norms)))
+>     representative = raw_diffs[median_idx]
+>     rep_dir = representative / np.linalg.norm(representative)
+>
+>     # Check it's not parallel to already found directions
+>     is_new = True
+>     for fd in found_dirs:
+>         if abs(np.dot(rep_dir, fd)) > 0.995:
+>             is_new = False
+>             break
+>
+>     if is_new:
+>         found_dirs.append(rep_dir)
+>         found_rows.append(representative)
+>         print(f"  Row {len(found_dirs)}/20: cluster size={len(cluster)}, norm={np.linalg.norm(representative):.6f}, norm_std={np.std(norms):.6f}")
+>
+> print(f"\nTotal found: {len(found_dirs)}")
+>
+> # Build A1
+> A1_stolen = np.array(found_rows[:20])
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as true_A1
+> print("\nVerification:")
+> matched = set()
+> all_cos = []
+> for i in range(min(20, len(found_rows))):
+>     ri = found_rows[i] / np.linalg.norm(found_rows[i])
+>     best_cos, best_j = 0, -1
+>     for j in range(20):
+>         td = true_A1[j] / np.linalg.norm(true_A1[j])
+>         c = abs(np.dot(ri, td))
+>         if c > best_cos:
+>             best_cos, best_j = c, j
+>     matched.add(best_j)
+>     all_cos.append(best_cos)
+>     print(f"  Row {i} -> true row {best_j}, |cos|={best_cos:.8f}")
+> print(f"\nMatched {len(matched)} unique true rows out of 20")
+> print(f"Average |cos|: {np.mean(all_cos):.6f}")
+> print(f"Min |cos|: {np.min(all_cos):.6f}")
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#

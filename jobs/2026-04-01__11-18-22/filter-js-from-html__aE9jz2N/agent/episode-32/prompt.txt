@@ -1,0 +1,138 @@
+New Terminal Output:
+
+root@5ab5452a-99da-497a-883b-37c6225bd6ae:/app# cat > /app/filter.py << 'PYEOF'
+> import sys
+> import re
+>
+> # Build regex components that need both quote types
+> _sq = chr(39)  # single quote
+> _dq = chr(34)  # double quote
+>
+> # Pattern to match tag internals handling > inside quoted attributes
+> # Equivalent to: (?:[^>"']|"[^"]*"|'[^']*')*
+> _TAG_INNER = "(?:[^>" + _dq + _sq + "]|" + _dq + "[^" + _dq + "]*" + _dq + "|" + _sq + "[^" + _sq + "]*" + _sq + ")*"
+>
+> # Pattern for event handler: \s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|`[^`]*`|[^\s>]+)
+> _ON_HANDLER = r"\s+on\w+\s*=\s*(?:" + _dq + "[^" + _dq + "]*" + _dq + "|" + _sq + "[^" + _sq + "]*" + _sq + "|`[^`]*`|[^" + r"\s>]+)"
+>
+>
+> def decode_entities(value):
+>     """Decode HTML entities for checking purposes."""
+>     decoded = re.sub(r'&#[xX]([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)), value)
+>     decoded = re.sub(r'&#(\d+);?', lambda m: chr(int(m.group(1))), decoded)
+>     decoded = re.sub(r'&tab;|&newline;', '', decoded, flags=re.IGNORECASE)
+>     return decoded
+>
+>
+> def is_dangerous_url(value):
+>     """Check if a URL value contains javascript: or similar dangerous schemes."""
+>     decoded = decode_entities(value)
+>     stripped = re.sub(r'[\s\x00-\x1f\x7f]', '', decoded).lower()
+>     return (
+>         stripped.startswith('javascript:') or
+>         stripped.startswith('vbscript:') or
+>         stripped.startswith('livescript:')
+>     )
+>
+>
+> def remove_javascript(html):
+>     # Build script removal patterns using _TAG_INNER
+>     script_open = r'<script\b' + _TAG_INNER + r'>'
+>
+>     # Remove <script>...</script> tags and their contents
+>     html = re.sub(
+>         script_open + r'.*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Remove self-closing script tags
+>     html = re.sub(
+>         r'<script\b' + _TAG_INNER + r'/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove unclosed script tags
+>     html = re.sub(
+>         script_open + r'.*',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     def clean_tag(match):
+>         tag = match.group(0)
+>         if tag.startswith('</'):
+>             return tag
+>
+>         # Remove event handler attributes
+>         tag = re.sub(_ON_HANDLER, '', tag, flags=re.IGNORECASE)
+>
+>         # Clean dangerous URLs in double-quoted attributes
+>         def clean_dq_url(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + _dq
+>             return m.group(0)
+>
+>         # Clean dangerous URLs in single-quoted attributes
+>         def clean_sq_url(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + _sq
+>             return m.group(0)
+>
+>         # Clean dangerous URLs in unquoted attributes
+>         def clean_uq_url(m):
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             if is_dangerous_url(value):
+>                 return prefix + _dq + _dq
+>             return m.group(0)
+>
+>         url_attrs_pat = r'(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href)'
+>
+>         # Double-quoted: (attr\s*=\s*")([^"]*)"
+>         dq_pat = '(' + url_attrs_pat + r'\s*=\s*' + _dq + ')([^' + _dq + ']*)' + _dq
+>         tag = re.sub(dq_pat, clean_dq_url, tag, flags=re.IGNORECASE | re.DOTALL)
+>
+>         # Single-quoted: (attr\s*=\s*')([^']*)'
+>         sq_pat = '(' + url_attrs_pat + r'\s*=\s*' + _sq + ')([^' + _sq + ']*)' + _sq
+>         tag = re.sub(sq_pat, clean_sq_url, tag, flags=re.IGNORECASE | re.DOTALL)
+>
+>         # Unquoted: (attr\s*=\s*)([^\s>]+)
+>         uq_pat = '(' + url_attrs_pat + r'\s*=\s*)([^\s>]+)'
+>         tag = re.sub(uq_pat, clean_uq_url, tag, flags=re.IGNORECASE)
+>
+>         return tag
+>
+>     # Match HTML tags, handling > inside quoted attribute values
+>     tag_pattern = '<[a-zA-Z]' + _TAG_INNER + '>'
+>     html = re.sub(tag_pattern, clean_tag, html, flags=re.DOTALL)
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@5ab5452a-99da-497a-883b-37c6225bd6ae:/app#

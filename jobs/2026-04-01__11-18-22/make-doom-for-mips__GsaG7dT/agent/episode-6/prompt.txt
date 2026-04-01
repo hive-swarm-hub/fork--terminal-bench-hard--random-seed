@@ -1,0 +1,159 @@
+New Terminal Output:
+
+root@a200754f-2710-4c5a-b3f9-9fc324b26f88:/app# tail -20 /tmp/apt.log
+Setting up libc6-mipsel-cross (2.36-8cross2) ...
+Setting up libatomic1-mipsel-cross (12.2.0-14cross5) ...
+Setting up gcc-12-mipsel-linux-gnu-base:amd64 (12.2.0-14cross5) ...
+Setting up libjansson4:amd64 (2.14-2) ...
+Setting up libmpfr6:amd64 (4.2.0-1) ...
+Setting up libmpc3:amd64 (1.3.1-1) ...
+Setting up libgomp1-mipsel-cross (12.2.0-14cross5) ...
+Setting up linux-libc-dev-mipsel-cross (6.1.8-1cross2) ...
+Setting up libbinutils:amd64 (2.40-2) ...
+Setting up libisl23:amd64 (0.25-1.1) ...
+Setting up libcc1-0:amd64 (12.2.0-14+deb12u1) ...
+Setting up libc6-dev-mipsel-cross (2.36-8cross2) ...
+Setting up libgcc-s1-mipsel-cross (12.2.0-14cross5) ...
+Setting up libgcc-12-dev-mipsel-cross (12.2.0-14cross5) ...
+Setting up binutils-mipsel-linux-gnu (2.40-2cross2) ...
+Setting up cpp-12-mipsel-linux-gnu (12.2.0-14cross5) ...
+Setting up gcc-12-mipsel-linux-gnu (12.2.0-14cross5) ...
+Setting up cpp-mipsel-linux-gnu (4:12.2.0-4) ...
+Setting up gcc-mipsel-linux-gnu (4:12.2.0-4) ...
+Processing triggers for libc-bin (2.36-9+deb12u10) ...
+root@a200754f-2710-4c5a-b3f9-9fc324b26f88:/app# apt-get update > /tmp/apt.log 2>&1 && apt-get install -y gcc-mipsel-linux-gnu >> /tmp/apt.log 2>&1 &
+[2] 1521
+root@a200754f-2710-4c5a-b3f9-9fc324b26f88:/app# sed -n '770,900p' /app/vm.js
+  // Store the address of the current instruction in case we need it
+  this.epc = this.pc - 4;
+
+  // Get syscall number from $v0 (register 2)
+  const syscallNum = this.registers[2];
+
+  // Ensure Node.js fs and process modules are available
+  // This assumes the code is running in a Node.js environment
+  const fs = require('fs');
+  const process = require('process');
+
+  // Initialize file descriptors tracking if not already done
+  if (syscallNum === 0) {  // SYS_read
+    // Get arguments from registers
+    const fd = this.fileDescriptors[this.registers[4]];            // File descriptor
+    const bufferAddr = this.registers[5];    // Buffer address in MIPS memory
+    const count = this.registers[6];         // Number of bytes to read
+
+    try {
+      // Check if we're reading from stdin
+      if (fd === 0) {
+        // Reading from stdin is blocking in a real implementation
+        // This is a simplification - in a real VM you'd need to handle this asynchronously
+        console.log("Reading from stdin not fully implemented in this example");
+        const testInput = "Test input\n";
+        const bytesRead = Math.min(testInput.length, count);
+
+        for (let i = 0; i < bytesRead; i++) {
+          this.writeMemoryByte(bufferAddr + i, testInput.charCodeAt(i));
+        }
+
+        this.registers[2] = bytesRead;
+      } else {
+          // For regular files, read from our cached file data
+          //console.log(this.fileCache, fd)
+        if (!this.fileCache[fd]) {
+          this.registers[2] = -1;  // Error: file not in cache
+          return;
+        }
+
+        const fileInfo = this.fileCache[fd];
+        const fileData = fileInfo.data;
+        const position = fileInfo.position;
+
+        // Calculate how many bytes we can actually read
+        const bytesAvailable = fileData.length - position;
+        const bytesRead = Math.min(count, bytesAvailable);
+
+        // Copy data from file cache to MIPS memory
+        for (let i = 0; i < bytesRead; i++) {
+          this.writeMemoryByte(bufferAddr + i, fileData[position + i]);
+        }
+
+        // Update file position
+        fileInfo.position += bytesRead;
+
+        // Return number of bytes read
+        this.registers[2] = bytesRead;
+      }
+    } catch (error) {
+      console.error(`SYS_read error: ${error.message}`);
+      this.registers[2] = -1;  // Error code
+    }
+
+  } else if (syscallNum === 1) {  // SYS_write
+    // Get arguments from registers
+    const fd = this.fileDescriptors[this.registers[4]];           // File descriptor
+    const bufferAddr = this.registers[5];   // Buffer address in MIPS memory
+    const count = this.registers[6];        // Number of bytes to write
+
+    try {
+      // Create a buffer to hold the data to write
+      const buffer = Buffer.alloc(count);
+
+      // Read data from MIPS VM memory into the buffer
+      for (let i = 0; i < count; i++) {
+        buffer[i] = this.readMemoryByte(bufferAddr + i);
+      }
+
+      // For files opened for writing, we'll buffer the data and write on close
+      if (this.fileCache[fd] && this.fileCache[fd].mode.includes('w')) {
+        const fileInfo = this.fileCache[fd];
+
+        // If the file was opened in append mode, move position to end
+        if (fileInfo.mode.includes('a')) {
+          fileInfo.position = fileInfo.data.length;
+        }
+
+        // Ensure the data buffer is large enough
+        const newSize = Math.max(fileInfo.position + count, fileInfo.data.length);
+        if (newSize > fileInfo.data.length) {
+          const newData = Buffer.alloc(newSize);
+          fileInfo.data.copy(newData, 0, 0, fileInfo.data.length);
+          fileInfo.data = newData;
+        }
+
+        // Copy the new data into the buffer at the current position
+        buffer.copy(fileInfo.data, fileInfo.position, 0, count);
+        fileInfo.position += count;
+        fileInfo.modified = true;
+
+        this.registers[2] = count;  // Return bytes written
+      } else {
+        // For stdout, stderr, or other uncached files, use direct write
+        const bytesWritten = fs.writeSync(fd, buffer, 0, count, null);
+        this.registers[2] = bytesWritten;
+      }
+    } catch (error) {
+      console.error(`SYS_write error: ${error.message}`);
+      this.registers[2] = -1;  // Error code
+    }
+
+  } else if (syscallNum === 2) {  // SYS_open
+      console.log("Open!");
+    // Get arguments from registers
+    const pathnameAddr = this.registers[4];   // Pathname address in MIPS memory
+    const flags = this.registers[5];          // Open flags
+    const mode = this.registers[6];           // File permissions mode
+
+    // Read the null-terminated pathname string from MIPS memory
+    let pathname = "";
+    let i = 0;
+    let byte;
+    while ((byte = this.readMemoryByte(pathnameAddr + i)) !== 0) {
+      pathname += String.fromCharCode(byte);
+      i++;
+      if (i > 10240) break;  // Safety limit
+    }
+
+    try {
+      // Define constants for the flags (Linux/MIPS values)
+[2]-  Exit 100                apt-get update > /tmp/apt.log 2>&1 && apt-get install -y gcc-mipsel-linux-gnu >> /tmp/apt.log 2>&1
+root@a200754f-2710-4c5a-b3f9-9fc324b26f88:/app#

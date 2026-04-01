@@ -1,0 +1,116 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# cat > /tmp/ref_gpt2_v2.py << 'PYEOF'
+> import numpy as np
+>
+> V=50257; E=768; L=12; C=1024; H=12; D=E//H
+>
+> w = np.fromfile('gpt2-124M.ckpt', dtype=np.float32)
+>
+> def layernorm(x, g, b):
+>     mean = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return g * (x - mean) / np.sqrt(var + 1e-5) + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x, axis=-1):
+>     e = np.exp(x - x.max(axis=axis, keepdims=True))
+>     return e / e.sum(axis=axis, keepdims=True)
+>
+> # Try multiple layouts
+> layouts = {
+>     'per_layer_v1': [
+>         ('wte', (V,E)), ('wpe', (C,E)),
+>         *[item for l in range(L) for item in [
+>             (f'ln1w_{l}', (E,)), (f'ln1b_{l}', (E,)),
+>             (f'qkvw_{l}', (E,3*E)), (f'qkvb_{l}', (3*E,)),
+>             (f'attpw_{l}', (E,E)), (f'attpb_{l}', (E,)),
+>             (f'ln2w_{l}', (E,)), (f'ln2b_{l}', (E,)),
+>             (f'fcw_{l}', (E,4*E)), (f'fcb_{l}', (4*E,)),
+>             (f'fcpw_{l}', (4*E,E)), (f'fcpb_{l}', (E,)),
+>         ]],
+>         ('lnfw', (E,)), ('lnfb', (E,)),
+>     ],
+>     'alpha_per_layer': [
+>         *[item for l in range(L) for item in [
+>             (f'qkvb_{l}', (3*E,)), (f'qkvw_{l}', (E,3*E)),
+>             (f'attpb_{l}', (E,)), (f'attpw_{l}', (E,E)),
+>             (f'ln1b_{l}', (E,)), (f'ln1w_{l}', (E,)),
+>             (f'ln2b_{l}', (E,)), (f'ln2w_{l}', (E,)),
+>             (f'fcb_{l}', (4*E,)), (f'fcw_{l}', (E,4*E)),
+>             (f'fcpb_{l}', (E,)), (f'fcpw_{l}', (4*E,E)),
+>         ]],
+>         ('lnfb', (E,)), ('lnfw', (E,)),
+>         ('wpe', (C,E)), ('wte', (V,E)),
+>     ],
+> }
+>
+> for layout_name, layout in layouts.items():
+>     print(f'\n=== Testing layout: {layout_name} ===')
+>     off = 0
+>     params = {}
+>     for name, shape in layout:
+>         n = 1
+>         for s in shape: n *= s
+>         params[name] = w[off:off+n].reshape(shape)
+>         off += n
+>     assert off == len(w), f'Layout {layout_name}: off={off} != {len(w)}'
+>
+>     # Check ln1w stats
+>     ln1w0 = params.get('ln1w_0', params.get('ln1w', None))
+>     if ln1w0 is not None:
+>         print(f'  ln1w_0: mean={ln1w0.mean():.4f} std={ln1w0.std():.4f}')
+>
+>     # Forward pass
+>     wte = params['wte']
+>     wpe = params['wpe']
+>
+>     T = 1
+>     tokens = [464]
+>     x = wte[tokens] + wpe[:T]
+>
+>     for l in range(L):
+>         ln1w_l = params[f'ln1w_{l}']
+>         ln1b_l = params[f'ln1b_{l}']
+>         h = layernorm(x, ln1w_l, ln1b_l)
+>
+>         qkvw_l = params[f'qkvw_{l}']
+>         qkvb_l = params[f'qkvb_{l}']
+>         qkv = h @ qkvw_l + qkvb_l
+>         q, k, v = np.split(qkv, 3, axis=-1)
+>
+>         # Single token: attention is trivial
+>         out = v  # attention weight = 1.0
+>
+>         attpw_l = params[f'attpw_{l}']
+>         attpb_l = params[f'attpb_{l}']
+>         out = out @ attpw_l + attpb_l
+>         x = x + out
+>
+>         ln2w_l = params[f'ln2w_{l}']
+>         ln2b_l = params[f'ln2b_{l}']
+>         h = layernorm(x, ln2w_l, ln2b_l)
+>
+>         fcw_l = params[f'fcw_{l}']
+>         fcb_l = params[f'fcb_{l}']
+>         fc = h @ fcw_l + fcb_l
+>         fc = gelu(fc)
+>
+>         fcpw_l = params[f'fcpw_{l}']
+>         fcpb_l = params[f'fcpb_{l}']
+>         proj = fc @ fcpw_l + fcpb_l
+>         x = x + proj
+>
+>     lnfw = params['lnfw']
+>     lnfb = params['lnfb']
+>     x = layernorm(x, lnfw, lnfb)
+>     logits = (x @ wte.T)[0]
+>
+>     top5 = np.argsort(logits)[-5:][::-1]
+>     print(f'  Top 5: {top5}')
+>     print(f'  Logits: {logits[top5]}')
+> PYEOF
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# python3 /tmp/ref_gpt2_v2.py
+

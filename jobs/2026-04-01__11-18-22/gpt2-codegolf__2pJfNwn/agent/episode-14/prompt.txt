@@ -1,0 +1,148 @@
+New Terminal Output:
+
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# cat > /app/test_gpt2.py << 'PYEOF'
+> import struct, mmap, array, sys, math
+>
+> V=50257; E=768; L=12; C=1024; H=12; HE=E//H
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> w = array.array('f')
+> w.frombytes(f.read())
+> f.close()
+>
+> # Parameter offsets (grouped layout)
+> off = 0
+> def take(n):
+>     global off
+>     r = off; off += n; return r
+>
+> WTE=take(V*E); WPE=take(C*E)
+> LN1W=take(L*E); LN1B=take(L*E)
+> QKVW=take(L*E*3*E); QKVB=take(L*3*E)
+> ATTPW=take(L*E*E); ATTPB=take(L*E)
+> LN2W=take(L*E); LN2B=take(L*E)
+> FCW=take(L*E*4*E); FCB=take(L*4*E)
+> FCPW=take(L*4*E*E); FCPB=take(L*E)
+> LNFW=take(E); LNFB=take(E)
+> assert off == len(w)
+>
+> def layernorm(x, woff, boff):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((v-mean)**2 for v in x)/n
+>     s = 1.0/math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)*s*w[woff+i]+w[boff+i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(math.sqrt(2.0/math.pi)*(x+0.044715*x*x*x)))
+>
+> def matmul(x, woff, boff, nin, nout):
+>     out = [0.0]*nout
+>     for j in range(nout):
+>         s = w[boff+j] if boff >= 0 else 0.0
+>         for i in range(nin):
+>             s += x[i] * w[woff + i*nout + j]
+>         out[j] = s
+>     return out
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(v-m) for v in x]
+>     s = sum(e)
+>     return [v/s for v in e]
+>
+> def forward(tokens):
+>     T = len(tokens)
+>     # Build input: wte + wpe
+>     x = [[w[WTE + tokens[t]*E + i] + w[WPE + t*E + i] for i in range(E)] for t in range(T)]
+>
+>     for l in range(L):
+>         # For each position
+>         for t in range(T):
+>             # Layer norm 1
+>             h = layernorm(x[t], LN1W + l*E, LN1B + l*E)
+>
+>             # QKV projection
+>             qkv = matmul(h, QKVW + l*E*3*E, QKVB + l*3*E, E, 3*E)
+>             q = qkv[:E]
+>             k = qkv[E:2*E]
+>             v_vec = qkv[2*E:3*E]
+>
+>             # Multi-head attention
+>             attn_out = [0.0]*E
+>             for head in range(H):
+>                 ho = head*HE
+>                 # Compute attention scores for this position against all previous
+>                 scores = []
+>                 for t2 in range(t+1):
+>                     # We need k,v from position t2 - but we computed them only for t
+>                     # This approach is wrong - we need to cache k,v for all positions
+>                     pass
+>             # This approach won't work efficiently. Let me restructure.
+>     pass
+>
+> # Actually let me restructure to process all positions properly
+> def forward2(tokens):
+>     T = len(tokens)
+>     x = [[w[WTE + tokens[t]*E + i] + w[WPE + t*E + i] for i in range(E)] for t in range(T)]
+>
+>     for l in range(L):
+>         # Layer norm 1 for all positions
+>         ln1 = [layernorm(x[t], LN1W + l*E, LN1B + l*E) for t in range(T)]
+>
+>         # QKV for all positions
+>         qkv = [matmul(ln1[t], QKVW + l*E*3*E, QKVB + l*3*E, E, 3*E) for t in range(T)]
+>
+>         # Attention
+>         attn_out = [[0.0]*E for _ in range(T)]
+>         for head in range(H):
+>             ho = head*HE
+>             for t in range(T):
+>                 # Compute attention scores
+>                 scores = []
+>                 for t2 in range(t+1):
+>                     s = sum(qkv[t][ho+i]*qkv[t2][E+ho+i] for i in range(HE)) / math.sqrt(HE)
+>                     scores.append(s)
+>                 probs = softmax(scores)
+>                 for i in range(HE):
+>                     for t2 in range(t+1):
+>                         attn_out[t][ho+i] += probs[t2] * qkv[t2][2*E+ho+i]
+>
+>         # Attention projection
+>         for t in range(T):
+>             proj = matmul(attn_out[t], ATTPW + l*E*E, ATTPB + l*E, E, E)
+>             x[t] = [x[t][i] + proj[i] for i in range(E)]  # residual
+>
+>         # Layer norm 2
+>         ln2 = [layernorm(x[t], LN2W + l*E, LN2B + l*E) for t in range(T)]
+>
+>         # MLP: fc -> gelu -> proj
+>         for t in range(T):
+>             h = matmul(ln2[t], FCW + l*E*4*E, FCB + l*4*E, E, 4*E)
+>             h = [gelu(v) for v in h]
+>             h = matmul(h, FCPW + l*4*E*E, FCPB + l*E, 4*E, E)
+>             x[t] = [x[t][i] + h[i] for i in range(E)]  # residual
+>
+>     # Final layer norm
+>     h = layernorm(x[T-1], LNFW, LNFB)
+>
+>     # Logits: multiply by wte transposed (weight tying)
+>     logits = [0.0]*V
+>     for j in range(V):
+>         s = 0.0
+>         for i in range(E):
+>             s += h[i] * w[WTE + j*E + i]
+>         logits[j] = s
+>
+>     return logits
+>
+> # Test with a simple input - just token 0
+> print("Testing with single token [0]...")
+> logits = forward2([0])
+> top5 = sorted(range(V), key=lambda i: -logits[i])[:5]
+> print(f"Top 5 tokens: {top5}")
+> print(f"Top 5 logits: {[logits[i] for i in top5]}")
+> PYEOF
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app# echo 'Python test file written'
+Python test file written
+root@85a6064e-1284-46a7-bc02-5574aa89edb5:/app#

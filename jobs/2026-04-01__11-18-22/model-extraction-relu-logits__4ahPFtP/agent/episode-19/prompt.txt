@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def grads_same(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def binary_search_switch(xa, xb, ga, gb, depth=20):
+>     """Binary search to isolate a single neuron switch."""
+>     for _ in range(depth):
+>         xm = (xa + xb) / 2.0
+>         gm = compute_gradient(xm)
+>         if grads_same(gm, ga):
+>             xa, ga = xm, gm
+>         else:
+>             xb, gb = xm, gm
+>     return gb - ga
+>
+> def is_parallel(d1, d2, tol=0.995):
+>     """Check if two vectors are parallel."""
+>     n1, n2 = np.linalg.norm(d1), np.linalg.norm(d2)
+>     if n1 < 1e-10 or n2 < 1e-10:
+>         return False
+>     return abs(np.dot(d1/n1, d2/n2)) > tol
+>
+> def add_if_new(diff, found_dirs, found_rows, tol=0.995):
+>     """Add direction if it's new."""
+>     norm = np.linalg.norm(diff)
+>     if norm < 1e-7:
+>         return False
+>     d = diff / norm
+>     for fd in found_dirs:
+>         if abs(np.dot(d, fd)) > tol:
+>             return False
+>     found_dirs.append(d)
+>     found_rows.append(diff.copy())
+>     return True
+>
+> np.random.seed(42)
+> found_dirs = []
+> found_rows = []
+>
+> print("Extracting A1 rows via line walking + binary search...")
+>
+> # Strategy: walk along random lines, find where gradient changes,
+> # binary search to isolate single neuron switches
+> attempt = 0
+> while len(found_dirs) < 20 and attempt < 300:
+>     attempt += 1
+>
+>     # Random line
+>     x0 = np.random.randn(10) * 5.0
+>     d = np.random.randn(10)
+>     d = d / np.linalg.norm(d)
+>
+>     # Walk along the line with coarse steps first
+>     # Pre-activations are A1[j,:] @ (x0 + t*d) + b1[j]
+>     # Rate of change: A1[j,:] @ d ~ 0.1 * ||d|| = 0.1
+>     # So neuron j switches at t = -(A1[j,:] @ x0 + b1[j]) / (A1[j,:] @ d)
+>     # Spacing of 0.5 should usually have at most 1 switch
+>
+>     t_start, t_end = -8, 8
+>     step = 0.3  # fine enough for ~0.1 rate of change
+>
+>     t = t_start
+>     prev_x = x0 + t * d
+>     prev_g = compute_gradient(prev_x)
+>
+>     while t < t_end:
+>         t += step
+>         curr_x = x0 + t * d
+>         curr_g = compute_gradient(curr_x)
+>
+>         if not grads_same(prev_g, curr_g):
+>             # Found a gradient change - binary search to isolate
+>             diff = binary_search_switch(prev_x, curr_x, prev_g, curr_g, depth=20)
+>
+>             if add_if_new(diff, found_dirs, found_rows):
+>                 print(f"  Found row {len(found_dirs)}/20 (attempt {attempt}), norm={np.linalg.norm(diff):.6f}")
+>                 if len(found_dirs) >= 20:
+>                     break
+>
+>         prev_x = curr_x
+>         prev_g = curr_g
+>
+> print(f"\nTotal found: {len(found_dirs)}")
+>
+> # Build A1
+> A1_stolen = np.array(found_rows[:20])
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as true_A1
+> print("\nVerification:")
+> matched = set()
+> for i in range(min(20, len(found_rows))):
+>     ri = found_rows[i] / np.linalg.norm(found_rows[i])
+>     best_cos, best_j = 0, -1
+>     for j in range(20):
+>         td = true_A1[j] / np.linalg.norm(true_A1[j])
+>         c = abs(np.dot(ri, td))
+>         if c > best_cos:
+>             best_cos, best_j = c, j
+>     matched.add(best_j)
+>     print(f"  Row {i} -> true row {best_j}, |cos|={best_cos:.8f}")
+> print(f"\nMatched {len(matched)} unique true rows out of 20")
+> ENDOFSCRIPT
+root@060e7b5f-948b-479b-a54e-5dde0b76d29a:/app#
