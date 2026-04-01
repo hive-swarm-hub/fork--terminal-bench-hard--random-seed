@@ -1,0 +1,99 @@
+New Terminal Output:
+
+}root@modal:/app# cat > /tmp/final2.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Parse data
+> x_data, y_data = [], []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line: continue
+>         parts = line.split()
+>         x_data.append(float(parts[0].replace(',', '.')))
+>         y_data.append(float(parts[1].replace(',', '.')))
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # The peak at x~16245 is clearly the 2D peak (Raman shift ~2894)
+> # The peak at x~19139 is the laser line
+> # Let's fit the 2D peak in absolute wavenumber space
+> print("=== 2D peak fit (absolute wavenumber) ===")
+> mask = (x_data >= 15400) & (x_data <= 17100)
+> rx = x_data[mask]
+> ry = y_data[mask]
+> popt_2d, _ = curve_fit(lorentzian, rx, ry, p0=[16245, 150, 2000, 16300], maxfev=50000)
+> rmse = np.sqrt(np.mean((ry - lorentzian(rx, *popt_2d))**2))
+> print(f"x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amp={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}, RMSE={rmse:.2f}")
+>
+> # For the G peak: it should be at x ~= 19139 - 1580 = 17559
+> # The data has ~80 cm-1 spacing there. Let's see if we can fit it
+> # using a wider region with Lorentzian + polynomial background
+>
+> # Actually, let me try fitting BOTH peaks simultaneously in the region
+> # between them, using two Lorentzians + background
+> def two_lorentzians_bg(x, x0_g, gamma_g, amp_g, x0_2d, gamma_2d, amp_2d, a, b, c):
+>     lor_g = amp_g * gamma_g**2 / ((x - x0_g)**2 + gamma_g**2)
+>     lor_2d = amp_2d * gamma_2d**2 / ((x - x0_2d)**2 + gamma_2d**2)
+>     bg = a * x**2 + b * x + c
+>     return lor_g + lor_2d + bg
+>
+> print("\n=== Two-peak simultaneous fit ===")
+> mask = (x_data >= 15000) & (x_data <= 18500)
+> rx = x_data[mask]
+> ry = y_data[mask]
+> print(f"Points in region: {len(rx)}")
+>
+> try:
+>     p0 = [17559, 50, 500, 16245, 150, 2000, 1e-6, 0.1, 1000]
+>     bounds_lo = [17000, 5, 0, 15800, 50, 100, -1e-3, -100, -1e6]
+>     bounds_hi = [18200, 500, 50000, 16800, 500, 50000, 1e-3, 100, 1e6]
+>     popt, _ = curve_fit(two_lorentzians_bg, rx, ry, p0=p0,
+>                         bounds=(bounds_lo, bounds_hi), maxfev=100000)
+>     rmse = np.sqrt(np.mean((ry - two_lorentzians_bg(rx, *popt))**2))
+>     print(f"G:  x0={popt[0]:.4f}, gamma={popt[1]:.4f}, amp={popt[2]:.4f}")
+>     print(f"2D: x0={popt[3]:.4f}, gamma={popt[4]:.4f}, amp={popt[5]:.4f}")
+>     print(f"BG: a={popt[6]:.8f}, b={popt[7]:.4f}, c={popt[8]:.2f}")
+>     print(f"RMSE={rmse:.2f}")
+>
+>     # Compare with just one Lorentzian + background
+>     def one_lor_bg(x, x0, gamma, amp, a, b, c):
+>         return amp * gamma**2 / ((x - x0)**2 + gamma**2) + a * x**2 + b * x + c
+>
+>     p0_1 = [16245, 150, 2000, 1e-6, 0.1, 1000]
+>     popt1, _ = curve_fit(one_lor_bg, rx, ry, p0=p0_1, maxfev=100000)
+>     rmse1 = np.sqrt(np.mean((ry - one_lor_bg(rx, *popt1))**2))
+>     print(f"\nOne-peak RMSE: {rmse1:.2f}")
+>     print(f"Two-peak RMSE: {rmse:.2f}")
+>     print(f"Improvement: {rmse1 - rmse:.2f}")
+>
+> except Exception as e:
+>     print(f"Failed: {e}")
+>     import traceback
+>     traceback.print_exc()
+>
+> PYEOF
+root@modal:/app# python3 /tmp/final2.py
+=== 2D peak fit (absolute wavenumber) ===
+x0=16211.6643, gamma=157.0971, amp=2042.9964, offset=16264.3960, RMSE=349.83
+
+=== Two-peak simultaneous fit ===
+Points in region: 49
+G:  x0=17591.3041, gamma=49.2162, amp=2.5000
+2D: x0=16192.5574, gamma=127.4133, amp=123.4491
+BG: a=0.00002109, b=0.7365, c=781.55
+RMSE=2855.74
+
+One-peak RMSE: 413.34
+Two-peak RMSE: 2855.74
+Improvement: -2442.39
+root@modal:/app#

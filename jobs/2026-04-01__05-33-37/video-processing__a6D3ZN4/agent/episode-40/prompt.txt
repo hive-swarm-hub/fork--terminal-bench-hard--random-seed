@@ -1,0 +1,154 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>
+>     # Read all frames
+>     frames = []
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
+>     cap.release()
+>
+>     n_frames = len(frames)
+>     bg = frames[0]
+>
+>     # Step 1: Compute consecutive frame differences and track motion
+>     # Use bot95 (95th percentile of y-coordinates of changed pixels) as the feet indicator
+>     bot95_values = []
+>     pixel_counts = []
+>     cx_values = []
+>
+>     for i in range(n_frames):
+>         if i == 0:
+>             bot95_values.append(0)
+>             pixel_counts.append(0)
+>             cx_values.append(0)
+>             continue
+>
+>         diff = np.abs(frames[i] - frames[i-1])
+>         mask = (diff > 20).astype(np.uint8) * 255
+>         kernel = np.ones((3,3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>
+>         total = np.sum(mask > 0)
+>         pixel_counts.append(total)
+>
+>         if total > 200:
+>             ys, xs = np.where(mask > 0)
+>             bot95 = int(np.percentile(ys, 95))
+>             cx = float(np.mean(xs))
+>             bot95_values.append(bot95)
+>             cx_values.append(cx)
+>         else:
+>             bot95_values.append(0)
+>             cx_values.append(0)
+>
+>     # Step 2: Identify the active period (athlete in frame)
+>     # Active frames are those with significant motion (pixel_count > threshold)
+>     motion_threshold = 5000
+>     active_frames = [i for i in range(n_frames) if pixel_counts[i] > motion_threshold]
+>
+>     if not active_frames:
+>         # Lower threshold if needed
+>         motion_threshold = 2000
+>         active_frames = [i for i in range(n_frames) if pixel_counts[i] > motion_threshold]
+>
+>     if not active_frames:
+>         motion_threshold = 500
+>         active_frames = [i for i in range(n_frames) if pixel_counts[i] > motion_threshold]
+>
+>     # Find the main continuous active period
+>     # Group consecutive active frames
+>     groups = []
+>     current_group = [active_frames[0]]
+>     for i in range(1, len(active_frames)):
+>         if active_frames[i] - active_frames[i-1] <= 3:  # Allow small gaps
+>             current_group.append(active_frames[i])
+>         else:
+>             groups.append(current_group)
+>             current_group = [active_frames[i]]
+>     groups.append(current_group)
+>
+>     # The main group is the longest one
+>     main_group = max(groups, key=len)
+>     start_frame = main_group[0]
+>     end_frame = main_group[-1]
+>
+>     # Step 3: Get bot95 values for the active period
+>     active_bot95 = []
+>     for i in range(start_frame, end_frame + 1):
+>         if bot95_values[i] > 0:
+>             active_bot95.append((i, bot95_values[i]))
+>
+>     if not active_bot95:
+>         raise ValueError("No motion detected in active period")
+>
+>     # Step 4: Determine ground level
+>     # Ground level is the maximum bot95 during running (before and after jump)
+>     all_bot95 = [b for _, b in active_bot95]
+>     ground_level = np.percentile(all_bot95, 85)  # 85th percentile as ground level
+>
+>     # Step 5: Find the jump
+>     # The jump is characterized by bot95 dropping significantly below ground level
+>     # Find the minimum bot95 (peak of jump)
+>     min_bot95_idx = np.argmin([b for _, b in active_bot95])
+>     min_bot95_frame = active_bot95[min_bot95_idx][0]
+>     min_bot95_val = active_bot95[min_bot95_idx][1]
+>
+>     # Step 6: Find takeoff - scan backwards from peak to find where bot95 was at ground level
+>     # Takeoff is the last frame before the jump where bot95 is near ground level
+>     jump_threshold = ground_level - (ground_level - min_bot95_val) * 0.3  # 30% into the drop
+>
+>     takeoff_frame = min_bot95_frame
+>     for i in range(min_bot95_idx - 1, -1, -1):
+>         frame_num, bot95 = active_bot95[i]
+>         if bot95 >= jump_threshold:
+>             takeoff_frame = frame_num
+>             break
+>
+>     # Step 7: Find landing - scan forwards from peak to find where bot95 returns to ground level
+>     land_frame = min_bot95_frame
+>     for i in range(min_bot95_idx + 1, len(active_bot95)):
+>         frame_num, bot95 = active_bot95[i]
+>         if bot95 >= jump_threshold:
+>             land_frame = frame_num
+>             break
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff, landing = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff,
+>         'jump_land_frame_number': landing
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff}")
+>     print(f"Landing frame: {landing}")
+>     print(f"Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

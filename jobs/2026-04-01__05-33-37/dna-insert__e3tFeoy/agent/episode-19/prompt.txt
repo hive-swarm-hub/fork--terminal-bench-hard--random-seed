@@ -1,0 +1,114 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> with open('sequences.fasta') as f:
+>     content = f.read()
+>
+> seqs = {}
+> name = None
+> for line in content.strip().split('\n'):
+>     if line.startswith('>'):
+>         name = line[1:].strip()
+>         seqs[name] = ''
+>     else:
+>         seqs[name] += line.strip()
+>
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> def rev_comp(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Insertion at position 215
+> insert_pos = 215
+> insertion = 'tagattagaagaagaattaagaagaagattaacagaaag'
+>
+> # Verify
+> assert input_seq[:insert_pos] + insertion + input_seq[insert_pos:] == output_seq
+>
+> # Find best pair with both annealing ≤ 36 bases (oligotm reliable range)
+> best_pair = None
+> best_diff = float('inf')
+>
+> for fwd_len in range(15, 37):  # max 36
+>     fwd_anneal = input_seq[insert_pos:insert_pos+fwd_len]
+>     try:
+>         fwd_tm = get_tm(fwd_anneal)
+>     except:
+>         continue
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_len in range(15, 37):  # max 36
+>         rev_anneal_region = input_seq[insert_pos-rev_len:insert_pos]
+>         rev_primer_seq = rev_comp(rev_anneal_region)
+>         try:
+>             rev_tm = get_tm(rev_primer_seq)
+>         except:
+>             continue
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         diff = abs(fwd_tm - rev_tm)
+>         if diff <= 5 and diff < best_diff:
+>             best_diff = diff
+>             best_pair = (fwd_len, rev_len, fwd_tm, rev_tm)
+>
+> if best_pair:
+>     fwd_len, rev_len, fwd_tm, rev_tm = best_pair
+>     fwd_anneal = input_seq[insert_pos:insert_pos+fwd_len]
+>     rev_primer = rev_comp(input_seq[insert_pos-rev_len:insert_pos])
+>     fwd_primer = insertion + fwd_anneal
+>
+>     print(f'Forward primer ({len(fwd_primer)} nt): {fwd_primer}')
+>     print(f'  5\' tail ({len(insertion)} nt): {insertion}')
+>     print(f'  Annealing ({fwd_len} nt): {fwd_anneal}')
+>     print(f'  Annealing Tm: {fwd_tm:.2f}')
+>     print(f'Reverse primer ({len(rev_primer)} nt): {rev_primer}')
+>     print(f'  Annealing ({rev_len} nt): {rev_primer}')
+>     print(f'  Annealing Tm: {rev_tm:.2f}')
+>     print(f'Tm difference: {abs(fwd_tm - rev_tm):.2f}')
+>
+>     # Verify Tms
+>     print(f'\nVerify fwd Tm: {get_tm(fwd_anneal):.6f}')
+>     print(f'Verify rev Tm: {get_tm(rev_primer):.6f}')
+>
+>     # Write primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f'>forward_primer\n{fwd_primer}\n')
+>         f.write(f'>reverse_primer\n{rev_primer}\n')
+>     print('\nWritten primers.fasta')
+>
+>     # Final PCR product verification
+>     pcr_linear = insertion + input_seq[insert_pos:] + input_seq[:insert_pos]
+>     pcr_circular = pcr_linear + pcr_linear
+>     assert output_seq in pcr_circular, 'PCR product verification failed!'
+>     print('PCR product verification: PASSED')
+> else:
+>     print('No valid pair found with both ≤36 bases!')
+> PYEOF
+Forward primer (55 nt): tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+  5' tail (39 nt): tagattagaagaagaattaagaagaagattaacagaaag
+  Annealing (16 nt): caagggcgaggagctg
+  Annealing Tm: 61.24
+Reverse primer (34 nt): ctcatatgtatatctccttcttaaagttaaacaa
+  Annealing (34 nt): ctcatatgtatatctccttcttaaagttaaacaa
+  Annealing Tm: 61.31
+Tm difference: 0.07
+
+Verify fwd Tm: 61.236660
+Verify rev Tm: 61.310775
+
+Written primers.fasta
+PCR product verification: PASSED
+root@modal:/app#

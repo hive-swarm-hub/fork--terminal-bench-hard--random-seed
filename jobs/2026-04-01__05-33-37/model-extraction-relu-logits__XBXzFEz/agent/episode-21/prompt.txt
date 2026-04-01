@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def gradients_differ(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) > tol
+>
+> def find_single_boundaries(x0, direction, t_lo, t_hi, g_lo, g_hi, depth=0, max_depth=30):
+>     """Recursively find all single-neuron boundary crossings in [t_lo, t_hi].
+>     Returns list of (g_before, g_after) tuples for single boundary crossings."""
+>     if depth > max_depth:
+>         return [(g_lo, g_hi)]  # give up, return as-is
+>
+>     if not gradients_differ(g_lo, g_hi):
+>         return []  # no boundary in this interval
+>
+>     t_mid = (t_lo + t_hi) / 2
+>     x_mid = x0 + t_mid * direction
+>     g_mid = compute_gradient(x_mid)
+>
+>     left_differs = gradients_differ(g_lo, g_mid)
+>     right_differs = gradients_differ(g_mid, g_hi)
+>
+>     if left_differs and right_differs:
+>         # Multiple boundaries - recurse on both halves
+>         left = find_single_boundaries(x0, direction, t_lo, t_mid, g_lo, g_mid, depth+1, max_depth)
+>         right = find_single_boundaries(x0, direction, t_mid, t_hi, g_mid, g_hi, depth+1, max_depth)
+>         return left + right
+>     elif left_differs:
+>         # Boundary is in left half
+>         return find_single_boundaries(x0, direction, t_lo, t_mid, g_lo, g_mid, depth+1, max_depth)
+>     elif right_differs:
+>         # Boundary is in right half
+>         return find_single_boundaries(x0, direction, t_mid, t_hi, g_mid, g_hi, depth+1, max_depth)
+>     else:
+>         # Neither half differs? Shouldn't happen if parent differs.
+>         # This means the boundary is very close to t_mid
+>         # Return the full interval difference
+>         return [(g_lo, g_hi)]
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     row_candidates = []
+>
+>     n_trials = 100
+>     for trial in range(n_trials):
+>         if trial % 25 == 0:
+>             print(f"Trial {trial}/{n_trials}...", flush=True)
+>
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Coarse scan with moderate step size
+>         n_steps = 60
+>         t_values = np.linspace(-8, 8, n_steps)
+>         grads = []
+>         for t in t_values:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             grads.append(g)
+>
+>         # For each consecutive pair with different gradients, recursively find boundaries
+>         for i in range(len(grads) - 1):
+>             if gradients_differ(grads[i], grads[i+1]):
+>                 boundaries = find_single_boundaries(
+>                     x0, direction, t_values[i], t_values[i+1],
+>                     grads[i], grads[i+1], max_depth=25
+>                 )
+>                 for g_before, g_after in boundaries:
+>                     diff = g_after - g_before
+>                     norm = np.linalg.norm(diff)
+>                     if norm > 1e-8:
+>                         row_candidates.append(diff)
+>
+>     print(f"Collected {len(row_candidates)} candidates", flush=True)
+>
+>     # Normalize and cluster
+>     valid = [(rc, np.linalg.norm(rc)) for rc in row_candidates if np.linalg.norm(rc) > 1e-9]
+>     normalized = np.array([rc/n for rc, n in valid])
+>     valid_candidates = [rc for rc, n in valid]
+>
+>     # Cluster with tight threshold
+>     clusters = []
+>     cluster_dirs = []
+>     cluster_indices = []
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for j, cd in enumerate(cluster_dirs):
+>             cos_sim = abs(np.dot(normalized[i], cd))
+>             if cos_sim > 0.999:
+>                 cluster_indices[j].append(i)
+>                 matched = True
+>                 break
+>         if not matched:
+>             cluster_indices.append([i])
+>             cluster_dirs.append(normalized[i].copy())
+>
+>     # Sort by cluster size
+>     sizes = [len(c) for c in cluster_indices]
+>     sorted_idx = np.argsort(sizes)[::-1]
+>
+>     print(f"Found {len(cluster_indices)} clusters", flush=True)
+>     sorted_sizes = [sizes[i] for i in sorted_idx]
+>     print(f"Top 40 cluster sizes: {sorted_sizes[:40]}", flush=True)
+>
+>     # Determine hidden dimension: find the biggest gap in sorted cluster sizes
+>     # The true neuron clusters should be much larger than noise
+>     n_neurons = 20  # default
+>     for i in range(3, min(len(sorted_sizes)-1, 60)):
+>         if sorted_sizes[i] == 0:
+>             n_neurons = i
+>             break
+>         # Look for size dropping to less than 1/3 of the average of top clusters
+>         avg_top = np.mean(sorted_sizes[:i])
+>         if sorted_sizes[i] < avg_top * 0.25:
+>             n_neurons = i
+>             break
+>
+>     print(f"Estimated hidden dimension: {n_neurons}", flush=True)
+>
+>     # Extract rows from top clusters
+>     A1_rows = []
+>     for k in range(n_neurons):
+>         idx = sorted_idx[k]
+>         cd = cluster_dirs[idx]
+>         avg = np.zeros(10)
+>         count = 0
+>         for ci in cluster_indices[idx]:
+>             rc = valid_candidates[ci]
+>             n = np.linalg.norm(rc)
+>             if n > 1e-9:
+>                 if np.dot(rc/n, cd) > 0:
+>                     avg += rc
+>                 else:
+>                     avg -= rc
+>                 count += 1
+>         if count > 0:
+>             avg /= count
+>         A1_rows.append(avg)
+>
+>     A1_stolen = np.array(A1_rows)
+>     print(f"Stolen A1 shape: {A1_stolen.shape}", flush=True)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+> if __name__ == '__main__':
+>     steal_A1()
+> PYEOF
+root@modal:/app#

@@ -1,0 +1,106 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/find_g.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+>
+> # Parse data
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # The laser line is at ~19139 and is saturated
+> # Let's try to subtract a smooth background to find the G peak
+> # Focus on region 16800-18500 (between 2D peak and laser)
+>
+> mask = (x_data >= 16800) & (x_data <= 18600)
+> rx = x_data[mask]
+> ry = y_data[mask]
+>
+> # Fit a polynomial to the background (excluding potential G peak region)
+> # G peak expected at ~17217 (for 532nm laser, 1580 cm-1 shift)
+> # Exclude 17000-17600 from background fit
+> bg_mask = ((rx < 17000) | (rx > 17600))
+> bg_x = rx[bg_mask]
+> bg_y = ry[bg_mask]
+>
+> # Fit polynomial background
+> for deg in [2, 3, 4]:
+>     coeffs = np.polyfit(bg_x, bg_y, deg)
+>     bg_fit = np.polyval(coeffs, rx)
+>     residual = ry - bg_fit
+>
+>     # Look for peaks in residual
+>     print(f"\nPolynomial degree {deg}:")
+>     for i in range(len(rx)):
+>         if 17000 <= rx[i] <= 17600:
+>             print(f"  x={rx[i]:.2f}, residual={residual[np.where(rx==rx[i])[0][0]]:.2f}")
+>
+> # Try a different approach: fit Lorentzian + linear background
+> def lorentzian_linear(x, x0, gamma, amplitude, a, b):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + a*x + b
+>
+> def lorentzian_quad(x, x0, gamma, amplitude, a, b, c):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + a*x**2 + b*x + c
+>
+> # Try fitting G peak region with Lorentzian + quadratic background
+> print("\n=== Lorentzian + quadratic background fit ===")
+> mask = (x_data >= 16800) & (x_data <= 18200)
+> rx = x_data[mask]
+> ry = y_data[mask]
+>
+> try:
+>     p0 = [17400, 100, 500, 0.0001, 1, 1000]
+>     popt, pcov = curve_fit(lorentzian_quad, rx, ry, p0=p0, maxfev=50000)
+>     print(f"  x0={popt[0]:.2f}, gamma={popt[1]:.2f}, amplitude={popt[2]:.2f}")
+>     print(f"  quad: a={popt[3]:.8f}, b={popt[4]:.4f}, c={popt[5]:.2f}")
+>     residual = np.sqrt(np.mean((ry - lorentzian_quad(rx, *popt))**2))
+>     print(f"  RMSE: {residual:.2f}")
+> except Exception as e:
+>     print(f"  Failed: {e}")
+>
+> # Try with different initial x0 values
+> for x0_try in [17200, 17400, 17559, 17700]:
+>     try:
+>         p0 = [x0_try, 80, 1000, 0.00001, 0.1, 1000]
+>         popt, pcov = curve_fit(lorentzian_quad, rx, ry, p0=p0, maxfev=50000)
+>         pred = lorentzian_quad(rx, *popt)
+>         rmse = np.sqrt(np.mean((ry - pred)**2))
+>         print(f"  x0_init={x0_try}: x0={popt[0]:.2f}, gamma={popt[1]:.2f}, amp={popt[2]:.2f}, RMSE={rmse:.2f}")
+>     except Exception as e:
+>         print(f"  x0_init={x0_try}: Failed: {e}")
+>
+> # Maybe the G peak is visible if we look at the whole spectrum differently
+> # Let's check: is there any bump/shoulder in the spectrum?
+> print("\n=== Looking for bumps via second derivative ===")
+> # Smooth the data with a larger window
+> from scipy.ndimage import uniform_filter1d
+> mask = (x_data >= 16500) & (x_data <= 18500)
+> rx = x_data[mask]
+> ry = y_data[mask]
+> smoothed = uniform_filter1d(ry, size=5)
+> d2 = np.gradient(np.gradient(smoothed, rx), rx)
+> # Find minima in d2 (= peak locations)
+> for i in range(1, len(d2)-1):
+>     if d2[i] < d2[i-1] and d2[i] < d2[i+1] and d2[i] < -0.001:
+>         print(f"  x={rx[i]:.2f}, d2={d2[i]:.6f}, y={ry[i]:.2f}")
+>
+> PYEOF
+root@modal:/app# python3 /app/find_g.py
+

@@ -1,0 +1,184 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYTEST'
+> import subprocess
+> import tempfile
+> import os
+>
+> def test_filter(input_html, description):
+>     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
+>         f.write(input_html)
+>         fname = f.name
+>     subprocess.run(['python3', '/app/filter.py', fname], check=True)
+>     with open(fname, 'r', encoding='utf-8') as f:
+>         result = f.read()
+>     os.unlink(fname)
+>     return result
+>
+> fails = 0
+>
+> def check(condition, msg, result=""):
+>     global fails
+>     if condition:
+>         print(f"  PASS: {msg}")
+>     else:
+>         print(f"  FAIL: {msg} -> {result}")
+>         fails += 1
+>
+> # === PRESERVATION TESTS ===
+> print("=== PRESERVATION TESTS ===")
+>
+> # Test: Plain HTML unchanged
+> html = '<!DOCTYPE html>\n<html>\n<head><title>Test</title></head>\n<body>\n    <h1>Hello</h1>\n    <p class="intro">World</p>\n    <table border="1">\n
+ <tr><th>A</th><th>B</th></tr>\n        <tr><td>1</td><td>2</td></tr>\n    </table>\n    <a href="https://example.com">Link</a>\n    <img src="photo.jpg" alt="A
+ photo">\n</body>\n</html>'
+> result = test_filter(html, "Plain HTML")
+> check(result == html, "Plain HTML preserved exactly", repr(result))
+>
+> # Test: Whitespace preserved
+> html = '  <p>  Hello  </p>  \n  <div>  World  </div>  '
+> result = test_filter(html, "Whitespace")
+> check(result == html, "Whitespace preserved", repr(result))
+>
+> # Test: Empty file
+> result = test_filter('', "Empty")
+> check(result == '', "Empty file unchanged")
+>
+> # Test: Style tags preserved
+> html = '<style>body { background: red; }</style>'
+> result = test_filter(html, "Style tag")
+> check(result == html, "Style tags preserved", result)
+>
+> # Test: Safe style attribute preserved
+> html = '<div style="color: red; font-size: 14px">X</div>'
+> result = test_filter(html, "Safe style")
+> check(result == html, "Safe style attribute preserved", result)
+>
+> # Test: data-* attributes preserved
+> html = '<div data-value="something" class="test">X</div>'
+> result = test_filter(html, "data-* attr")
+> check(result == html, "data-* attributes preserved", result)
+>
+> # Test: data:image URL preserved
+> html = '<img src="data:image/png;base64,iVBOR">'
+> result = test_filter(html, "data:image")
+> check(result == html, "data:image URL preserved", result)
+>
+> # === REMOVAL TESTS ===
+> print("\n=== REMOVAL TESTS ===")
+>
+> # Script tags
+> result = test_filter('<p>A</p><script>alert(1)</script><p>B</p>', "script")
+> check('<script' not in result.lower() and '<p>A</p>' in result and '<p>B</p>' in result, "Script tags removed", result)
+>
+> # Multiline script
+> result = test_filter('<p>A</p>\n<script\ntype="text/javascript"\n>\nalert(1);\n</script\n>\n<p>B</p>', "multiline script")
+> check('<script' not in result.lower() and '</script' not in result.lower(), "Multiline script removed", result)
+>
+> # Event handlers - double quoted
+> result = test_filter('<div class="box" onclick="alert(1)" id="main">X</div>', "onclick dq")
+> check('onclick' not in result.lower() and 'class="box"' in result and 'id="main"' in result, "onclick removed, attrs preserved", result)
+>
+> # Event handlers - single quoted
+> result = test_filter("<div onclick='alert(1)'>X</div>", "onclick sq")
+> check('onclick' not in result.lower(), "onclick single-quoted removed", result)
+>
+> # Event handlers - unquoted
+> result = test_filter('<img src=x onerror=alert(1)>', "onerror uq")
+> check('onerror' not in result.lower(), "onerror unquoted removed", result)
+>
+> # Multiple event handlers
+> result = test_filter('<input type="text" onfocus="x()" onblur="y()" value="hello">', "multi handlers")
+> check('onfocus' not in result.lower() and 'onblur' not in result.lower() and 'value="hello"' in result, "Multiple handlers removed", result)
+>
+> # svg/onload
+> result = test_filter('<svg/onload=alert(1)>', "svg/onload")
+> check('onload' not in result.lower(), "svg/onload removed", result)
+>
+> # javascript: URL
+> result = test_filter('<a href="javascript:alert(1)">X</a>', "js url dq")
+> check('javascript:' not in result.lower(), "javascript: URL removed", result)
+>
+> # javascript: single-quoted
+> result = test_filter("<a href='javascript:alert(1)'>X</a>", "js url sq")
+> check('javascript:' not in result.lower(), "javascript: single-quoted removed", result)
+>
+> # Mixed case javascript:
+> result = test_filter('<a href="JaVaScRiPt:alert(1)">X</a>', "js mixed case")
+> check('javascript:' not in result.lower(), "Mixed case javascript: removed", result)
+>
+> # HTML entity encoded javascript:
+> result = test_filter('<a href="&#106;avascript:alert(1)">X</a>', "js encoded")
+> check('&#106;' not in result, "Entity-encoded javascript: removed", result)
+>
+> # Hex entity encoded
+> result = test_filter('<a href="&#x6A;avascript:alert(1)">X</a>', "js hex encoded")
+> check('&#x6A;' not in result, "Hex-encoded javascript: removed", result)
+>
+> # Tab in javascript:
+> result = test_filter('<a href="java&#9;script:alert(1)">X</a>', "js tab encoded")
+> check('&#9;' not in result or 'href=""' in result, "Tab-encoded javascript: removed", result)
+>
+> # vbscript:
+> result = test_filter('<a href="vbscript:MsgBox(1)">X</a>', "vbscript")
+> check('vbscript:' not in result.lower(), "vbscript: removed", result)
+>
+> # data:text/html URL
+> result = test_filter('<a href="data:text/html,<script>alert(1)</script>">X</a>', "data:text/html")
+> check('data:text' not in result.lower() or 'href=""' in result, "data:text/html removed", result)
+>
+> # form action javascript:
+> result = test_filter('<form action="javascript:alert(1)"><input type="submit"></form>', "form action")
+> check('javascript:' not in result.lower(), "form action javascript: removed", result)
+>
+> # Style expression()
+> result = test_filter('<div style="width: expression(alert(1))">X</div>', "style expression")
+> check('expression' not in result.lower(), "style expression() removed", result)
+>
+> # Style -moz-binding
+> result = test_filter('<div style="-moz-binding: url(http://evil.com/xss.xml)">X</div>', "moz-binding")
+> check('-moz-binding' not in result.lower(), "-moz-binding removed", result)
+>
+> # Style url(javascript:)
+> result = test_filter('<div style="background: url(javascript:alert(1))">X</div>', "style url js")
+> check('javascript:' not in result.lower(), "style url(javascript:) removed", result)
+>
+> # SVG with script
+> result = test_filter('<svg><script>alert(1)</script></svg>', "svg script")
+> check('<script' not in result.lower(), "SVG script removed", result)
+>
+> # iframe srcdoc with script
+> result = test_filter('<iframe srcdoc="<script>alert(1)</script>"></iframe>', "iframe srcdoc")
+> result_decoded = decode_html_entities(result)
+> check('<script' not in result_decoded.lower() or 'srcdoc=""' in result, "iframe srcdoc script removed", result)
+>
+> print(f"\n=== Results: {fails} failures ===")
+> if fails == 0:
+>     print("ALL TESTS PASSED!")
+> else:
+>     print(f"WARNING: {fails} tests failed!")
+> PYTEST
+=== PRESERVATION TESTS ===
+  PASS: Plain HTML preserved exactly
+  PASS: Whitespace preserved
+  PASS: Empty file unchanged
+  PASS: Style tags preserved
+  PASS: Safe style attribute preserved
+  PASS: data-* attributes preserved
+  PASS: data:image URL preserved
+
+=== REMOVAL TESTS ===
+  PASS: Script tags removed
+  PASS: Multiline script removed
+  PASS: onclick removed, attrs preserved
+  PASS: onclick single-quoted removed
+  PASS: onerror unquoted removed
+  PASS: Multiple handlers removed
+  PASS: svg/onload removed
+  PASS: javascript: URL removed
+  PASS: javascript: single-quoted removed
+  PASS: Mixed case javascript: removed
+  PASS: Entity-encoded javascript: removed
+  PASS: Hex-encoded javascript: removed
+  PASS: Tab-encoded javascript: removed
+

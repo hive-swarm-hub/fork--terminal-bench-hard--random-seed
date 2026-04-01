@@ -1,0 +1,168 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def gradients_differ(g1, g2, tol=1e-6):
+>     return np.linalg.norm(g1 - g2) > tol
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     row_candidates = []
+>
+>     n_trials = 200
+>     for trial in range(n_trials):
+>         if trial % 50 == 0:
+>             print(f"Trial {trial}/{n_trials}...", flush=True)
+>
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Coarse scan
+>         n_steps = 40
+>         t_values = np.linspace(-8, 8, n_steps)
+>         grads = []
+>         for t in t_values:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             grads.append(g)
+>
+>         # For each consecutive pair with different gradients, binary search
+>         for i in range(len(grads) - 1):
+>             if gradients_differ(grads[i], grads[i+1]):
+>                 t_lo, t_hi = t_values[i], t_values[i+1]
+>                 g_lo, g_hi = grads[i], grads[i+1]
+>
+>                 for _ in range(20):
+>                     t_mid = (t_lo + t_hi) / 2
+>                     x_mid = x0 + t_mid * direction
+>                     g_mid = compute_gradient(x_mid)
+>
+>                     if gradients_differ(g_mid, g_lo):
+>                         t_hi = t_mid
+>                         g_hi = g_mid
+>                     else:
+>                         t_lo = t_mid
+>                         g_lo = g_mid
+>
+>                 diff = g_hi - g_lo
+>                 norm = np.linalg.norm(diff)
+>                 if norm > 1e-8:
+>                     row_candidates.append(diff)
+>
+>     print(f"Collected {len(row_candidates)} row candidates", flush=True)
+>
+>     # Normalize candidates for clustering
+>     norms_list = [np.linalg.norm(rc) for rc in row_candidates]
+>     valid_mask = [n > 1e-9 for n in norms_list]
+>     valid_candidates = [rc for rc, v in zip(row_candidates, valid_mask) if v]
+>     valid_norms = [n for n, v in zip(norms_list, valid_mask) if v]
+>     normalized = np.array([rc / n for rc, n in zip(valid_candidates, valid_norms)])
+>
+>     # Cluster: group parallel vectors
+>     clusters = []
+>     cluster_dirs = []
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for j, cd in enumerate(cluster_dirs):
+>             cos_sim = abs(np.dot(normalized[i], cd))
+>             if cos_sim > 0.99:
+>                 clusters[j].append(i)
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([i])
+>             cluster_dirs.append(normalized[i])
+>
+>     print(f"Found {len(clusters)} clusters", flush=True)
+>
+>     # Sort clusters by size (descending)
+>     cluster_info = list(zip(clusters, cluster_dirs))
+>     cluster_info.sort(key=lambda x: len(x[0]), reverse=True)
+>
+>     sizes = [len(c) for c, _ in cluster_info]
+>     print(f"Cluster sizes: {sizes}", flush=True)
+>
+>     # Determine hidden dimension by finding the biggest gap in cluster sizes
+>     # The true neuron clusters should be significantly larger than noise clusters
+>     # Look for the largest relative drop in sorted cluster sizes
+>     best_gap_idx = 0
+>     best_gap_ratio = 0
+>     for i in range(1, min(len(sizes), 50)):
+>         if sizes[i] > 0:
+>             ratio = sizes[i-1] / sizes[i]
+>             # We want a big ratio (big drop)
+>             if ratio > best_gap_ratio and i >= 5:  # at least 5 neurons
+>                 best_gap_ratio = ratio
+>                 best_gap_idx = i
+>
+>     # Also try: look for where size drops below half of the median of top sizes
+>     # Use a simpler heuristic: find the elbow
+>     # Actually, let's just look at the largest gap
+>     max_gap = 0
+>     gap_idx = len(sizes)
+>     for i in range(1, min(len(sizes), 50)):
+>         gap = sizes[i-1] - sizes[i]
+>         if gap > max_gap and i >= 5:
+>             max_gap = gap
+>             gap_idx = i
+>
+>     n_neurons = gap_idx
+>     print(f"Estimated hidden dimension: {n_neurons}", flush=True)
+>
+>     # If the gap-based method gives something unreasonable, fall back
+>     if n_neurons < 5 or n_neurons > 100:
+>         # Use ratio-based method
+>         n_neurons = best_gap_idx
+>         print(f"Falling back to ratio-based: {n_neurons}", flush=True)
+>
+>     # Take top n_neurons clusters
+>     selected = cluster_info[:n_neurons]
+>
+>     # For each cluster, compute the average unnormalized difference
+>     A1_rows = []
+>     for cluster, cd in selected:
+>         avg = np.zeros(10)
+>         count = 0
+>         for idx in cluster:
+>             rc = valid_candidates[idx]
+>             n = np.linalg.norm(rc)
+>             if n > 1e-9:
+>                 if np.dot(rc / n, cd) > 0:
+>                     avg += rc
+>                 else:
+>                     avg -= rc
+>                 count += 1
+>         if count > 0:
+>             avg /= count
+>         A1_rows.append(avg)
+>
+>     A1_stolen = np.array(A1_rows)
+>     print(f"Stolen A1 shape: {A1_stolen.shape}", flush=True)
+>     print("Stolen A1:")
+>     print(A1_stolen)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+> if __name__ == '__main__':
+>     steal_A1()
+> PYEOF
+root@modal:/app#

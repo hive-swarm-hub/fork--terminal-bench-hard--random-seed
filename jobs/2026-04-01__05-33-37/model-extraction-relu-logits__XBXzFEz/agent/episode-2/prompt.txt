@@ -1,0 +1,157 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) via finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     # Step 1: Collect many gradients at random points
+>     n_samples = 2000
+>     gradients = []
+>     points = []
+>     for _ in range(n_samples):
+>         x = np.random.randn(10) * 5  # large range to explore different activation patterns
+>         g = compute_gradient(x)
+>         gradients.append(g)
+>         points.append(x)
+>     gradients = np.array(gradients)
+>
+>     # Step 2: Find gradient differences.
+>     # When two nearby points have different activation patterns differing by exactly one neuron,
+>     # their gradient difference is +/- A2[0,j] * A1[j,:]
+>     # We'll collect differences between all pairs of gradients and look for rank-1 differences
+>     # But that's O(n^2). Instead, let's use a smarter approach:
+>     # Walk along random directions and detect gradient changes.
+>
+>     # Actually, let's use a line-search approach:
+>     # Pick a random direction, walk along it, compute gradients, and detect changes.
+>     # Each change corresponds to crossing one ReLU boundary.
+>
+>     row_candidates = []
+>
+>     for trial in range(200):
+>         # Pick random start and direction
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Sample along the line
+>         t_values = np.linspace(-10, 10, 50)
+>         line_grads = []
+>         for t in t_values:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             line_grads.append(g)
+>
+>         # Find gradient changes
+>         for i in range(len(line_grads) - 1):
+>             diff = line_grads[i+1] - line_grads[i]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:  # significant change
+>                 row_candidates.append(diff / norm)  # normalize to unit vector
+>
+>     row_candidates = np.array(row_candidates)
+>     print(f"Collected {len(row_candidates)} row candidates")
+>
+>     # Step 3: Cluster the candidates to find unique rows of A1
+>     # Rows that are parallel (same or opposite direction) correspond to the same neuron
+>     # Use a greedy clustering approach
+>
+>     unique_rows = []
+>     used = np.zeros(len(row_candidates), dtype=bool)
+>
+>     for i in range(len(row_candidates)):
+>         if used[i]:
+>             continue
+>         # Check if this candidate is parallel to any existing unique row
+>         is_new = True
+>         for j, ur in enumerate(unique_rows):
+>             cos_sim = abs(np.dot(row_candidates[i], ur))
+>             if cos_sim > 0.999:  # parallel
+>                 is_new = False
+>                 break
+>         if is_new:
+>             unique_rows.append(row_candidates[i])
+>             # Mark all parallel candidates as used
+>             for k in range(i, len(row_candidates)):
+>                 if not used[k]:
+>                     cos_sim = abs(np.dot(row_candidates[i], row_candidates[k]))
+>                     if cos_sim > 0.999:
+>                         used[k] = True
+>
+>     print(f"Found {len(unique_rows)} unique row directions")
+>
+>     # Step 4: Now we have the directions of A1 rows. We need to recover the scaling.
+>     # The gradient difference when crossing boundary j is A2[0,j] * A1[j,:]
+>     # So the unnormalized differences give us A2[0,j] * A1[j,:]
+>     # We want A1[j,:] up to scaling, so the unnormalized differences are fine
+>     # (they give A1 rows scaled by A2 entries, which counts as "up to scaling")
+>
+>     # Let's re-collect the unnormalized differences and match to unique directions
+>     final_rows = [np.zeros(10) for _ in range(len(unique_rows))]
+>     counts = [0] * len(unique_rows)
+>
+>     # Re-do the line search to get unnormalized differences
+>     for trial in range(200):
+>         np.random.seed(1000 + trial)  # same seeds as before
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         t_values = np.linspace(-10, 10, 50)
+>         line_grads = []
+>         for t in t_values:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             line_grads.append(g)
+>
+>         for i in range(len(line_grads) - 1):
+>             diff = line_grads[i+1] - line_grads[i]
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-8:
+>                 normalized = diff / norm
+>                 # Match to unique row
+>                 for j, ur in enumerate(unique_rows):
+>                     cos_sim = np.dot(normalized, ur)
+>                     if abs(cos_sim) > 0.999:
+>                         # Use consistent sign
+>                         if cos_sim > 0:
+>                             final_rows[j] += diff
+>                         else:
+>                             final_rows[j] -= diff
+>                         counts[j] += 1
+>                         break
+>
+>     # Average the collected differences
+>     A1_stolen = np.zeros((len(unique_rows), 10))
+>     for j in range(len(unique_rows)):
+>         if counts[j] > 0:
+>             A1_stolen[j] = final_rows[j] / counts[j]
+>         else:
+>             A1_stolen[j] = unique_rows[j]  # fallback to unit direction
+>
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>     print("Stolen A1:")
+>     print(A1_stolen)
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+> if __name__ == '__main__':
+>     steal_A1()
+> PYEOF
+root@modal:/app#

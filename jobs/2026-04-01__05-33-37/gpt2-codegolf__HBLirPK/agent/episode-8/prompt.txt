@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/test_gpt2.py << 'PYEOF'
+> import struct, math
+>
+> V=50257; C=768; L=12; H=12; T=1024; HS=C//H
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def G(off, n):
+>     return struct.unpack_from(f'{n}f', data, off*4)
+>
+> # Build offset table - interleaved per-layer
+> off = 0
+> WTE = off; off += V*C
+> WPE = off; off += T*C
+> LY = []
+> for i in range(L):
+>     d = {}
+>     d['ln1g'] = off; off += C
+>     d['ln1b'] = off; off += C
+>     d['qkvw'] = off; off += C*3*C
+>     d['qkvb'] = off; off += 3*C
+>     d['apw'] = off; off += C*C
+>     d['apb'] = off; off += C
+>     d['ln2g'] = off; off += C
+>     d['ln2b'] = off; off += C
+>     d['fcw'] = off; off += C*4*C
+>     d['fcb'] = off; off += 4*C
+>     d['fpw'] = off; off += 4*C*C
+>     d['fpb'] = off; off += C
+>     LY.append(d)
+> LNFG = off; off += C
+> LNFB = off; off += C
+>
+> def layernorm(x, g_off, b_off):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((xi-mean)**2 for xi in x)/n
+>     std = math.sqrt(var + 1e-5)
+>     g = G(g_off, n)
+>     b = G(b_off, n)
+>     return [(g[i]+1.0)*(x[i]-mean)/std + b[i] for i in range(n)]  # +1.0 for gamma
+>
+> def matmul(x, w_off, rows, cols):
+>     # w is rows x cols stored row-major, x has length rows
+>     # output has length cols
+>     w = G(w_off, rows*cols)
+>     out = [0.0]*cols
+>     for j in range(cols):
+>         s = 0.0
+>         for i in range(rows):
+>             s += x[i] * w[i*cols + j]
+>         out[j] = s
+>     return out
+>
+> def add_bias(x, b_off):
+>     b = G(b_off, len(x))
+>     return [x[i]+b[i] for i in range(len(x))]
+>
+> def gelu(x):
+>     return [0.5*xi*(1.0+math.tanh(math.sqrt(2.0/math.pi)*(xi+0.044715*xi**3))) for xi in x]
+>
+> def softmax(x):
+>     mx = max(x)
+>     e = [math.exp(xi-mx) for xi in x]
+>     s = sum(e)
+>     return [ei/s for ei in e]
+>
+> def forward(tokens):
+>     seq_len = len(tokens)
+>     # Get embeddings
+>     wte = G(WTE, V*C)
+>     wpe = G(WPE, T*C)
+>
+>     # x[t] = wte[token[t]] + wpe[t]
+>     x = []
+>     for t in range(seq_len):
+>         row = [wte[tokens[t]*C + i] + wpe[t*C + i] for i in range(C)]
+>         x.append(row)
+>
+>     for l in range(L):
+>         ly = LY[l]
+>         new_x = []
+>         for t in range(seq_len):
+>             # LayerNorm 1
+>             ln1 = layernorm(x[t], ly['ln1g'], ly['ln1b'])
+>
+>             # QKV projection
+>             qkv = matmul(ln1, ly['qkvw'], C, 3*C)
+>             qkv = add_bias(qkv, ly['qkvb'])
+>
+>             # Split into Q, K, V and do attention
+>             attn_out = [0.0]*C
+>             for h in range(H):
+>                 q = qkv[h*HS:(h+1)*HS]
+>                 # Attend to all positions <= t
+>                 scores = []
+>                 for t2 in range(t+1):
+>                     ln1_t2 = layernorm(x[t2], ly['ln1g'], ly['ln1b'])
+>                     qkv_t2 = matmul(ln1_t2, ly['qkvw'], C, 3*C)
+>                     qkv_t2 = add_bias(qkv_t2, ly['qkvb'])
+>                     k = qkv_t2[C + h*HS:C + (h+1)*HS]
+>                     score = sum(q[i]*k[i] for i in range(HS)) / math.sqrt(HS)
+>                     scores.append(score)
+>                 probs = softmax(scores)
+>                 for t2 in range(t+1):
+>                     ln1_t2 = layernorm(x[t2], ly['ln1g'], ly['ln1b'])
+>                     qkv_t2 = matmul(ln1_t2, ly['qkvw'], C, 3*C)
+>                     qkv_t2 = add_bias(qkv_t2, ly['qkvb'])
+>                     v = qkv_t2[2*C + h*HS:2*C + (h+1)*HS]
+>                     for i in range(HS):
+>                         attn_out[h*HS + i] += probs[t2] * v[i]
+>
+>             # Attention projection
+>             proj = matmul(attn_out, ly['apw'], C, C)
+>             proj = add_bias(proj, ly['apb'])
+>
+>             # Residual
+>             res1 = [x[t][i] + proj[i] for i in range(C)]
+>
+>             # LayerNorm 2
+>             ln2 = layernorm(res1, ly['ln2g'], ly['ln2b'])
+>
+>             # MLP
+>             fc = matmul(ln2, ly['fcw'], C, 4*C)
+>             fc = add_bias(fc, ly['fcb'])
+>             fc = gelu(fc)
+>             fp = matmul(fc, ly['fpw'], 4*C, C)
+>             fp = add_bias(fp, ly['fpb'])
+>
+>             # Residual
+>             res2 = [res1[i] + fp[i] for i in range(C)]
+>             new_x.append(res2)
+>         x = new_x
+>         print(f'Layer {l} done, x[-1][:5] = {x[-1][:5]}')
+>
+>     # Final layernorm
+>     ln = layernorm(x[-1], LNFG, LNFB)
+>
+>     # Project to vocab using wte (weight tying)
+>     logits = matmul(ln, WTE, C, V)  # Wait, this is wrong - need transpose
+>     # Actually wte is V*C, we need ln @ wte^T which is sum(ln[i]*wte[v*C+i]) for each v
+>     # That's the same as treating wte as V rows of C, and doing dot product with ln
+>     logits = []
+>     for v in range(V):
+>         s = sum(ln[i] * wte[v*C + i] for i in range(C))
+>         logits.append(s)
+>
+>     return logits
+>
+> # This is way too slow for full model. Let me just test with 1 token, 1 layer
+> # Actually let me just test the logits for a single token through a simplified path
+> print('Testing with token 464 (" the")')
+> tokens = [464]  # " the"
+> print('Starting forward pass (this will be VERY slow)...')
+> PYEOF
+root@modal:/app# echo 'Script written'
+Script written
+root@modal:/app#

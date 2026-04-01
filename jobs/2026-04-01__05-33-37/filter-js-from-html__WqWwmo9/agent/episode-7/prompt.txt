@@ -1,0 +1,179 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYEOF'
+> import sys
+> import re
+> import html
+>
+>
+> def decode_html_entities(s):
+>     """Decode HTML entities for comparison purposes."""
+>     return html.unescape(s)
+>
+>
+> def remove_javascript(content):
+>     # 1. Remove <script> tags and their contents (including multiline)
+>     content = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Remove self-closing script tags
+>     content = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove orphaned opening script tags
+>     content = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove orphaned closing script tags
+>     content = re.sub(
+>         r'</script\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Process HTML tags to remove dangerous attributes
+>     def clean_tag(match):
+>         tag = match.group(0)
+>
+>         # Remove event handler attributes (on*)
+>         # Handle: space+on*, /on* (like <svg/onload=...>)
+>         # With double-quoted values
+>         tag = re.sub(r'[\s/]+on\w+\s*=\s*"[^"]*"', '', tag, flags=re.IGNORECASE)
+>         # With single-quoted values
+>         tag = re.sub(r"[\s/]+on\w+\s*=\s*'[^']*'", '', tag, flags=re.IGNORECASE)
+>         # With unquoted values (no spaces, no quotes, no >)
+>         tag = re.sub(r'[\s/]+on\w+\s*=\s*[^\s>"\'][^\s>]*', '', tag, flags=re.IGNORECASE)
+>         # With no value at all
+>         tag = re.sub(r'[\s/]+on\w+(?=[\s/>])', '', tag, flags=re.IGNORECASE)
+>
+>         # Remove javascript:/vbscript: URLs from ANY attribute value
+>         # We need to handle HTML-entity-encoded versions too
+>         # Strategy: check decoded value, but remove from original
+>
+>         def clean_dq_attr(m):
+>             """Clean double-quoted attribute values."""
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             decoded = decode_html_entities(value)
+>             # Remove whitespace/control chars for check
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded)
+>             if re.match(r'(?:javascript|vbscript|livescript):', decoded_stripped, re.IGNORECASE):
+>                 return prefix + '""'
+>             return m.group(0)
+>
+>         def clean_sq_attr(m):
+>             """Clean single-quoted attribute values."""
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             decoded = decode_html_entities(value)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded)
+>             if re.match(r'(?:javascript|vbscript|livescript):', decoded_stripped, re.IGNORECASE):
+>                 return prefix + "''"
+>             return m.group(0)
+>
+>         def clean_uq_attr(m):
+>             """Clean unquoted attribute values."""
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             decoded = decode_html_entities(value)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded)
+>             if re.match(r'(?:javascript|vbscript|livescript):', decoded_stripped, re.IGNORECASE):
+>                 return prefix + '""'
+>             return m.group(0)
+>
+>         # Double-quoted attribute values
+>         tag = re.sub(
+>             r'(\s+\w[\w-]*\s*=\s*)"([^"]*)"',
+>             clean_dq_attr,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Single-quoted attribute values
+>         tag = re.sub(
+>             r"(\s+\w[\w-]*\s*=\s*)'([^']*)'",
+>             clean_sq_attr,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Unquoted attribute values
+>         tag = re.sub(
+>             r'(\s+\w[\w-]*\s*=\s*)([^\s>"\'][^\s>]*)',
+>             clean_uq_attr,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Handle data: URLs in src/href/action attributes (potential XSS)
+>         def clean_data_dq(m):
+>             attr_name = m.group(1).strip().rstrip('=').strip().lower()
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             decoded = decode_html_entities(value)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded).lower()
+>             if attr_name in ('href', 'src', 'action', 'formaction', 'xlink:href'):
+>                 if re.match(r'data:', decoded_stripped, re.IGNORECASE):
+>                     return prefix + '""'
+>             return m.group(0)
+>
+>         def clean_data_sq(m):
+>             attr_name = m.group(1).strip().rstrip('=').strip().lower()
+>             prefix = m.group(1)
+>             value = m.group(2)
+>             decoded = decode_html_entities(value)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded).lower()
+>             if attr_name in ('href', 'src', 'action', 'formaction', 'xlink:href'):
+>                 if re.match(r'data:', decoded_stripped, re.IGNORECASE):
+>                     return prefix + "''"
+>             return m.group(0)
+>
+>         tag = re.sub(
+>             r'(\s+(?:href|src|action|formaction|xlink:href)\s*=\s*)"([^"]*)"',
+>             clean_data_dq,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         tag = re.sub(
+>             r"(\s+(?:href|src|action|formaction|xlink:href)\s*=\s*)'([^']*)'",
+>             clean_data_sq,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         return tag
+>
+>     # Match all HTML tags (opening and self-closing, not closing tags)
+>     content = re.sub(r'<[a-zA-Z][^>]*>', clean_tag, content, flags=re.DOTALL)
+>
+>     return content
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#

@@ -1,0 +1,114 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF' > /tmp/scand_results2.txt 2>&1
+> import os, json
+>
+> scand_tasks = [
+>     "BornholmBitextMining", "NorwegianCourtsBitextMining",
+>     "AngryTweetsClassification", "DanishPoliticalCommentsClassification",
+>     "DalajClassification", "DKHateClassification", "LccSentimentClassification",
+>     "MassiveIntentClassification", "MassiveScenarioClassification",
+>     "NordicLangClassification", "NoRecClassification", "NorwegianParliamentClassification",
+>     "ScalaClassification", "SwedishSentimentClassification", "SweRecClassification",
+>     "DanFeverRetrieval", "NorQuadRetrieval", "SNLRetrieval", "SwednRetrieval",
+>     "SweFaqRetrieval", "TV2Nordretrieval", "TwitterHjerneRetrieval",
+>     "SNLHierarchicalClusteringS2S", "SNLHierarchicalClusteringP2P",
+>     "SwednClusteringP2P", "SwednClusteringS2S",
+>     "VGHierarchicalClusteringS2S", "VGHierarchicalClusteringP2P",
+> ]
+>
+> scand_lang_patterns = ['da', 'sv', 'nb', 'nn', 'dan', 'swe', 'nob', 'nno',
+>                        'Danish', 'Swedish', 'Norwegian_b', 'Norwegian_n',
+>                        'danish', 'swedish', 'norwegian']
+>
+> results_dir = "/tmp/mteb_cache/results/results"
+> model_dirs = os.listdir(results_dir)
+>
+> def extract_scand_score(data, task_name):
+>     scores = data.get('scores', {})
+>
+>     # Try all available splits
+>     for split_name in scores.keys():
+>         split_data = scores[split_name]
+>         if not split_data:
+>             continue
+>
+>         # Check if this task has language-specific subsets
+>         subsets = [entry.get('hf_subset', '') for entry in split_data]
+>
+>         # If there are many subsets (multilingual task), filter for Scandinavian
+>         if len(subsets) > 5:
+>             scand_scores = []
+>             for entry in split_data:
+>                 hf_subset = entry.get('hf_subset', '')
+>                 main_score = entry.get('main_score')
+>                 if main_score is None:
+>                     continue
+>                 if any(hf_subset == pat or hf_subset.startswith(pat + '-') for pat in scand_lang_patterns):
+>                     scand_scores.append(main_score)
+>             if scand_scores:
+>                 return sum(scand_scores) / len(scand_scores)
+>         elif len(subsets) > 1 and subsets[0] != 'default':
+>             # Multiple non-default subsets (like ScalaClassification with Danish, Swedish, etc.)
+>             # Check if they're all Scandinavian
+>             all_scand = all(any(pat in s for pat in scand_lang_patterns) for s in subsets)
+>             if all_scand:
+>                 main_scores = [entry.get('main_score') for entry in split_data if entry.get('main_score') is not None]
+>                 if main_scores:
+>                     return sum(main_scores) / len(main_scores)
+>             else:
+>                 # Filter for Scandinavian
+>                 scand_scores = []
+>                 for entry in split_data:
+>                     hf_subset = entry.get('hf_subset', '')
+>                     main_score = entry.get('main_score')
+>                     if main_score is not None and any(pat in hf_subset for pat in scand_lang_patterns):
+>                         scand_scores.append(main_score)
+>                 if scand_scores:
+>                     return sum(scand_scores) / len(scand_scores)
+>         else:
+>             # Single subset or default
+>             if split_data and split_data[0].get('main_score') is not None:
+>                 return split_data[0]['main_score']
+>
+>     return None
+>
+> model_scores = {}
+> for model_dir in model_dirs:
+>     model_path = os.path.join(results_dir, model_dir)
+>     if not os.path.isdir(model_path):
+>         continue
+>     revisions = os.listdir(model_path)
+>     task_scores = {}
+>     for rev in revisions:
+>         rev_path = os.path.join(model_path, rev)
+>         if not os.path.isdir(rev_path):
+>             continue
+>         for task_name in scand_tasks:
+>             if task_name in task_scores:
+>                 continue
+>             json_file = os.path.join(rev_path, f"{task_name}.json")
+>             if os.path.exists(json_file):
+>                 try:
+>                     with open(json_file, 'r') as f:
+>                         data = json.load(f)
+>                     score = extract_scand_score(data, task_name)
+>                     if score is not None:
+>                         task_scores[task_name] = score
+>                 except:
+>                     pass
+>     if task_scores:
+>         mean_score = sum(task_scores.values()) / len(task_scores)
+>         model_scores[model_dir] = (mean_score, len(task_scores), task_scores)
+>
+> # Show top models with all or nearly all tasks
+> for min_tasks in [28, 25, 20]:
+>     filtered = {k: v for k, v in model_scores.items() if v[1] >= min_tasks}
+>     sorted_models = sorted(filtered.items(), key=lambda x: x[1][0], reverse=True)
+>     print(f"\n=== Models with >= {min_tasks} tasks ===")
+>     print(f"Found {len(filtered)} models")
+>     for i, (model, (score, n_tasks, _)) in enumerate(sorted_models[:15]):
+>         model_name = model.replace('__', '/')
+>         print(f"{i+1}. {model_name}: {score*100:.2f} ({n_tasks} tasks)")
+> PYEOF
+

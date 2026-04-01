@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def gradients_differ(g1, g2, tol=1e-8):
+>     """Check if two gradients are significantly different."""
+>     return np.linalg.norm(g1 - g2) > tol
+>
+> def find_boundary(x0, direction, t_low, t_high, g_low, g_high, depth=50):
+>     """Binary search to find the exact boundary crossing point between t_low and t_high."""
+>     for _ in range(depth):
+>         t_mid = (t_low + t_high) / 2
+>         x_mid = x0 + t_mid * direction
+>         g_mid = compute_gradient(x_mid)
+>
+>         if gradients_differ(g_mid, g_low):
+>             t_high = t_mid
+>             g_high = g_mid
+>         else:
+>             t_low = t_mid
+>             g_low = g_mid
+>
+>     return t_low, t_high, g_low, g_high
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     row_candidates = []  # (unnormalized_diff, normalized_diff)
+>
+>     n_trials = 300
+>     for trial in range(n_trials):
+>         if trial % 50 == 0:
+>             print(f"Trial {trial}/{n_trials}...")
+>
+>         # Pick random start and direction
+>         x0 = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Coarse scan along the line to find regions where gradient changes
+>         n_steps = 30
+>         t_values = np.linspace(-8, 8, n_steps)
+>         grads = []
+>         for t in t_values:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             grads.append(g)
+>
+>         # For each consecutive pair with different gradients, binary search
+>         for i in range(len(grads) - 1):
+>             if gradients_differ(grads[i], grads[i+1]):
+>                 # Binary search to find precise boundary
+>                 t_lo, t_hi, g_lo, g_hi = find_boundary(
+>                     x0, direction, t_values[i], t_values[i+1], grads[i], grads[i+1]
+>                 )
+>
+>                 diff = g_hi - g_lo
+>                 norm = np.linalg.norm(diff)
+>                 if norm > 1e-9:
+>                     row_candidates.append(diff)
+>
+>     print(f"Collected {len(row_candidates)} row candidates")
+>
+>     # Normalize candidates for clustering
+>     normalized = []
+>     for rc in row_candidates:
+>         n = np.linalg.norm(rc)
+>         if n > 1e-9:
+>             normalized.append(rc / n)
+>     normalized = np.array(normalized)
+>
+>     # Cluster: group parallel vectors (same or opposite direction)
+>     clusters = []  # each cluster is a list of indices
+>     cluster_dirs = []  # representative direction for each cluster
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for j, cd in enumerate(cluster_dirs):
+>             cos_sim = abs(np.dot(normalized[i], cd))
+>             if cos_sim > 0.99:
+>                 clusters[j].append(i)
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([i])
+>             cluster_dirs.append(normalized[i])
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # For each cluster, compute the average unnormalized difference
+>     # The sign should be consistent within a cluster
+>     A1_rows = []
+>     for j, (cluster, cd) in enumerate(zip(clusters, cluster_dirs)):
+>         avg = np.zeros(10)
+>         count = 0
+>         for idx in cluster:
+>             rc = row_candidates[idx]
+>             n = np.linalg.norm(rc)
+>             if n > 1e-9:
+>                 # Make sign consistent
+>                 if np.dot(rc / n, cd) > 0:
+>                     avg += rc
+>                 else:
+>                     avg -= rc
+>                 count += 1
+>         if count > 0:
+>             avg /= count
+>         A1_rows.append(avg)
+>
+>     A1_stolen = np.array(A1_rows)
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>
+>     # Verify against the actual A1
+>     from forward import A1 as true_A1
+>     print(f"True A1 shape: {true_A1.shape}")
+>
+>     # For each true row, find the best matching stolen row
+>     matched = 0
+>     for i in range(true_A1.shape[0]):
+>         true_row = true_A1[i]
+>         true_norm = np.linalg.norm(true_row)
+>         if true_norm < 1e-10:
+>             continue
+>         best_cos = 0
+>         best_j = -1
+>         for j in range(A1_stolen.shape[0]):
+>             stolen_norm = np.linalg.norm(A1_stolen[j])
+>             if stolen_norm < 1e-10:
+>                 continue
+>             cos_sim = abs(np.dot(true_row, A1_stolen[j]) / (true_norm * stolen_norm))
+>             if cos_sim > best_cos:
+>                 best_cos = cos_sim
+>                 best_j = j
+>         if best_cos > 0.99:
+>             matched += 1
+>             print(f"  True row {i} matched stolen row {best_j} with cos_sim={best_cos:.6f}")
+>         else:
+>             print(f"  True row {i} NOT matched (best cos_sim={best_cos:.6f})")
+>     print(f"Matched {matched}/{true_A1.shape[0]} rows")
+>
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+> if __name__ == '__main__':
+>     steal_A1()
+> PYEOF
+root@modal:/app#

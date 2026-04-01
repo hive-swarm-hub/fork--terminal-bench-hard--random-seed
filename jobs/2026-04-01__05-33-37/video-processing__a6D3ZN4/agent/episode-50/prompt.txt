@@ -1,0 +1,209 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>
+>     # Read all frames
+>     frames_color = []
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frames_color.append(frame)
+>     cap.release()
+>
+>     n_frames = len(frames_color)
+>     bg = frames_color[0].astype(np.float32)
+>
+>     # Step 1: Background subtraction using color channels
+>     # Track bot95 (95th percentile of Y) as feet position indicator
+>     bg_sub_bot95 = np.zeros(n_frames)
+>     bg_sub_pixels = np.zeros(n_frames)
+>     bg_sub_cx = np.zeros(n_frames)
+>
+>     for i in range(1, n_frames):
+>         frame_f = frames_color[i].astype(np.float32)
+>         diff = np.sum(np.abs(frame_f - bg), axis=2)
+>         mask = (diff > 100).astype(np.uint8) * 255
+>         kernel = np.ones((3, 3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         kernel2 = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel2)
+>
+>         total = np.sum(mask > 0)
+>         bg_sub_pixels[i] = total
+>
+>         if total > 300:
+>             ys, xs = np.where(mask > 0)
+>             bg_sub_bot95[i] = np.percentile(ys, 95)
+>             bg_sub_cx[i] = np.mean(xs)
+>
+>     # Step 2: Also compute consecutive frame differences for additional signal
+>     consec_bot95 = np.zeros(n_frames)
+>     consec_pixels = np.zeros(n_frames)
+>
+>     for i in range(1, n_frames):
+>         gray_curr = cv2.cvtColor(frames_color[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         gray_prev = cv2.cvtColor(frames_color[i-1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray_curr - gray_prev)
+>         mask = (diff > 20).astype(np.uint8) * 255
+>         kernel = np.ones((3, 3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>
+>         total = np.sum(mask > 0)
+>         consec_pixels[i] = total
+>
+>         if total > 200:
+>             ys = np.where(mask > 0)[0]
+>             consec_bot95[i] = np.percentile(ys, 95)
+>
+>     # Step 3: Identify the active period using consecutive frame diff
+>     # This is more reliable for finding when the athlete is actually moving
+>     motion_threshold = 5000
+>     active_frames = [i for i in range(n_frames) if consec_pixels[i] > motion_threshold]
+>
+>     if not active_frames:
+>         motion_threshold = 2000
+>         active_frames = [i for i in range(n_frames) if consec_pixels[i] > motion_threshold]
+>
+>     if not active_frames:
+>         motion_threshold = 1000
+>         active_frames = [i for i in range(n_frames) if consec_pixels[i] > motion_threshold]
+>
+>     # Group consecutive active frames
+>     groups = []
+>     current_group = [active_frames[0]]
+>     for i in range(1, len(active_frames)):
+>         if active_frames[i] - active_frames[i-1] <= 5:
+>             current_group.append(active_frames[i])
+>         else:
+>             groups.append(current_group)
+>             current_group = [active_frames[i]]
+>     groups.append(current_group)
+>
+>     # The main group is the longest one
+>     main_group = max(groups, key=len)
+>     start_frame = main_group[0]
+>     end_frame = main_group[-1]
+>
+>     # Step 4: Use background subtraction bot95 for the active period
+>     # This gives us the actual feet position
+>     active_bot95 = []
+>     for i in range(start_frame, end_frame + 1):
+>         if bg_sub_bot95[i] > 0:
+>             active_bot95.append((i, bg_sub_bot95[i]))
+>
+>     if not active_bot95:
+>         raise ValueError("No athlete detected in active period")
+>
+>     # Step 5: Smooth the bot95 signal to reduce noise
+>     frames_arr = np.array([f for f, _ in active_bot95])
+>     bot95_arr = np.array([b for _, b in active_bot95])
+>
+>     # Apply a simple moving average (window=3)
+>     if len(bot95_arr) >= 3:
+>         smoothed = np.convolve(bot95_arr, np.ones(3)/3, mode='same')
+>         # Fix edges
+>         smoothed[0] = bot95_arr[0]
+>         smoothed[-1] = bot95_arr[-1]
+>     else:
+>         smoothed = bot95_arr.copy()
+>
+>     # Step 6: Find the jump pattern
+>     # The jump creates a V-shape in the bot95 signal:
+>     # - Rising to a peak (running, feet on ground)
+>     # - Dropping to a valley (airborne)
+>     # - Rising back (landing)
+>
+>     # Find the minimum (peak of jump / most airborne)
+>     min_idx = np.argmin(smoothed)
+>     min_val = smoothed[min_idx]
+>
+>     # Find the maximum before the minimum (takeoff region)
+>     pre_jump = smoothed[:min_idx]
+>     if len(pre_jump) > 0:
+>         max_pre_idx = np.argmax(pre_jump)
+>         max_pre_val = pre_jump[max_pre_idx]
+>     else:
+>         max_pre_idx = 0
+>         max_pre_val = smoothed[0]
+>
+>     # Find the maximum after the minimum (landing region)
+>     post_jump = smoothed[min_idx:]
+>     if len(post_jump) > 0:
+>         max_post_idx = min_idx + np.argmax(post_jump)
+>         max_post_val = post_jump[np.argmax(post_jump)]
+>     else:
+>         max_post_idx = len(smoothed) - 1
+>         max_post_val = smoothed[-1]
+>
+>     # Step 7: Determine takeoff and landing frames
+>     # Takeoff: the frame where bot95 starts to drop significantly
+>     # Use the peak before the dip as the takeoff frame
+>     # Landing: the frame where bot95 first returns to near-ground level after the dip
+>
+>     # Ground level is the maximum bot95 in the pre-jump region
+>     ground_level = max_pre_val
+>
+>     # Jump amplitude
+>     jump_amplitude = ground_level - min_val
+>
+>     # Takeoff threshold: 20% drop from ground level
+>     takeoff_threshold = ground_level - jump_amplitude * 0.15
+>
+>     # Landing threshold: within 30% of ground level from the post-jump side
+>     landing_threshold = min_val + jump_amplitude * 0.65
+>
+>     # Find takeoff: last frame before minimum where bot95 >= takeoff_threshold
+>     takeoff_idx = max_pre_idx  # default to the peak
+>     for i in range(min_idx - 1, -1, -1):
+>         if smoothed[i] >= takeoff_threshold:
+>             takeoff_idx = i
+>             break
+>
+>     # Find landing: first frame after minimum where bot95 >= landing_threshold
+>     land_idx = max_post_idx  # default to the post-peak
+>     for i in range(min_idx + 1, len(smoothed)):
+>         if smoothed[i] >= landing_threshold:
+>             land_idx = i
+>             break
+>
+>     takeoff_frame = int(frames_arr[takeoff_idx])
+>     land_frame = int(frames_arr[land_idx])
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff, landing = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff,
+>         'jump_land_frame_number': landing
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff}")
+>     print(f"Landing frame: {landing}")
+>     print(f"Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@modal:/app#
