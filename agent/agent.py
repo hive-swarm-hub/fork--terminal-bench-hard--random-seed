@@ -955,6 +955,12 @@ class AgentHarness(Terminus2):
             "  if [ -f \"$f\" ] && [ $(wc -c < \"$f\") -lt 5000 ]; then "
             "    echo \"--- $f ---\"; cat \"$f\"; echo; "
             "  fi; "
+            "done 2>/dev/null; "
+            # Also read test files so agent knows verifier expectations
+            "for f in /tests/test_*.py /tests/*.py; do "
+            "  if [ -f \"$f\" ] && [ $(wc -c < \"$f\") -lt 8000 ]; then "
+            "    echo \"--- $f ---\"; cat \"$f\"; echo; "
+            "  fi; "
             "done 2>/dev/null || true"
         )
 
@@ -1022,10 +1028,10 @@ class AgentHarness(Terminus2):
         if "DOCS" in sections:
             docs = sections["DOCS"].strip()
             if docs and len(docs) > 10:
-                # Limit to 4000 chars to avoid overwhelming the prompt
-                if len(docs) > 4000:
-                    docs = docs[:4000] + "\n... (truncated)"
-                parts.append(f"Task documentation found:\n{docs}")
+                # Limit to 8000 chars — includes task docs + test files
+                if len(docs) > 8000:
+                    docs = docs[:8000] + "\n... (truncated)"
+                parts.append(f"Task files and tests found:\n{docs}")
 
         if not parts:
             return ""
