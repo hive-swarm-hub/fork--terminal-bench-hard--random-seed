@@ -1,0 +1,150 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/verify.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def calc_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('primers.fasta')
+> fwd_primer = primers['forward_primer'].upper()
+> rev_primer = primers['reverse_primer'].upper()
+>
+> print(f"Forward primer: {fwd_primer} (len={len(fwd_primer)})")
+> print(f"Reverse primer: {rev_primer} (len={len(rev_primer)})")
+>
+> # The insertion
+> insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA"
+> fwd_anneal = fwd_primer[len(insertion):]
+> rev_anneal = rev_primer  # entirely annealing
+>
+> print(f"\nForward anneal portion: {fwd_anneal} (len={len(fwd_anneal)})")
+> print(f"Reverse anneal portion: {rev_anneal} (len={len(rev_anneal)})")
+>
+> # Verify annealing
+> # Forward anneals to top strand starting at insert_pos
+> insert_pos = 215
+> expected_fwd_anneal = input_seq[insert_pos:insert_pos+len(fwd_anneal)]
+> print(f"\nExpected fwd anneal region: {expected_fwd_anneal}")
+> print(f"Fwd anneal matches: {fwd_anneal == expected_fwd_anneal}")
+>
+> # Reverse anneals to bottom strand upstream of insert_pos
+> # Rev primer = RC of input_seq[insert_pos-len(rev_anneal):insert_pos]
+> expected_rev_region = input_seq[insert_pos-len(rev_anneal):insert_pos]
+> expected_rev_primer = reverse_complement(expected_rev_region)
+> print(f"\nExpected rev primer: {expected_rev_primer}")
+> print(f"Rev primer matches: {rev_primer == expected_rev_primer}")
+>
+> # Simulate Q5 SDM
+> # The PCR product (linear) would be:
+> # 5' end: fwd_primer sequence (insertion + downstream annealing)
+> # then continues around the plasmid
+> # 3' end: reverse complement of rev_primer
+> #
+> # The linear product top strand:
+> # fwd_primer + input_seq[insert_pos+len(fwd_anneal):] + input_seq[:insert_pos-len(rev_anneal)] + RC(rev_primer) ... wait
+> #
+> # Actually in Q5 SDM on a circular template:
+> # Forward primer binds at insert_pos on top strand, extends clockwise
+> # Reverse primer binds at insert_pos on bottom strand, extends counter-clockwise
+> # This amplifies the whole plasmid as a linear product
+> #
+> # The linear PCR product (top strand, 5' to 3'):
+> # = fwd_primer_full + input_seq[insert_pos+len(fwd_anneal) : ] + input_seq[0 : insert_pos-len(rev_anneal)]
+> # Wait, the plasmid is circular. Let me think again.
+> #
+> # Forward primer anneals at position insert_pos, extends 3' direction (increasing positions)
+> # Reverse primer anneals at position insert_pos (on bottom strand), extends 3' direction on bottom strand (decreasing positions on top strand)
+> #
+> # After full extension:
+> # Top strand from fwd primer: fwd_primer + input[insert_pos+fwd_anneal_len : ... wraps around ... : insert_pos - rev_anneal_len]
+> # But that's the whole plasmid minus the annealing regions
+>
+> # Actually for circular template, the product after PCR:
+> # Top strand = fwd_primer + input_seq[insert_pos+len(fwd_anneal):] + input_seq[:insert_pos]
+> # But wait, the rev primer defines the other end.
+>
+> # Let me think about this differently.
+> # The circular input is: ...upstream...insert_pos...downstream...
+> # Fwd primer anneals at insert_pos going downstream (clockwise)
+> # Rev primer (RC) anneals at insert_pos going upstream (counter-clockwise)
+> # They amplify the entire plasmid backbone between them
+>
+> # The linear product top strand:
+> # = fwd_primer + input_seq from fwd_anneal_end going clockwise to rev_anneal_start
+> # Since it's circular: input_seq[insert_pos+fwd_anneal_len:] + input_seq[:insert_pos-rev_anneal_len]
+>
+> # After KLD (kinase, ligase, DpnI), this linear product gets circularized
+> # The circular product would be:
+> # insertion + input_seq[insert_pos:] + input_seq[:insert_pos]
+> # Which is: insertion + input_seq rotated
+> # But since it's circular, rotation doesn't matter
+> # So the product = input_seq[:insert_pos] + insertion + input_seq[insert_pos:]
+>
+> product = input_seq[:insert_pos] + insertion + input_seq[insert_pos:]
+> print(f"\nProduct length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> print(f"Product == Output: {product == output_seq}")
+>
+> # Verify Tms
+> fwd_tm = calc_tm(fwd_anneal)
+> rev_tm = calc_tm(rev_anneal)
+> print(f"\nFwd anneal Tm: {fwd_tm}")
+> print(f"Rev anneal Tm: {rev_tm}")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}")
+> print(f"Both in range [58,72]: {58 <= fwd_tm <= 72 and 58 <= rev_tm <= 72}")
+> print(f"Tm diff <= 5: {abs(fwd_tm - rev_tm) <= 5}")
+> print(f"Fwd anneal len in [15,45]: {15 <= len(fwd_anneal) <= 45}")
+> print(f"Rev anneal len in [15,45]: {15 <= len(rev_anneal) <= 45}")
+> PYEOF
+root@modal:/app# python3 /app/verify.py
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAACAAGGGCGAGGAGCTGTT (len=55)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (len=45)
+
+Forward anneal portion: CAAGGGCGAGGAGCTGTT (len=18)
+Reverse anneal portion: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (len=45)
+
+Expected fwd anneal region: CAAGGGCGAGGAGCTGTT
+Fwd anneal matches: True
+
+Expected rev primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+Rev primer matches: True
+
+Product length: 3628
+Output length: 3630
+Product == Output: False
+
+Fwd anneal Tm: 63.809573
+Rev anneal Tm: 63.806617
+Tm difference: 0.00
+Both in range [58,72]: True
+Tm diff <= 5: True
+Fwd anneal len in [15,45]: True
+Rev anneal len in [15,45]: True
+root@modal:/app#

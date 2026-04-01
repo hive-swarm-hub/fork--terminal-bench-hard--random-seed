@@ -1,0 +1,107 @@
+New Terminal Output:
+
+}root@modal:/app# python3 << 'EOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data = open('/app/graphene.dat').readlines()
+> xvals = []
+> yvals = []
+> for line in data:
+>     parts = line.strip().split()
+>     if len(parts) >= 2:
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         xvals.append(x)
+>         yvals.append(y)
+>
+> x = np.array(xvals[::-1])
+> y = np.array(yvals[::-1])
+>
+> # The x-axis appears to be in spectrometer-native units
+> # Let me check: what if x is pixel number or CCD position?
+> # Many spectrometers output data with pixel-to-wavelength calibration
+> # The non-uniform spacing suggests a polynomial calibration
+>
+> # Let's try: convert x to Raman shift assuming x is proportional to wavelength
+> # If x = c * lambda (wavelength), then:
+> # Raman shift = 1/lambda_laser - 1/lambda = 1/(x_laser/c) - 1/(x/c) = c*(1/x_laser - 1/x)
+> # = c * (x - x_laser) / (x * x_laser)
+>
+> # The laser peak is around x=19235 (center of the broad peak)
+> # Let's find the exact center by fitting the laser peak
+> mask_laser = (x >= 18500) & (x <= 20000)
+> x_laser_region = x[mask_laser]
+> y_laser_region = y[mask_laser]
+>
+> # The laser peak is very intense and might be saturated/flat-topped
+> # Let's use the centroid or fit a Lorentzian
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> try:
+>     popt_laser, _ = curve_fit(lorentzian, x_laser_region, y_laser_region,
+>                                p0=[19200, 200, 70000, 15000], maxfev=50000)
+>     x_laser_center = popt_laser[0]
+>     print(f"Laser peak center: {x_laser_center:.2f}")
+> except:
+>     x_laser_center = 19235
+>     print(f"Laser fit failed, using estimate: {x_laser_center:.2f}")
+>
+> # Now try different conversion models:
+>
+> # Model 1: x is proportional to wavelength
+> # Raman shift (cm-1) = (1/lambda_laser - 1/lambda) * 1e7 (if lambda in nm)
+> # = 1e7 * (1/x_laser - 1/x) * c  where x = c*lambda
+> # We need to find c such that the G peak maps to ~1580
+> # For G peak at x_g = 10434:
+> # 1580 = c_factor * (1/x_laser - 1/x_g)
+> # c_factor = 1580 / (1/x_laser - 1/10434)
+>
+> c_factor = 1580 / (1/x_laser_center - 1/10434)
+> print(f"c_factor (model 1 - proportional to wavelength): {c_factor:.2f}")
+>
+> # Check 2D peak with this model
+> shift_2d_model1 = c_factor * (1/x_laser_center - 1/3745)
+> print(f"2D peak Raman shift (model 1): {shift_2d_model1:.2f} (expected ~2700)")
+>
+> # Model 2: Linear conversion Raman_shift = A + B*x
+> # Already found: shift = 3327.06 - 0.16744*x
+> shift_2d_model2 = 3327.06 - 0.16744*3745
+> shift_g_model2 = 3327.06 - 0.16744*10434
+> print(f"\nModel 2 (linear): G={shift_g_model2:.2f}, 2D={shift_2d_model2:.2f}")
+>
+> # Model 3: x is wavelength, Raman shift = 1e7/laser_nm - 1e7/x_nm
+> # If x is in some wavelength unit where laser is at x_laser_center
+> # Then lambda_laser (nm) = x_laser_center / k for some k
+> # Raman shift = 1e7*k/x_laser - 1e7*k/x = 1e7*k*(x - x_laser)/(x*x_laser)
+> # For G: 1580 = 1e7*k*(10434 - x_laser)/(10434*x_laser)
+> k = 1580 * 10434 * x_laser_center / (1e7 * (10434 - x_laser_center))
+> print(f"\nModel 3 (wavelength): k = {k:.6f}")
+> lambda_laser_nm = x_laser_center / k
+> print(f"Lambda laser = {lambda_laser_nm:.2f} nm")
+> shift_2d_model3 = 1e7*k*(3745 - x_laser_center)/(3745*x_laser_center)
+> print(f"2D Raman shift (model 3): {shift_2d_model3:.2f} (expected ~2700)")
+>
+> print(f"\n--- Summary ---")
+> print(f"Model 1 (prop to wavelength): 2D shift = {shift_2d_model1:.1f}")
+> print(f"Model 2 (linear): 2D shift = {shift_2d_model2:.1f}")
+> print(f"Model 3 (wavelength with k): 2D shift = {shift_2d_model3:.1f}")
+> EOF
+Laser peak center: 19206.11
+c_factor (model 1 - proportional to wavelength): -36094693.77
+2D peak Raman shift (model 1): 7758.77 (expected ~2700)
+
+Model 2 (linear): G=1579.99, 2D=2700.00
+
+Model 3 (wavelength): k = -3.609469
+Lambda laser = -5321.03 nm
+2D Raman shift (model 3): 7758.77 (expected ~2700)
+
+--- Summary ---
+Model 1 (prop to wavelength): 2D shift = 7758.8
+Model 2 (linear): 2D shift = 2700.0
+Model 3 (wavelength with k): 2D shift = 7758.8
+root@modal:/app#

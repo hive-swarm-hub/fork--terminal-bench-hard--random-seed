@@ -1,0 +1,70 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import os
+> import re
+>
+> # Try to read our own process memory to find WAL data
+> # WAL magic: 377f0682 or 377f0683
+> wal_magic1 = b'\x37\x7f\x06\x82'
+> wal_magic2 = b'\x37\x7f\x06\x83'
+>
+> pid = os.getpid()
+> print(f'Our PID: {pid}')
+>
+> # Read memory maps
+> with open(f'/proc/{pid}/maps') as f:
+>     maps = f.readlines()
+>
+> print(f'Number of memory regions: {len(maps)}')
+>
+> # Try to read each readable region
+> found = False
+> with open(f'/proc/{pid}/mem', 'rb') as mem:
+>     for line in maps:
+>         parts = line.split()
+>         if len(parts) < 2:
+>             continue
+>         perms = parts[1]
+>         if 'r' not in perms:
+>             continue
+>         addr_range = parts[0].split('-')
+>         start = int(addr_range[0], 16)
+>         end = int(addr_range[1], 16)
+>         size = end - start
+>         if size > 100 * 1024 * 1024:  # Skip regions > 100MB
+>             continue
+>         try:
+>             mem.seek(start)
+>             data = mem.read(size)
+>             for magic in [wal_magic1, wal_magic2]:
+>                 idx = data.find(magic)
+>                 while idx != -1:
+>                     print(f'Found WAL magic at offset {start + idx:#x} in region {parts[0]}')
+>                     # Check if this looks like a real WAL header
+>                     header = data[idx:idx+32]
+>                     if len(header) >= 32:
+>                         print(f'  Header: {header.hex()}')
+>                         # Try to read the full WAL (16512 bytes)
+>                         wal_data = data[idx:idx+16512]
+>                         if len(wal_data) == 16512:
+>                             print(f'  Full WAL data available! Saving...')
+>                             with open('/tmp/recovered_wal.bin', 'wb') as wf:
+>                                 wf.write(wal_data)
+>                             found = True
+>                     idx = data.find(magic, idx + 1)
+>         except Exception as e:
+>             pass
+>
+> if not found:
+>     print('WAL magic not found in process memory')
+> EOF
+Our PID: 943
+Number of memory regions: 40
+Found WAL magic at offset 0x2aab664759a0 in region 2aab66405000-2aab66574000
+  Header: 377f0682000000006006bf000000000000000000000000000000000000000000
+  Full WAL data available! Saving...
+Found WAL magic at offset 0x2aab66475a60 in region 2aab66405000-2aab66574000
+  Header: 377f0683000000000000000000000000ffffffff00000000c072a40000000000
+  Full WAL data available! Saving...
+root@modal:/app#

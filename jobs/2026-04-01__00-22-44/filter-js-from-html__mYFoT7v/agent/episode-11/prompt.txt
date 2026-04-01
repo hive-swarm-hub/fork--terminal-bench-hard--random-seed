@@ -1,0 +1,286 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_EOF'
+> import sys
+> import re
+>
+> # Regex to match an opening HTML tag, handling > inside quoted attribute values
+> TAG_RE = r"""<[a-zA-Z](?:[^>'"\\]|"[^"]*"|'[^']*')*>"""
+>
+> def decode_html_entities(s):
+>     """Decode HTML numeric character references."""
+>     def replace_entity(m):
+>         full = m.group(0)
+>         if m.group(1):  # hex: &#xNN;
+>             try:
+>                 return chr(int(m.group(1), 16))
+>             except (ValueError, OverflowError):
+>                 return full
+>         elif m.group(2):  # decimal: &#NN;
+>             try:
+>                 return chr(int(m.group(2)))
+>             except (ValueError, OverflowError):
+>                 return full
+>         return full
+>     return re.sub(r'&#[xX]([0-9a-fA-F]+)\s*;?|&#(\d+)\s*;?', replace_entity, s)
+>
+>
+> def is_dangerous_url(value):
+>     """Check if a URL value is dangerous."""
+>     decoded = decode_html_entities(value)
+>     # Remove whitespace and control characters for checking
+>     stripped = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower()
+>
+>     if stripped.startswith('javascript:'):
+>         return True
+>     if stripped.startswith('vbscript:'):
+>         return True
+>     if stripped.startswith('data:'):
+>         if 'text/html' in stripped:
+>             return True
+>         if 'script' in stripped:
+>             return True
+>         if 'javascript' in stripped:
+>             return True
+>         if 'vbscript' in stripped:
+>             return True
+>         # base64 encoded HTML with potential scripts
+>         if 'base64' in stripped and 'text/' in stripped:
+>             return True
+>     return False
+>
+>
+> def is_dangerous_style(value):
+>     """Check if a style attribute value contains dangerous CSS."""
+>     lower = value.lower()
+>     if re.search(r'expression\s*\(', lower):
+>         return True
+>     if re.search(r'javascript\s*:', lower):
+>         return True
+>     if re.search(r'vbscript\s*:', lower):
+>         return True
+>     if '-moz-binding' in lower:
+>         return True
+>     if re.search(r'behavior\s*:', lower):
+>         return True
+>     if re.search(r'url\s*\([^)]*javascript:', lower):
+>         return True
+>     if re.search(r'url\s*\([^)]*vbscript:', lower):
+>         return True
+>     return False
+>
+>
+> def process_tag(tag_str):
+>     """Process a single HTML tag to remove dangerous attributes."""
+>     result = tag_str
+>
+>     url_attrs = r'(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href|codebase|cite|classid|usemap|icon|manifest|srcdoc|longdesc)'
+>
+>     # --- Remove event handler attributes (on*) ---
+>     # Double-quoted values
+>     result = re.sub(
+>         r'[\s/]+on\w+\s*=\s*"[^"]*"',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Single-quoted values
+>     result = re.sub(
+>         r"[\s/]+on\w+\s*=\s*'[^']*'",
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Unquoted values - consume until > or whitespace
+>     result = re.sub(
+>         r'[\s/]+on\w+\s*=\s*[^\s>]+',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # on* with no value
+>     result = re.sub(
+>         r'[\s/]+on\w+(?=[\s>]|/>|$)',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # --- Remove dangerous URL attributes ---
+>     def clean_url_dq(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + '""'
+>         return m.group(0)
+>
+>     def clean_url_sq(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + "''"
+>         return m.group(0)
+>
+>     def clean_url_uq(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + '""'
+>         return m.group(0)
+>
+>     # Double-quoted
+>     result = re.sub(
+>         r'(\s+' + url_attrs + r'\s*=\s*)"([^"]*)"',
+>         clean_url_dq,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Single-quoted
+>     result = re.sub(
+>         r"(\s+" + url_attrs + r"\s*=\s*)'([^']*)'",
+>         clean_url_sq,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Unquoted
+>     result = re.sub(
+>         r'(\s+' + url_attrs + r'\s*=\s*)([^\s>"\']+)',
+>         clean_url_uq,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # --- Remove dangerous style attributes ---
+>     def clean_style_dq(m):
+>         value = m.group(1)
+>         if is_dangerous_style(value):
+>             return ''
+>         return m.group(0)
+>
+>     def clean_style_sq(m):
+>         value = m.group(1)
+>         if is_dangerous_style(value):
+>             return ''
+>         return m.group(0)
+>
+>     result = re.sub(
+>         r'\s+style\s*=\s*"([^"]*)"',
+>         clean_style_dq,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     result = re.sub(
+>         r"\s+style\s*=\s*'([^']*)'",
+>         clean_style_sq,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return result
+>
+>
+> def filter_html(content):
+>     """
+>     Remove JavaScript from HTML while preserving exact formatting.
+>     """
+>     result = content
+>
+>     # Step 1: Process all HTML tags to clean dangerous attributes
+>     # Use improved regex that handles > inside quoted attribute values
+>     result = re.sub(
+>         TAG_RE,
+>         lambda m: process_tag(m.group(0)),
+>         result
+>     )
+>
+>     # Step 2: Remove <script> tags and their contents
+>     # The script tag regex also needs to handle > in attribute values
+>     script_open = r'<script(?:[^>\'"\\]|"[^"]*"|' + "'[^']*'" + r')*>'
+>     result = re.sub(
+>         script_open + r'[\s\S]*?</script\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Self-closing script
+>     result = re.sub(
+>         r'<script(?:[^>\'"\\]|"[^"]*"|' + "'[^']*'" + r')*/\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Unclosed script tags (consume to end)
+>     result = re.sub(
+>         script_open + r'[\s\S]*$',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Standalone script open tag (no closing)
+>     result = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 3: Remove dangerous <style> tags
+>     def check_style_tag(match):
+>         inner = match.group(1)
+>         inner_lower = inner.lower()
+>         if re.search(r'expression\s*\(', inner_lower):
+>             return ''
+>         if re.search(r'javascript\s*:', inner_lower):
+>             return ''
+>         if re.search(r'vbscript\s*:', inner_lower):
+>             return ''
+>         if '-moz-binding' in inner_lower:
+>             return ''
+>         if re.search(r'behavior\s*:', inner_lower):
+>             return ''
+>         return match.group(0)
+>
+>     result = re.sub(
+>         r'<style\b[^>]*>([\s\S]*?)</style\s*>',
+>         check_style_tag,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 4: Handle dangerous <meta> tags
+>     def check_meta_tag(match):
+>         tag = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag, re.IGNORECASE):
+>             if re.search(r'javascript:', tag, re.IGNORECASE):
+>                 return ''
+>         return tag
+>
+>     result = re.sub(
+>         r'<meta\b[^>]*(?:>|/>)',
+>         check_meta_tag,
+>         result
+>     )
+>
+>     return result
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_html(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@modal:/app#

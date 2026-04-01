@@ -1,0 +1,180 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/design_final.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def calc_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> ins_len = len(output_seq) - len(input_seq)  # 39
+>
+> # Try all valid insertion positions
+> best_overall = None
+> best_overall_diff = float('inf')
+>
+> for insert_pos in [213, 214, 215]:
+>     insertion = output_seq[insert_pos:insert_pos + ins_len]
+>
+>     # Verify this is a valid insertion point
+>     assert input_seq[:insert_pos] == output_seq[:insert_pos]
+>     assert input_seq[insert_pos:] == output_seq[insert_pos + ins_len:]
+>
+>     print(f"\n=== Insert position {insert_pos}, insertion: {insertion} ===")
+>
+>     # Scan forward annealing (downstream of insertion point in input)
+>     print("Forward annealing options (Tm 58-72):")
+>     for fwd_len in range(15, 46):
+>         fwd_anneal = input_seq[insert_pos:insert_pos + fwd_len]
+>         fwd_tm = calc_tm(fwd_anneal)
+>         if 58 <= fwd_tm <= 72:
+>             print(f"  len={fwd_len}: Tm={fwd_tm:.1f} seq={fwd_anneal}")
+>
+>     # Scan reverse annealing (upstream of insertion point in input)
+>     print("Reverse annealing options (Tm 58-72):")
+>     for rev_len in range(15, 46):
+>         rev_region = input_seq[insert_pos - rev_len:insert_pos]
+>         rev_anneal = reverse_complement(rev_region)
+>         rev_tm = calc_tm(rev_anneal)
+>         if 58 <= rev_tm <= 72:
+>             print(f"  len={rev_len}: Tm={rev_tm:.1f} seq={rev_anneal}")
+>
+>     # Find best pair for this position
+>     for fwd_len in range(15, 46):
+>         fwd_anneal = input_seq[insert_pos:insert_pos + fwd_len]
+>         fwd_tm = calc_tm(fwd_anneal)
+>         if not (58 <= fwd_tm <= 72):
+>             continue
+>         for rev_len in range(15, 46):
+>             rev_region = input_seq[insert_pos - rev_len:insert_pos]
+>             rev_anneal = reverse_complement(rev_region)
+>             rev_tm = calc_tm(rev_anneal)
+>             if not (58 <= rev_tm <= 72):
+>                 continue
+>             diff = abs(fwd_tm - rev_tm)
+>             if diff <= 5 and diff < best_overall_diff:
+>                 best_overall_diff = diff
+>                 best_overall = {
+>                     'insert_pos': insert_pos,
+>                     'insertion': insertion,
+>                     'fwd_len': fwd_len,
+>                     'rev_len': rev_len,
+>                     'fwd_anneal': fwd_anneal,
+>                     'rev_anneal': rev_anneal,
+>                     'fwd_tm': fwd_tm,
+>                     'rev_tm': rev_tm,
+>                 }
+>
+> if best_overall:
+>     b = best_overall
+>     fwd_primer = b['insertion'] + b['fwd_anneal']
+>     rev_primer = b['rev_anneal']
+>
+>     print(f"\n\n=== BEST PRIMER PAIR ===")
+>     print(f"Insert position: {b['insert_pos']}")
+>     print(f"Insertion: {b['insertion']}")
+>     print(f"Forward primer: {fwd_primer} (total len={len(fwd_primer)})")
+>     print(f"  Anneal: {b['fwd_anneal']} (len={b['fwd_len']}, Tm={b['fwd_tm']:.2f})")
+>     print(f"Reverse primer: {rev_primer} (total len={len(rev_primer)})")
+>     print(f"  Anneal: {b['rev_anneal']} (len={b['rev_len']}, Tm={b['rev_tm']:.2f})")
+>     print(f"Tm difference: {abs(b['fwd_tm'] - b['rev_tm']):.2f}")
+>
+>     # Verify product
+>     product = input_seq[:b['insert_pos']] + b['insertion'] + input_seq[b['insert_pos']:]
+>     print(f"\nProduct length: {len(product)}")
+>     print(f"Output length: {len(output_seq)}")
+>     print(f"Product == Output: {product == output_seq}")
+>
+>     # Write primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("\nWritten to primers.fasta")
+> else:
+>     print("No valid pair found!")
+> PYEOF
+root@modal:/app# python3 /app/design_final.py
+
+=== Insert position 213, insertion: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA ===
+Forward annealing options (Tm 58-72):
+  len=15: Tm=59.5 seq=AGCAAGGGCGAGGAG
+  len=16: Tm=63.5 seq=AGCAAGGGCGAGGAGC
+  len=17: Tm=65.1 seq=AGCAAGGGCGAGGAGCT
+  len=18: Tm=66.3 seq=AGCAAGGGCGAGGAGCTG
+  len=19: Tm=67.9 seq=AGCAAGGGCGAGGAGCTGT
+  len=20: Tm=68.2 seq=AGCAAGGGCGAGGAGCTGTT
+  len=21: Tm=68.7 seq=AGCAAGGGCGAGGAGCTGTTC
+  len=22: Tm=70.1 seq=AGCAAGGGCGAGGAGCTGTTCA
+  len=23: Tm=70.7 seq=AGCAAGGGCGAGGAGCTGTTCAC
+Reverse annealing options (Tm 58-72):
+  len=30: Tm=58.1 seq=CATATGTATATCTCCTTCTTAAAGTTAAAC
+  len=31: Tm=59.3 seq=CATATGTATATCTCCTTCTTAAAGTTAAACA
+  len=32: Tm=59.7 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAA
+  len=33: Tm=60.1 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  len=34: Tm=60.5 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  len=35: Tm=60.8 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  len=36: Tm=61.1 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  len=37: Tm=60.9 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  len=38: Tm=61.2 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  len=39: Tm=61.5 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  len=40: Tm=61.7 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  len=41: Tm=62.2 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  len=42: Tm=62.9 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  len=43: Tm=62.8 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  len=44: Tm=63.2 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAG
+  len=45: Tm=63.8 seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAGA
+
+=== Insert position 214, insertion: GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAA ===
+Forward annealing options (Tm 58-72):
+  len=15: Tm=61.7 seq=GCAAGGGCGAGGAGC
+  len=16: Tm=63.5 seq=GCAAGGGCGAGGAGCT
+  len=17: Tm=64.8 seq=GCAAGGGCGAGGAGCTG
+  len=18: Tm=66.6 seq=GCAAGGGCGAGGAGCTGT
+  len=19: Tm=66.9 seq=GCAAGGGCGAGGAGCTGTT
+  len=20: Tm=67.5 seq=GCAAGGGCGAGGAGCTGTTC
+  len=21: Tm=69.0 seq=GCAAGGGCGAGGAGCTGTTCA
+  len=22: Tm=69.7 seq=GCAAGGGCGAGGAGCTGTTCAC
+  len=23: Tm=71.4 seq=GCAAGGGCGAGGAGCTGTTCACC
+Reverse annealing options (Tm 58-72):
+  len=30: Tm=58.1 seq=TCATATGTATATCTCCTTCTTAAAGTTAAA
+  len=31: Tm=59.1 seq=TCATATGTATATCTCCTTCTTAAAGTTAAAC
+  len=32: Tm=60.3 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACA
+  len=33: Tm=60.7 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAA
+  len=34: Tm=61.1 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  len=35: Tm=61.4 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  len=36: Tm=61.6 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  len=37: Tm=61.9 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  len=38: Tm=61.7 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  len=39: Tm=61.9 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  len=40: Tm=62.2 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  len=41: Tm=62.5 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  len=42: Tm=62.9 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  len=43: Tm=63.6 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  len=44: Tm=63.4 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  len=45: Tm=63.8 seq=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAG
+

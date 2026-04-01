@@ -1,0 +1,131 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) w.r.t. x using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_A1():
+>     np.random.seed(42)
+>
+>     all_grad_changes = []
+>     n_lines = 150
+>     pts_per_line = 100
+>
+>     for line_idx in range(n_lines):
+>         origin = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction /= np.linalg.norm(direction)
+>
+>         # Sample gradients along the line
+>         ts = np.linspace(-5, 5, pts_per_line)
+>         prev_grad = None
+>
+>         for t in ts:
+>             x = origin + t * direction
+>             g = numerical_gradient(x)
+>
+>             if prev_grad is not None:
+>                 dg = g - prev_grad
+>                 norm = np.linalg.norm(dg)
+>                 if norm > 1e-6:  # significant gradient change
+>                     all_grad_changes.append(dg)
+>
+>             prev_grad = g
+>
+>         if (line_idx + 1) % 50 == 0:
+>             print(f"Line {line_idx + 1}/{n_lines}: found {len(all_grad_changes)} gradient changes so far")
+>
+>     print(f"Total gradient changes collected: {len(all_grad_changes)}")
+>     all_grad_changes = np.array(all_grad_changes)
+>
+>     # Normalize to unit vectors
+>     norms = np.linalg.norm(all_grad_changes, axis=1)
+>     normalized = all_grad_changes / norms[:, None]
+>
+>     # Greedy clustering by direction (parallel or anti-parallel)
+>     clusters = []
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for c_idx in range(len(clusters)):
+>             c_dir = clusters[c_idx][0]
+>             if abs(np.dot(normalized[i], c_dir)) > 0.99:
+>                 clusters[c_idx][1].append(all_grad_changes[i])
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([normalized[i].copy(), [all_grad_changes[i]]])
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # Sort clusters by size (descending)
+>     clusters.sort(key=lambda c: len(c[1]), reverse=True)
+>
+>     sizes = [len(c[1]) for c in clusters]
+>     print("Cluster sizes:", sizes)
+>
+>     # Determine number of neurons by finding the largest gap in cluster sizes
+>     # Real neuron clusters will be large and similarly-sized;
+>     # noise clusters will be much smaller
+>     n_neurons = len(clusters)  # default: use all
+>
+>     if len(sizes) > 1:
+>         # Method 1: Find the biggest relative gap
+>         best_gap_ratio = 0
+>         best_gap_idx = len(sizes)
+>         for i in range(1, len(sizes)):
+>             if sizes[i-1] > 0:
+>                 ratio = 1.0 - sizes[i] / sizes[i-1]
+>                 if ratio > best_gap_ratio and sizes[i-1] >= 3:
+>                     best_gap_ratio = ratio
+>                     best_gap_idx = i
+>
+>         # Only use the gap if it's significant (> 50% drop)
+>         if best_gap_ratio > 0.5:
+>             n_neurons = best_gap_idx
+>         else:
+>             # Method 2: Use all clusters with size >= min_size
+>             min_size = max(3, n_lines * 0.05)
+>             n_neurons = sum(1 for s in sizes if s >= min_size)
+>             if n_neurons == 0:
+>                 n_neurons = len(clusters)
+>
+>     print(f"Detected {n_neurons} neurons")
+>
+>     # For each of the top clusters, extract the representative row
+>     rows = []
+>     for c_dir, c_vecs in clusters[:n_neurons]:
+>         c_vecs_arr = np.array(c_vecs)
+>         # Each gradient change is a2_i * a1_i (a scaled row of A1)
+>         # Since we want A1 up to permutation and scaling,
+>         # any representative from the cluster works
+>         c_norms = np.linalg.norm(c_vecs_arr, axis=1)
+>         # Use median-norm vector for robustness
+>         median_norm = np.median(c_norms)
+>         closest_idx = np.argmin(np.abs(c_norms - median_norm))
+>         rows.append(c_vecs_arr[closest_idx])
+>
+>     A1_recovered = np.array(rows)
+>     print(f"Recovered A1 shape: {A1_recovered.shape}")
+>
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 to /app/stolen_A1.npy")
+>     return A1_recovered
+>
+> if __name__ == '__main__':
+>     find_A1()
+> PYTHON_EOF
+root@modal:/app#

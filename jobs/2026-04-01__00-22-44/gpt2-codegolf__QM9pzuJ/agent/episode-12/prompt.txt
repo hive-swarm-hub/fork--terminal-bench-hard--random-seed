@@ -1,0 +1,99 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/test_gpt2_v2.py << 'PYEOF'
+> import struct, math
+> import numpy as np
+>
+> V,C,CTX,L,H = 50257,768,1024,12,12
+>
+> with open('gpt2-124M.ckpt','rb') as f:
+>     w = np.frombuffer(f.read(), dtype=np.float32)
+>
+> # Try layer-by-layer order:
+> # wte[V,C], wpe[CTX,C],
+> # for each layer:
+> #   ln1w[C], ln1b[C], qkvw[C,3C], qkvb[3C], attprojw[C,C], attprojb[C],
+> #   ln2w[C], ln2b[C], fcw[C,4C], fcb[4C], fcprojw[4C,C], fcprojb[C]
+> # lnfw[C], lnfb[C]
+>
+> off = 0
+> def take(n):
+>     global off
+>     r = w[off:off+n].copy()
+>     off += n
+>     return r
+>
+> wte = take(V*C).reshape(V,C)
+> wpe = take(CTX*C).reshape(CTX,C)
+>
+> ln1w=[]; ln1b=[]; qkvw=[]; qkvb=[]; apw=[]; apb=[]
+> ln2w=[]; ln2b=[]; fcw=[]; fcb=[]; fpw=[]; fpb=[]
+>
+> for l in range(L):
+>     ln1w.append(take(C))
+>     ln1b.append(take(C))
+>     qkvw.append(take(C*3*C).reshape(C,3*C))
+>     qkvb.append(take(3*C))
+>     apw.append(take(C*C).reshape(C,C))
+>     apb.append(take(C))
+>     ln2w.append(take(C))
+>     ln2b.append(take(C))
+>     fcw.append(take(C*4*C).reshape(C,4*C))
+>     fcb.append(take(4*C))
+>     fpw.append(take(4*C*C).reshape(4*C,C))
+>     fpb.append(take(C))
+>
+> lnfw = take(C)
+> lnfb = take(C)
+> print(f'Consumed: {off}, total: {len(w)}, match: {off==len(w)}')
+> print(f'ln1w[0] stats: mean={ln1w[0].mean():.4f} std={ln1w[0].std():.4f}')
+> print(f'lnfw stats: mean={lnfw.mean():.4f} std={lnfw.std():.4f}')
+>
+> def layernorm(x, g, b):
+>     mean = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return g * (x - mean) / np.sqrt(var + 1e-5) + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x):
+>     x = x - x.max(-1, keepdims=True)
+>     e = np.exp(x)
+>     return e / e.sum(-1, keepdims=True)
+>
+> def forward(tokens):
+>     T = len(tokens)
+>     x = wte[tokens] + wpe[:T]
+>     for l in range(L):
+>         nx = layernorm(x, ln1w[l], ln1b[l])
+>         qkv = nx @ qkvw[l] + qkvb[l]
+>         q, k, v = np.split(qkv, 3, axis=-1)
+>         hs = C // H
+>         q = q.reshape(T, H, hs).transpose(1, 0, 2)
+>         k = k.reshape(T, H, hs).transpose(1, 0, 2)
+>         v = v.reshape(T, H, hs).transpose(1, 0, 2)
+>         att = q @ k.transpose(0, 2, 1) / math.sqrt(hs)
+>         mask = np.triu(np.ones((T, T)), k=1) * -1e10
+>         att = softmax(att + mask)
+>         out = (att @ v).transpose(1, 0, 2).reshape(T, C)
+>         x = x + out @ apw[l] + apb[l]
+>         nx = layernorm(x, ln2w[l], ln2b[l])
+>         h = gelu(nx @ fcw[l] + fcb[l])
+>         x = x + h @ fpw[l] + fpb[l]
+>     x = layernorm(x, lnfw, lnfb)
+>     return x @ wte.T
+>
+> tokens = [15496]  # "Hello"
+> for i in range(10):
+>     logits = forward(tokens)
+>     nt = int(np.argmax(logits[-1]))
+>     tokens.append(nt)
+>     print(f'Token {nt}')
+> print(f'All tokens: {tokens}')
+> PYEOF
+root@modal:/app# python3 /tmp/test_gpt2_v2.py
+Consumed: 124439808, total: 124439808, match: True
+ln1w[0] stats: mean=0.0147 std=0.1301
+lnfw stats: mean=-0.0010 std=0.1315
+

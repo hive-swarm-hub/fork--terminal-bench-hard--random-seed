@@ -1,0 +1,107 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/test_gpt2_v3.py << 'PYEOF'
+> import numpy as np, math
+>
+> V,C,CTX,L,H = 50257,768,1024,12,12
+>
+> with open('gpt2-124M.ckpt','rb') as f:
+>     w = np.frombuffer(f.read(), dtype=np.float32)
+>
+> off = 0
+> def take(n):
+>     global off
+>     r = w[off:off+n].copy()
+>     off += n
+>     return r
+>
+> # TF alphabetical order: layers first (h0,h1,h10,h11,h2,...,h9), then ln_f, wpe, wte
+> layer_order = [0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9]
+>
+> qkvb = [None]*12; qkvw = [None]*12
+> apb = [None]*12; apw = [None]*12
+> ln1b = [None]*12; ln1g = [None]*12
+> ln2b = [None]*12; ln2g = [None]*12
+> fcb = [None]*12; fcw = [None]*12
+> fpb = [None]*12; fpw = [None]*12
+>
+> for l in layer_order:
+>     qkvb[l] = take(3*C)
+>     qkvw[l] = take(C*3*C).reshape(C, 3*C)
+>     apb[l] = take(C)
+>     apw[l] = take(C*C).reshape(C, C)
+>     ln1b[l] = take(C)
+>     ln1g[l] = take(C)
+>     ln2b[l] = take(C)
+>     ln2g[l] = take(C)
+>     fcb[l] = take(4*C)
+>     fcw[l] = take(C*4*C).reshape(C, 4*C)
+>     fpb[l] = take(C)
+>     fpw[l] = take(4*C*C).reshape(4*C, C)
+>
+> lnfb = take(C)
+> lnfg = take(C)
+> wpe = take(CTX*C).reshape(CTX, C)
+> wte = take(V*C).reshape(V, C)
+>
+> print(f'Consumed: {off}, total: {len(w)}, match: {off==len(w)}')
+> print(f'ln1g[0] stats: mean={ln1g[0].mean():.4f} std={ln1g[0].std():.4f} min={ln1g[0].min():.4f} max={ln1g[0].max():.4f}')
+> print(f'ln1g[0] first 5: {ln1g[0][:5]}')
+> print(f'lnfg stats: mean={lnfg.mean():.4f} std={lnfg.std():.4f}')
+> print(f'lnfg first 5: {lnfg[:5]}')
+> print(f'wte[0] first 5: {wte[0][:5]}')
+> print(f'wpe[0] first 5: {wpe[0][:5]}')
+>
+> def layernorm(x, g, b):
+>     mean = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return g * (x - mean) / np.sqrt(var + 1e-5) + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x):
+>     x = x - x.max(-1, keepdims=True)
+>     e = np.exp(x)
+>     return e / e.sum(-1, keepdims=True)
+>
+> def forward(tokens):
+>     T = len(tokens)
+>     x = wte[tokens] + wpe[:T]
+>     for l in range(L):
+>         nx = layernorm(x, ln1g[l], ln1b[l])
+>         qkv = nx @ qkvw[l] + qkvb[l]
+>         q, k, v = np.split(qkv, 3, axis=-1)
+>         hs = C // H
+>         q = q.reshape(T, H, hs).transpose(1, 0, 2)
+>         k = k.reshape(T, H, hs).transpose(1, 0, 2)
+>         v = v.reshape(T, H, hs).transpose(1, 0, 2)
+>         att = q @ k.transpose(0, 2, 1) / math.sqrt(hs)
+>         mask = np.triu(np.ones((T, T)), k=1) * -1e10
+>         att = softmax(att + mask)
+>         out = (att @ v).transpose(1, 0, 2).reshape(T, C)
+>         x = x + out @ apw[l] + apb[l]
+>         nx = layernorm(x, ln2g[l], ln2b[l])
+>         h = gelu(nx @ fcw[l] + fcb[l])
+>         x = x + h @ fpw[l] + fpb[l]
+>     x = layernorm(x, lnfg, lnfb)
+>     return x @ wte.T
+>
+> tokens = [15496]  # Hello
+> for i in range(5):
+>     logits = forward(tokens)
+>     nt = int(np.argmax(logits[-1]))
+>     tokens.append(nt)
+>     print(f'Token {nt}')
+> print(f'All tokens: {tokens}')
+> PYEOF
+root@modal:/app# python3 /tmp/test_gpt2_v3.py
+Consumed: 124439808, total: 124439808, match: True
+ln1g[0] stats: mean=0.1804 std=0.0413 min=0.0419 max=0.2527
+ln1g[0] first 5: [0.22322033 0.18195866 0.15343246 0.19168256 0.20361845]
+lnfg stats: mean=1.5078 std=1.3902
+lnfg first 5: [1.3970804 1.3749529 1.8869568 1.1688368 1.2723849]
+wte[0] first 5: [-0.11010301 -0.03926672  0.03310751  0.13382645 -0.04847569]
+wpe[0] first 5: [-0.01882072 -0.1974186   0.00402672  0.01134686  0.06382412]
+Token 11
+

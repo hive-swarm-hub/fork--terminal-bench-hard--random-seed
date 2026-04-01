@@ -1,0 +1,169 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) w.r.t. x using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_kinks_on_line(origin, direction, t_range=(-10, 10), n_pts=500):
+>     """Find kink points along a line by detecting slope changes."""
+>     ts = np.linspace(t_range[0], t_range[1], n_pts)
+>     vals = np.array([forward(origin + t * direction) for t in ts])
+>     dt = ts[1] - ts[0]
+>
+>     # Compute slopes between consecutive points
+>     slopes = np.diff(vals) / dt
+>
+>     # Compute slope changes (second differences)
+>     slope_changes = np.abs(np.diff(slopes))
+>
+>     # Find peaks in slope_changes (local maxima above threshold)
+>     threshold = max(np.median(slope_changes) * 10, 1e-5)
+>
+>     kink_indices = []
+>     for i in range(1, len(slope_changes) - 1):
+>         if (slope_changes[i] > threshold and
+>             slope_changes[i] >= slope_changes[i-1] and
+>             slope_changes[i] >= slope_changes[i+1]):
+>             kink_indices.append(i + 1)  # index in ts array
+>
+>     # Also check endpoints
+>     if len(slope_changes) > 0:
+>         if slope_changes[0] > threshold and slope_changes[0] >= slope_changes[1]:
+>             kink_indices.insert(0, 1)
+>         if slope_changes[-1] > threshold and slope_changes[-1] >= slope_changes[-2]:
+>             kink_indices.append(len(ts) - 1)
+>
+>     # Return the t values at kink locations
+>     kink_ts = [ts[idx] for idx in kink_indices]
+>     return kink_ts
+>
+> def refine_kink(origin, direction, t_approx, dt_initial=0.05):
+>     """Refine kink location using binary search on slope."""
+>     eps = 1e-7
+>
+>     def slope_at(t):
+>         x_p = origin + (t + eps) * direction
+>         x_m = origin + (t - eps) * direction
+>         return (forward(x_p) - forward(x_m)) / (2 * eps)
+>
+>     t_lo = t_approx - dt_initial
+>     t_hi = t_approx + dt_initial
+>     s_lo = slope_at(t_lo)
+>     s_hi = slope_at(t_hi)
+>
+>     if abs(s_hi - s_lo) < 1e-12:
+>         return t_approx  # no actual kink
+>
+>     for _ in range(50):
+>         t_mid = (t_lo + t_hi) / 2
+>         s_mid = slope_at(t_mid)
+>         if abs(s_mid - s_lo) > abs(s_hi - s_lo) * 0.01:
+>             t_hi = t_mid
+>             s_hi = s_mid
+>         else:
+>             t_lo = t_mid
+>             s_lo = s_mid
+>         if t_hi - t_lo < 1e-12:
+>             break
+>
+>     return (t_lo + t_hi) / 2
+>
+> def find_A1():
+>     np.random.seed(42)
+>
+>     all_grad_changes = []
+>     n_lines = 300
+>
+>     for line_idx in range(n_lines):
+>         origin = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction /= np.linalg.norm(direction)
+>
+>         kink_ts = find_kinks_on_line(origin, direction)
+>
+>         for t_approx in kink_ts:
+>             # Refine kink location
+>             t_kink = refine_kink(origin, direction, t_approx)
+>
+>             # Compute gradient change with small delta
+>             delta = 1e-5
+>             x_before = origin + (t_kink - delta) * direction
+>             x_after = origin + (t_kink + delta) * direction
+>             g_before = numerical_gradient(x_before)
+>             g_after = numerical_gradient(x_after)
+>             dg = g_after - g_before
+>             norm = np.linalg.norm(dg)
+>             if norm > 1e-8:
+>                 all_grad_changes.append(dg)
+>
+>         if (line_idx + 1) % 50 == 0:
+>             print(f"Line {line_idx + 1}/{n_lines}: found {len(all_grad_changes)} gradient changes so far")
+>
+>     print(f"Total gradient changes collected: {len(all_grad_changes)}")
+>     all_grad_changes = np.array(all_grad_changes)
+>
+>     # Normalize to unit vectors
+>     norms = np.linalg.norm(all_grad_changes, axis=1)
+>     valid = norms > 1e-8
+>     all_grad_changes = all_grad_changes[valid]
+>     norms = norms[valid]
+>     normalized = all_grad_changes / norms[:, None]
+>
+>     # Greedy clustering by direction
+>     clusters = []
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for c_idx in range(len(clusters)):
+>             c_dir = clusters[c_idx][0]
+>             if abs(np.dot(normalized[i], c_dir)) > 0.999:
+>                 clusters[c_idx][1].append(all_grad_changes[i])
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([normalized[i].copy(), [all_grad_changes[i]]])
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # For each cluster, take the representative vector
+>     rows = []
+>     cluster_sizes = []
+>     for c_dir, c_vecs in clusters:
+>         c_vecs_arr = np.array(c_vecs)
+>         c_norms = np.linalg.norm(c_vecs_arr, axis=1)
+>         # Use the minimum-norm vector (single neuron flip)
+>         min_idx = np.argmin(c_norms)
+>         rows.append(c_vecs_arr[min_idx])
+>         cluster_sizes.append(len(c_vecs))
+>
+>     # Sort by cluster size (larger = more reliable)
+>     order = np.argsort(cluster_sizes)[::-1]
+>     rows = [rows[i] for i in order]
+>     cluster_sizes = [cluster_sizes[i] for i in order]
+>
+>     print("Cluster sizes:", cluster_sizes)
+>
+>     A1_recovered = np.array(rows)
+>     print(f"Recovered A1 shape: {A1_recovered.shape}")
+>
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 to /app/stolen_A1.npy")
+>     return A1_recovered
+>
+> if __name__ == '__main__':
+>     find_A1()
+> PYTHON_EOF
+root@modal:/app#

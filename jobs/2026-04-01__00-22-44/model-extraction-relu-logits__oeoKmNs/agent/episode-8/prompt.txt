@@ -1,0 +1,118 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) w.r.t. x using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_A1():
+>     np.random.seed(42)
+>
+>     all_grad_changes = []
+>     n_lines = 500
+>
+>     for line_idx in range(n_lines):
+>         origin = np.random.randn(10) * 3
+>         direction = np.random.randn(10)
+>         direction /= np.linalg.norm(direction)
+>
+>         # Coarse scan: evaluate f along the line at many points
+>         n_pts = 300
+>         ts = np.linspace(-10, 10, n_pts)
+>         vals = np.array([forward(origin + t * direction) for t in ts])
+>
+>         # Find kinks: where the slope changes significantly
+>         dt = ts[1] - ts[0]
+>         slopes = np.diff(vals) / dt
+>         slope_changes = np.diff(slopes)
+>
+>         # Detect significant slope changes
+>         for i in range(len(slope_changes)):
+>             if abs(slope_changes[i]) > 1e-7:
+>                 # Found a kink near ts[i+1]
+>                 t_kink = ts[i + 1]
+>
+>                 # Compute gradient change with very small delta
+>                 delta = 1e-4
+>                 x_before = origin + (t_kink - delta) * direction
+>                 x_after = origin + (t_kink + delta) * direction
+>                 g_before = numerical_gradient(x_before)
+>                 g_after = numerical_gradient(x_after)
+>                 dg = g_after - g_before
+>                 norm = np.linalg.norm(dg)
+>                 if norm > 1e-8:
+>                     all_grad_changes.append(dg)
+>
+>         if (line_idx + 1) % 100 == 0:
+>             print(f"Line {line_idx + 1}/{n_lines}: found {len(all_grad_changes)} gradient changes so far")
+>
+>     print(f"Total gradient changes collected: {len(all_grad_changes)}")
+>     all_grad_changes = np.array(all_grad_changes)
+>
+>     # Normalize to unit vectors
+>     norms = np.linalg.norm(all_grad_changes, axis=1)
+>     valid = norms > 1e-8
+>     all_grad_changes = all_grad_changes[valid]
+>     norms = norms[valid]
+>     normalized = all_grad_changes / norms[:, None]
+>
+>     # Greedy clustering by direction (parallel or anti-parallel)
+>     clusters = []  # list of (direction, list of (original_vec, norm))
+>
+>     for i in range(len(normalized)):
+>         matched = False
+>         for c_idx in range(len(clusters)):
+>             c_dir = clusters[c_idx][0]
+>             if abs(np.dot(normalized[i], c_dir)) > 0.999:
+>                 clusters[c_idx][1].append(all_grad_changes[i])
+>                 matched = True
+>                 break
+>         if not matched:
+>             clusters.append([normalized[i].copy(), [all_grad_changes[i]]])
+>
+>     print(f"Found {len(clusters)} clusters")
+>
+>     # For each cluster, the gradient change is a2_i * a1_i
+>     # These are scaled rows of A1. Since we want A1 up to permutation and scaling,
+>     # we just need the direction of each cluster.
+>     # Use the minimum-norm vector in each cluster as the representative
+>     # (it's most likely a single-neuron flip)
+>     rows = []
+>     cluster_sizes = []
+>     for c_dir, c_vecs in clusters:
+>         c_vecs_arr = np.array(c_vecs)
+>         c_norms = np.linalg.norm(c_vecs_arr, axis=1)
+>         min_idx = np.argmin(c_norms)
+>         rows.append(c_vecs_arr[min_idx])
+>         cluster_sizes.append(len(c_vecs))
+>
+>     # Sort by cluster size (larger clusters are more reliable)
+>     order = np.argsort(cluster_sizes)[::-1]
+>     rows = [rows[i] for i in order]
+>     cluster_sizes = [cluster_sizes[i] for i in order]
+>
+>     print("Cluster sizes:", cluster_sizes)
+>
+>     A1_recovered = np.array(rows)
+>     print(f"Recovered A1 shape: {A1_recovered.shape}")
+>
+>     np.save('/app/stolen_A1.npy', A1_recovered)
+>     print(f"Saved stolen A1 to /app/stolen_A1.npy")
+>     return A1_recovered
+>
+> if __name__ == '__main__':
+>     find_A1()
+> PYTHON_EOF
+root@modal:/app#

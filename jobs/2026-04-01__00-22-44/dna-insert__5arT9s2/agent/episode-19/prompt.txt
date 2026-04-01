@@ -1,0 +1,130 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/redesign.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def calc_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Use position 213 as the insertion point
+> # This is the earliest valid position, avoiding ambiguity
+> insert_pos = 213
+> ins_len = len(output_seq) - len(input_seq)  # 39
+> insertion = output_seq[insert_pos:insert_pos + ins_len]
+>
+> print(f"Insert position: {insert_pos}")
+> print(f"Insertion: {insertion} (len={len(insertion)})")
+>
+> # Verify
+> assert input_seq[:insert_pos] == output_seq[:insert_pos]
+> assert input_seq[insert_pos:] == output_seq[insert_pos + ins_len:]
+> print("Insertion verified.")
+>
+> # Forward primer: insertion + annealing_downstream
+> # Annealing starts at position 213 in input: AGCAAGGGCGAGGAG...
+> # But the insertion ends with ...ACAGAA
+> # So the forward primer is: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA + AGCAAGGGCGAGGAG...
+> # The 3' annealing part: AGCAAGGGCGAGGAG... starts at pos 213
+>
+> # However, I need to check: does the tail end overlap with the annealing start?
+> # Tail: ...ACAGAA
+> # Anneal start: AGCAAG...
+> # No overlap issue here - the 3' end of the primer determines annealing
+>
+> # But wait - when I check the longest 3' match, AGCAAG... at pos 213 is correct
+> # The issue before was that at pos 215, CAAGGG matched, and extending back 2 bases
+> # to pos 213 (AGCAAG) also matched because those bases are in the input.
+> # With the insertion at pos 213, the tail is the full 39 nt, and the annealing
+> # starts at pos 213.
+>
+> # Let me verify: for fwd primer = insertion + anneal
+> # The 3' portion that matches input should be exactly the anneal part
+> # Let's check for each anneal length what the longest 3' match is
+>
+> print("\n--- Forward annealing scan ---")
+> for fwd_len in range(15, 46):
+>     fwd_anneal = input_seq[insert_pos:insert_pos + fwd_len]
+>     fwd_primer_candidate = insertion + fwd_anneal
+>     fwd_tm = calc_tm(fwd_anneal)
+>
+>     # Check: what's the longest 3' match of this primer to the input?
+>     longest_3prime_match = 0
+>     for test_len in range(1, len(fwd_primer_candidate) + 1):
+>         suffix = fwd_primer_candidate[-test_len:]
+>         if suffix in input_seq:
+>             longest_3prime_match = test_len
+>         else:
+>             break
+>
+>     if 58 <= fwd_tm <= 72:
+>         print(f"  len={fwd_len}: Tm={fwd_tm:.1f}, longest_3prime_match={longest_3prime_match}, seq={fwd_anneal}")
+>
+> print("\n--- Reverse annealing scan ---")
+> for rev_len in range(15, 46):
+>     rev_region = input_seq[insert_pos - rev_len:insert_pos]
+>     rev_anneal = reverse_complement(rev_region)
+>     rev_tm = calc_tm(rev_anneal)
+>
+>     if 58 <= rev_tm <= 72:
+>         print(f"  len={rev_len}: Tm={rev_tm:.1f}, seq={rev_anneal}")
+> PYEOF
+root@modal:/app# python3 /tmp/redesign.py
+Insert position: 213
+Insertion: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (len=39)
+Insertion verified.
+
+--- Forward annealing scan ---
+  len=15: Tm=59.5, longest_3prime_match=15, seq=AGCAAGGGCGAGGAG
+  len=16: Tm=63.5, longest_3prime_match=16, seq=AGCAAGGGCGAGGAGC
+  len=17: Tm=65.1, longest_3prime_match=17, seq=AGCAAGGGCGAGGAGCT
+  len=18: Tm=66.3, longest_3prime_match=18, seq=AGCAAGGGCGAGGAGCTG
+  len=19: Tm=67.9, longest_3prime_match=19, seq=AGCAAGGGCGAGGAGCTGT
+  len=20: Tm=68.2, longest_3prime_match=20, seq=AGCAAGGGCGAGGAGCTGTT
+  len=21: Tm=68.7, longest_3prime_match=21, seq=AGCAAGGGCGAGGAGCTGTTC
+  len=22: Tm=70.1, longest_3prime_match=22, seq=AGCAAGGGCGAGGAGCTGTTCA
+  len=23: Tm=70.7, longest_3prime_match=23, seq=AGCAAGGGCGAGGAGCTGTTCAC
+
+--- Reverse annealing scan ---
+  len=30: Tm=58.1, seq=CATATGTATATCTCCTTCTTAAAGTTAAAC
+  len=31: Tm=59.3, seq=CATATGTATATCTCCTTCTTAAAGTTAAACA
+  len=32: Tm=59.7, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAA
+  len=33: Tm=60.1, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  len=34: Tm=60.5, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  len=35: Tm=60.8, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  len=36: Tm=61.1, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  len=37: Tm=60.9, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  len=38: Tm=61.2, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  len=39: Tm=61.5, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  len=40: Tm=61.7, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  len=41: Tm=62.2, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  len=42: Tm=62.9, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  len=43: Tm=62.8, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  len=44: Tm=63.2, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAG
+  len=45: Tm=63.8, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAGA
+root@modal:/app#

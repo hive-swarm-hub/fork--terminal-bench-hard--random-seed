@@ -1,0 +1,118 @@
+New Terminal Output:
+
+root@modal:/app#
+                  I'm sorry
+ I'm not                    but I'm not sure if you're aware of this
+
+real    0m54.612s
+user    0m51.990s
+sys     0m0.000s
+kill -9 1666
+bash: kill: (1666) - No such process
+[1]+  Done                    time /app/a.out gpt2-124M.ckpt vocab.bpe "Hello" 2>&1
+root@modal:/app# cat > /tmp/test_encode.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #define V 50257
+> int b2u[256];
+> void init_b2u(){
+>  int n=0;
+>  for(int i=0;i<256;i++){
+>   if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>    b2u[i]=i;
+>   else{b2u[i]=256+n;n++;}
+>  }
+> }
+> char tokbuf[V][40];
+> char*tok[V];
+> int ntok;
+> void load_bpe(char*fn){
+>  init_b2u();
+>  for(int i=0;i<256;i++){
+>   int u=b2u[i];
+>   if(u<128){tokbuf[i][0]=u;tokbuf[i][1]=0;}
+>   else{int l=0;if(u<0x800){tokbuf[i][l++]=0xC0|(u>>6);tokbuf[i][l++]=0x80|(u&0x3F);}
+>   else{tokbuf[i][l++]=0xE0|(u>>12);tokbuf[i][l++]=0x80|((u>>6)&0x3F);tokbuf[i][l++]=0x80|(u&0x3F);}
+>   tokbuf[i][l]=0;}
+>   tok[i]=tokbuf[i];
+>  }
+>  ntok=256;
+>  FILE*f=fopen(fn,"r");
+>  char line[256];
+>  fgets(line,256,f);
+>  while(fgets(line,256,f)&&ntok<V){
+>   char*sp=strchr(line,' ');
+>   if(!sp)continue;
+>   char*nl=strchr(line,'\n');if(nl)*nl=0;
+>   *sp=0;
+>   snprintf(tokbuf[ntok],40,"%s%s",line,sp+1);
+>   tok[ntok]=tokbuf[ntok];
+>   ntok++;
+>  }
+>  fclose(f);
+>  printf("Loaded %d tokens\n",ntok);
+> }
+> int encode(char*text,int*tokens){
+>  int len=strlen(text);
+>  char ubuf[4096];
+>  int ulen=0;
+>  for(int i=0;i<len;i++){
+>   int u=b2u[(unsigned char)text[i]];
+>   if(u<0x80)ubuf[ulen++]=u;
+>   else if(u<0x800){ubuf[ulen++]=0xC0|(u>>6);ubuf[ulen++]=0x80|(u&0x3F);}
+>   else{ubuf[ulen++]=0xE0|(u>>12);ubuf[ulen++]=0x80|((u>>6)&0x3F);ubuf[ulen++]=0x80|(u&0x3F);}
+>  }
+>  ubuf[ulen]=0;
+>  printf("Text '%s' -> %d unicode bytes\n",text,ulen);
+>  printf("Unicode bytes: ");for(int i=0;i<ulen;i++)printf("%02x ",ubuf[i]&0xff);printf("\n");
+>  int nt=0,pos=0;
+>  while(pos<ulen){
+>   int best=-1,bestl=0;
+>   for(int t=0;t<ntok;t++){
+>    int tl=strlen(tok[t]);
+>    if(tl>bestl&&tl<=ulen-pos&&memcmp(ubuf+pos,tok[t],tl)==0){
+>     best=t;bestl=tl;
+>    }
+>   }
+>   if(best<0){printf("No match at pos %d byte %02x\n",pos,ubuf[pos]&0xff);pos++;continue;}
+>   printf("Token %d '%s' len %d\n",best,tok[best],bestl);
+>   tokens[nt++]=best;
+>   pos+=bestl;
+>  }
+>  return nt;
+> }
+> int main(){
+>  load_bpe("vocab.bpe");
+>  int tokens[100],nt;
+>  nt=encode("Hello",tokens);
+>  printf("Encoded %d tokens:",nt);
+>  for(int i=0;i<nt;i++)printf(" %d",tokens[i]);
+>  printf("\n");
+> }
+> CEOF
+root@modal:/app# gcc -O3 -o /tmp/test_encode /tmp/test_encode.c && /tmp/test_encode
+/tmp/test_encode.c: In function ‘load_bpe’:
+/tmp/test_encode.c:30:2: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   30 |  fgets(line,256,f);
+      |  ^~~~~~~~~~~~~~~~~
+/tmp/test_encode.c:36:29: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 40 [-Wformat-truncation=]
+   36 |   snprintf(tokbuf[ntok],40,"%s%s",line,sp+1);
+      |                             ^~    ~~~~
+In file included from /usr/include/stdio.h:980,
+                 from /tmp/test_encode.c:1:
+In function ‘snprintf’,
+    inlined from ‘load_bpe’ at /tmp/test_encode.c:36:3:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output 1 or more bytes (assuming 256) into a destination of size 40
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+Loaded 50256 tokens
+Text 'Hello' -> 5 unicode bytes
+Unicode bytes: 48 65 6c 6c 6f
+Token 15496 'Hello' len 5
+Encoded 1 tokens: 15496
+root@modal:/app#

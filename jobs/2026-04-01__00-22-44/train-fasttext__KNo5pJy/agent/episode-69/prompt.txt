@@ -1,0 +1,86 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train3.py << 'PYEOF'
+> import pandas as pd
+> import fasttext
+> import os
+> import re
+>
+> # Load data
+> print("Loading data...")
+> train_df = pd.read_parquet('data/train-00000-of-00001.parquet')
+> test_df = pd.read_parquet('data/test-00000-of-00001.parquet')
+>
+> def preprocess(text):
+>     text = str(text).lower()
+>     # Replace newlines/tabs with spaces
+>     text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+>     # Add spaces around punctuation to separate them as tokens
+>     text = re.sub(r'([!?.,:;\'"-])', r' \1 ', text)
+>     # Collapse multiple spaces
+>     text = re.sub(r'\s+', ' ', text).strip()
+>     return text
+>
+> # Write training file
+> print("Writing training file...")
+> with open('/tmp/train3.txt', 'w') as f:
+>     for label, text in zip(train_df['label'], train_df['text']):
+>         text = preprocess(text)
+>         f.write(f'__label__{label} {text}\n')
+>
+> # Write test file
+> print("Writing test file...")
+> with open('/tmp/valid3.txt', 'w') as f:
+>     for label, text in zip(test_df['label'], test_df['text']):
+>         text = preprocess(text)
+>         f.write(f'__label__{label} {text}\n')
+>
+> # Try different configs
+> configs = [
+>     # Lower epochs to reduce overfitting, moderate dim
+>     {'lr': 0.5, 'epoch': 5, 'wordNgrams': 2, 'dim': 100, 'bucket': 200000, 'minCount': 2, 'name': 'e5_d100'},
+>     {'lr': 0.5, 'epoch': 10, 'wordNgrams': 2, 'dim': 100, 'bucket': 200000, 'minCount': 2, 'name': 'e10_d100'},
+>     {'lr': 0.5, 'epoch': 15, 'wordNgrams': 2, 'dim': 100, 'bucket': 200000, 'minCount': 2, 'name': 'e15_d100'},
+>     {'lr': 1.0, 'epoch': 5, 'wordNgrams': 2, 'dim': 100, 'bucket': 200000, 'minCount': 2, 'name': 'lr1_e5_d100'},
+>     {'lr': 1.0, 'epoch': 10, 'wordNgrams': 2, 'dim': 100, 'bucket': 200000, 'minCount': 2, 'name': 'lr1_e10_d100'},
+> ]
+>
+> best_acc = 0
+> best_name = ''
+>
+> for cfg in configs:
+>     name = cfg.pop('name')
+>     print(f'\n=== {name}: {cfg} ===')
+>     model = fasttext.train_supervised(
+>         input='/tmp/train3.txt',
+>         loss='softmax',
+>         thread=4,
+>         **cfg
+>     )
+>     result = model.test('/tmp/valid3.txt')
+>
+>     # Save and check size
+>     model.save_model(f'/tmp/model_{name}.bin')
+>     size_mb = os.path.getsize(f'/tmp/model_{name}.bin') / (1024 * 1024)
+>     print(f'Accuracy: {result[1]:.4f}, Size: {size_mb:.1f} MB')
+>
+>     # Try quantization if too large
+>     if size_mb >= 150:
+>         print('Quantizing...')
+>         model.quantize(input='/tmp/train3.txt', retrain=True)
+>         model.save_model(f'/tmp/model_{name}_q.bin')
+>         result = model.test('/tmp/valid3.txt')
+>         size_mb = os.path.getsize(f'/tmp/model_{name}_q.bin') / (1024 * 1024)
+>         print(f'After quantization - Accuracy: {result[1]:.4f}, Size: {size_mb:.1f} MB')
+>
+>     if result[1] > best_acc and size_mb < 150:
+>         best_acc = result[1]
+>         best_name = name
+>         model.save_model('/app/model.bin')
+>         print(f'New best! Saved to /app/model.bin')
+>
+> print(f'\nBest: {best_name} with accuracy {best_acc:.4f}')
+> size_mb = os.path.getsize('/app/model.bin') / (1024 * 1024)
+> print(f'Final model size: {size_mb:.1f} MB')
+> PYEOF
+root@modal:/app#

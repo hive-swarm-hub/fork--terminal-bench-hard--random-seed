@@ -1,0 +1,329 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/filter.py << 'PYTHON_EOF'
+> import sys
+> import re
+>
+> def filter_html(content):
+>     """
+>     Remove JavaScript from HTML while preserving exact formatting.
+>     Removes:
+>     - <script> tags and their contents
+>     - Event handler attributes (on*="...")
+>     - javascript: URLs in attributes
+>     - Dangerous style attributes/tags
+>     - data: URIs containing scripts
+>     - vbscript: URLs
+>     """
+>     result = content
+>
+>     # 1. Remove <script> tags and their contents (including multiline)
+>     result = re.sub(
+>         r'<script\b[^>]*>[\s\S]*?</script\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle self-closing <script .../>
+>     result = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle unclosed <script> tags
+>     result = re.sub(
+>         r'<script\b[^>]*>[\s\S]*$',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Remove event handler attributes (on*="...")
+>     def remove_event_handlers(match):
+>         tag_content = match.group(0)
+>         # Remove on* attributes with double-quoted values
+>         # Handle both whitespace and / as separators before on*
+>         tag_content = re.sub(
+>             r'[\s/]+on\w+\s*=\s*"[^"]*"',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with single-quoted values
+>         tag_content = re.sub(
+>             r"[\s/]+on\w+\s*=\s*'[^']*'",
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with unquoted values
+>         tag_content = re.sub(
+>             r'[\s/]+on\w+\s*=\s*[^\s>"\']+',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with no value
+>         tag_content = re.sub(
+>             r'[\s/]+on\w+(?=[\s>]|/>)',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     # Match opening HTML tags
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_event_handlers,
+>         result
+>     )
+>
+>     # 3. Remove javascript:/vbscript: URLs in common URL attributes
+>     url_attrs = r'(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href|codebase|cite|profile|classid|usemap|formaction|icon|manifest|
+srcdoc)'
+>
+>     def remove_js_urls(match):
+>         tag_content = match.group(0)
+>         # Replace javascript: URLs in double-quoted attributes
+>         tag_content = re.sub(
+>             r'(\s+' + url_attrs + r'\s*=\s*)"\s*(?:javascript|vbscript)\s*:[^"]*"',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Replace javascript: URLs in single-quoted attributes
+>         tag_content = re.sub(
+>             r"(\s+" + url_attrs + r"\s*=\s*)'\s*(?:javascript|vbscript)\s*:[^']*'",
+>             r"\1''",
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Replace javascript: URLs in unquoted attributes
+>         tag_content = re.sub(
+>             r'(\s+' + url_attrs + r'\s*=\s*)(?:javascript|vbscript)\s*:[^\s>]*',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_js_urls,
+>         result
+>     )
+>
+>     # 4. Handle HTML entity encoded javascript: in URL attributes
+>     # Decode common patterns: &#106; &#74; &#x6a; &#x4a; for 'j'/'J'
+>     # Also handle &#0000106; style padding
+>     def remove_encoded_js_urls(match):
+>         tag_content = match.group(0)
+>
+>         # Find all URL attribute values and check if they decode to javascript:
+>         def check_and_clean_attr(attr_match):
+>             prefix = attr_match.group(1)
+>             quote = attr_match.group(2)
+>             value = attr_match.group(3)
+>             end_quote = attr_match.group(4)
+>
+>             # Decode HTML entities in the value to check for javascript:
+>             decoded = decode_html_entities(value)
+>             # Remove whitespace/control chars for checking
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f]+', '', decoded)
+>
+>             if re.match(r'(?:javascript|vbscript)\s*:', decoded_stripped, re.IGNORECASE):
+>                 return prefix + quote + end_quote
+>             return attr_match.group(0)
+>
+>         # Double-quoted attributes
+>         tag_content = re.sub(
+>             r'(\s+' + url_attrs + r'\s*=\s*)(")([^"]*)(")',
+>             check_and_clean_attr,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Single-quoted attributes
+>         tag_content = re.sub(
+>             r"(\s+" + url_attrs + r"\s*=\s*)(')([^']*)(')" ,
+>             check_and_clean_attr,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     def decode_html_entities(s):
+>         """Decode HTML numeric entities."""
+>         def replace_entity(m):
+>             full = m.group(0)
+>             if m.group(1):  # hex entity &#xNN;
+>                 try:
+>                     return chr(int(m.group(1), 16))
+>                 except (ValueError, OverflowError):
+>                     return full
+>             elif m.group(2):  # decimal entity &#NN;
+>                 try:
+>                     return chr(int(m.group(2)))
+>                 except (ValueError, OverflowError):
+>                     return full
+>             return full
+>
+>         return re.sub(r'&#[xX]([0-9a-fA-F]+)\s*;?|&#(\d+)\s*;?', replace_entity, s)
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_encoded_js_urls,
+>         result
+>     )
+>
+>     # 5. Handle data: URIs with script content
+>     def remove_data_js_urls(match):
+>         tag_content = match.group(0)
+>
+>         def check_data_uri(attr_match):
+>             prefix = attr_match.group(1)
+>             quote = attr_match.group(2)
+>             value = attr_match.group(3)
+>             end_quote = attr_match.group(4)
+>
+>             # Check if data: URI contains dangerous content
+>             value_lower = value.lower().strip()
+>             if value_lower.startswith('data:'):
+>                 # Check for script-related content
+>                 if re.search(r'(?:script|javascript|vbscript|<script)', value, re.IGNORECASE):
+>                     return prefix + quote + end_quote
+>                 # Check for text/html with potential XSS
+>                 decoded_value = decode_html_entities(value)
+>                 if re.search(r'(?:script|javascript|vbscript)', decoded_value, re.IGNORECASE):
+>                     return prefix + quote + end_quote
+>             return attr_match.group(0)
+>
+>         # Double-quoted
+>         tag_content = re.sub(
+>             r'(\s+' + url_attrs + r'\s*=\s*)(")([^"]*)(")',
+>             check_data_uri,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Single-quoted
+>         tag_content = re.sub(
+>             r"(\s+" + url_attrs + r"\s*=\s*)(')([^']*)(')" ,
+>             check_data_uri,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_data_js_urls,
+>         result
+>     )
+>
+>     # 6. Handle <meta http-equiv="refresh" content="0;url=javascript:...">
+>     def remove_meta_js(match):
+>         tag_content = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag_content, re.IGNORECASE):
+>             if re.search(r'javascript:', tag_content, re.IGNORECASE):
+>                 return ''
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<meta\b[^>]*(?:>|/>)',
+>         remove_meta_js,
+>         result
+>     )
+>
+>     # 7. Handle style attributes with expression() or url(javascript:) or -moz-binding
+>     def remove_dangerous_styles(match):
+>         tag_content = match.group(0)
+>
+>         def check_style(style_match):
+>             prefix = style_match.group(1)
+>             quote = style_match.group(2)
+>             value = style_match.group(3)
+>             end_quote = style_match.group(4)
+>
+>             value_lower = value.lower()
+>             if re.search(r'expression\s*\(', value_lower):
+>                 return ''  # Remove entire style attribute
+>             if re.search(r'javascript\s*:', value_lower):
+>                 return ''
+>             if re.search(r'vbscript\s*:', value_lower):
+>                 return ''
+>             if re.search(r'-moz-binding', value_lower):
+>                 return ''
+>             if re.search(r'behavior\s*:', value_lower):
+>                 return ''
+>             return style_match.group(0)
+>
+>         # Double-quoted style
+>         tag_content = re.sub(
+>             r'(\s+style\s*=\s*)(")([^"]*)(")',
+>             check_style,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Single-quoted style
+>         tag_content = re.sub(
+>             r"(\s+style\s*=\s*)(')([^']*)(')" ,
+>             check_style,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_dangerous_styles,
+>         result
+>     )
+>
+>     # 8. Remove <style> tags containing javascript/expression/-moz-binding
+>     def remove_dangerous_style_tags(match):
+>         style_content = match.group(0)
+>         inner = match.group(1) if match.lastindex else style_content
+>         inner_lower = inner.lower()
+>         if re.search(r'expression\s*\(', inner_lower):
+>             return ''
+>         if re.search(r'javascript\s*:', inner_lower):
+>             return ''
+>         if re.search(r'vbscript\s*:', inner_lower):
+>             return ''
+>         if re.search(r'-moz-binding', inner_lower):
+>             return ''
+>         if re.search(r'behavior\s*:', inner_lower):
+>             return ''
+>         return style_content
+>
+>     result = re.sub(
+>         r'<style\b[^>]*>([\s\S]*?)</style\s*>',
+>         remove_dangerous_style_tags,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return result
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_html(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@modal:/app#

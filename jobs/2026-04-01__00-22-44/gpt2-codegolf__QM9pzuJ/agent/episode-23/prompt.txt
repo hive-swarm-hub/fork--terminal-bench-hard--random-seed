@@ -1,0 +1,241 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define CTX 1024
+> #define C4 3072
+> #define C3 2304
+> float *W,*wte,*wpe;
+> typedef struct{float*qb,*qw,*ab,*aw,*l1b,*l1g,*l2b,*l2g,*fb,*fw,*pb,*pw;}Lyr;
+> Lyr ly[L];
+> float *lfg,*lfb;
+> char *tok[V];
+> int ntok;
+> void load_wt(char*fn){
+>  FILE*f=fopen(fn,"rb");
+>  W=malloc(V*C*4+CTX*C*4+L*7087872*4+C*8);
+>  // Read in TF alphabetical order
+>  int lo[]={0,1,10,11,2,3,4,5,6,7,8,9};
+>  float*p=W;
+>  for(int i=0;i<L;i++){
+>   int l=lo[i];
+>   ly[l].qb=p;p+=C3;
+>   ly[l].qw=p;p+=C*C3;
+>   ly[l].ab=p;p+=C;
+>   ly[l].aw=p;p+=C*C;
+>   ly[l].l1b=p;p+=C;
+>   ly[l].l1g=p;p+=C;
+>   ly[l].l2b=p;p+=C;
+>   ly[l].l2g=p;p+=C;
+>   ly[l].fb=p;p+=C4;
+>   ly[l].fw=p;p+=C*C4;
+>   ly[l].pb=p;p+=C;
+>   ly[l].pw=p;p+=C4*C;
+>  }
+>  lfb=p;p+=C;
+>  lfg=p;p+=C;
+>  wpe=p;p+=CTX*C;
+>  wte=p;p+=V*C;
+>  fread(W,4,p-W,f);
+>  fclose(f);
+> }
+> int b2u[256];
+> void init_b2u(){
+>  int n=0,j=0;
+>  for(int i=0;i<256;i++){
+>   if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>    b2u[i]=i;
+>   else{b2u[i]=256+n;n++;}
+>  }
+> }
+> char tokbuf[V][40];
+> void load_bpe(char*fn){
+>  init_b2u();
+>  // First 256 tokens are single bytes mapped through b2u
+>  for(int i=0;i<256;i++){
+>   int u=b2u[i];
+>   if(u<128){tokbuf[i][0]=u;tokbuf[i][1]=0;}
+>   else{int l=0;if(u<0x800){tokbuf[i][l++]=0xC0|(u>>6);tokbuf[i][l++]=0x80|(u&0x3F);}
+>   else{tokbuf[i][l++]=0xE0|(u>>12);tokbuf[i][l++]=0x80|((u>>6)&0x3F);tokbuf[i][l++]=0x80|(u&0x3F);}
+>   tokbuf[i][l]=0;}
+>   tok[i]=tokbuf[i];
+>  }
+>  ntok=256;
+>  FILE*f=fopen(fn,"r");
+>  char line[256];
+>  fgets(line,256,f); // skip header
+>  while(fgets(line,256,f)&&ntok<V){
+>   char*sp=strchr(line,' ');
+>   if(!sp)continue;
+>   char*nl=strchr(line,'\n');if(nl)*nl=0;
+>   // Find the two parts
+>   *sp=0;
+>   char*a=line,*b=sp+1;
+>   // Find token indices for a and b
+>   // The merged token is a+b
+>   // We need to store the UTF-8 string for this token
+>   // a and b are in the BPE unicode representation
+>   // We need to convert them back and concatenate
+>   snprintf(tokbuf[ntok],40,"%s%s",a,b);
+>   tok[ntok]=tokbuf[ntok];
+>   ntok++;
+>  }
+>  fclose(f);
+> }
+> // Decode token to actual bytes
+> void print_tok(int t){
+>  // tok[t] is in BPE unicode, need to convert back to bytes
+>  char*s=tok[t];
+>  int u2b[512];
+>  for(int i=0;i<256;i++)u2b[b2u[i]]=i;
+>  unsigned char*p=(unsigned char*)s;
+>  while(*p){
+>   int cp;
+>   if(*p<0x80){cp=*p++;}
+>   else if(*p<0xE0){cp=((*p&0x1F)<<6)|(*(p+1)&0x3F);p+=2;}
+>   else{cp=((*p&0xF)<<12)|((*(p+1)&0x3F)<<6)|(*(p+2)&0x3F);p+=3;}
+>   putchar(u2b[cp]);
+>  }
+> }
+> // BPE encode
+> int u2b_map[512];
+> void init_u2b(){for(int i=0;i<256;i++)u2b_map[b2u[i]]=i;}
+> int encode(char*text,int*tokens){
+>  init_u2b();
+>  // Convert text bytes to BPE unicode string
+>  int len=strlen(text);
+>  // For each character, convert to BPE unicode representation
+>  // Then greedily match longest token
+>  // Simple: convert entire text to unicode chars, then do BPE
+>  char ubuf[4096];
+>  int ulen=0;
+>  for(int i=0;i<len;i++){
+>   int u=b2u[(unsigned char)text[i]];
+>   if(u<0x80)ubuf[ulen++]=u;
+>   else if(u<0x800){ubuf[ulen++]=0xC0|(u>>6);ubuf[ulen++]=0x80|(u&0x3F);}
+>   else{ubuf[ulen++]=0xE0|(u>>12);ubuf[ulen++]=0x80|((u>>6)&0x3F);ubuf[ulen++]=0x80|(u&0x3F);}
+>  }
+>  ubuf[ulen]=0;
+>  // Greedy longest match tokenization
+>  int nt=0,pos=0;
+>  while(pos<ulen){
+>   int best=-1,bestl=0;
+>   for(int t=0;t<ntok;t++){
+>    int tl=strlen(tok[t]);
+>    if(tl>bestl&&tl<=ulen-pos&&memcmp(ubuf+pos,tok[t],tl)==0){
+>     best=t;bestl=tl;
+>    }
+>   }
+>   if(best<0){pos++;continue;}
+>   tokens[nt++]=best;
+>   pos+=bestl;
+>  }
+>  return nt;
+> }
+> float x[CTX*C],buf[CTX*C],qkv[CTX*C3],att[H*CTX*CTX],out[CTX*C],mlp[CTX*C4];
+> void layernorm(float*o,float*i,float*g,float*b,int T){
+>  for(int t=0;t<T;t++){
+>   float m=0;for(int j=0;j<C;j++)m+=i[t*C+j];m/=C;
+>   float v=0;for(int j=0;j<C;j++){float d=i[t*C+j]-m;v+=d*d;}v/=C;
+>   float s=1.0f/sqrtf(v+1e-5f);
+>   for(int j=0;j<C;j++)o[t*C+j]=g[j]*(i[t*C+j]-m)*s+b[j];
+>  }
+> }
+> void forward(int*tokens,int T,float*logits){
+>  for(int t=0;t<T;t++)
+>   for(int j=0;j<C;j++)
+>    x[t*C+j]=wte[tokens[t]*C+j]+wpe[t*C+j];
+>  for(int l=0;l<L;l++){
+>   layernorm(buf,x,ly[l].l1g,ly[l].l1b,T);
+>   // QKV
+>   for(int t=0;t<T;t++)
+>    for(int j=0;j<C3;j++){
+>     float s=ly[l].qb[j];
+>     for(int k=0;k<C;k++)s+=buf[t*C+k]*ly[l].qw[k*C3+j];
+>     qkv[t*C3+j]=s;
+>    }
+>   // Attention
+>   int hs=C/H;
+>   for(int h=0;h<H;h++)
+>    for(int t=0;t<T;t++){
+>     for(int t2=0;t2<=t;t2++){
+>      float s=0;
+>      for(int j=0;j<hs;j++)
+>       s+=qkv[t*C3+h*hs+j]*qkv[t2*C3+C+h*hs+j];
+>      att[h*T*T+t*T+t2]=s/sqrtf(hs);
+>     }
+>     // softmax
+>     float mx=-1e30f;
+>     for(int t2=0;t2<=t;t2++){float v=att[h*T*T+t*T+t2];if(v>mx)mx=v;}
+>     float sm=0;
+>     for(int t2=0;t2<=t;t2++){att[h*T*T+t*T+t2]=expf(att[h*T*T+t*T+t2]-mx);sm+=att[h*T*T+t*T+t2];}
+>     for(int t2=0;t2<=t;t2++)att[h*T*T+t*T+t2]/=sm;
+>     // weighted sum of values
+>     for(int j=0;j<hs;j++){
+>      float s=0;
+>      for(int t2=0;t2<=t;t2++)
+>       s+=att[h*T*T+t*T+t2]*qkv[t2*C3+2*C+h*hs+j];
+>      out[t*C+h*hs+j]=s;
+>     }
+>    }
+>   // attn proj + residual
+>   for(int t=0;t<T;t++)
+>    for(int j=0;j<C;j++){
+>     float s=ly[l].ab[j];
+>     for(int k=0;k<C;k++)s+=out[t*C+k]*ly[l].aw[k*C+j];
+>     x[t*C+j]+=s;
+>    }
+>   // LN2 + MLP
+>   layernorm(buf,x,ly[l].l2g,ly[l].l2b,T);
+>   for(int t=0;t<T;t++)
+>    for(int j=0;j<C4;j++){
+>     float s=ly[l].fb[j];
+>     for(int k=0;k<C;k++)s+=buf[t*C+k]*ly[l].fw[k*C4+j];
+>     // GELU
+>     float g=0.5f*s*(1.0f+tanhf(0.7978845608f*(s+0.044715f*s*s*s)));
+>     mlp[t*C4+j]=g;
+>    }
+>   for(int t=0;t<T;t++)
+>    for(int j=0;j<C;j++){
+>     float s=ly[l].pb[j];
+>     for(int k=0;k<C4;k++)s+=mlp[t*C4+k]*ly[l].pw[k*C+j];
+>     x[t*C+j]+=s;
+>    }
+>  }
+>  layernorm(buf,x,lfg,lfb,T);
+>  // Only compute logits for last position
+>  int t=T-1;
+>  for(int j=0;j<V;j++){
+>   float s=0;
+>   for(int k=0;k<C;k++)s+=buf[t*C+k]*wte[j*C+k];
+>   logits[j]=s;
+>  }
+> }
+> int main(int argc,char**argv){
+>  load_wt(argv[1]);
+>  load_bpe(argv[2]);
+>  int tokens[CTX],nt;
+>  nt=encode(argv[3],tokens);
+>  float*logits=malloc(V*4);
+>  for(int i=0;i<20;i++){
+>   forward(tokens,nt,logits);
+>   int best=0;
+>   for(int j=1;j<V;j++)if(logits[j]>logits[best])best=j;
+>   tokens[nt++]=best;
+>   print_tok(best);
+>  }
+>  printf("\n");
+> }
+> CEOF
+[1]+  Done                    apt-get install -y python3-pip > /tmp/pip_install.log 2>&1 && pip3 install torch transformers --break-system-packages > /tmp/torch
+_install.log 2>&1
+root@modal:/app# wc -c /app/gpt2.c
+6030 /app/gpt2.c
+root@modal:/app#

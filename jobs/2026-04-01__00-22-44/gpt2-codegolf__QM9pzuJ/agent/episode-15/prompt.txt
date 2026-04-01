@@ -1,0 +1,89 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import numpy as np, math
+>
+> V,C,CTX,L,H = 50257,768,1024,12,12
+>
+> with open('gpt2-124M.ckpt','rb') as f:
+>     w = np.frombuffer(f.read(), dtype=np.float32)
+>
+> # Use grouped order
+> off = 0
+> def take(n):
+>     global off
+>     r = w[off:off+n].copy()
+>     off += n
+>     return r
+>
+> wte = take(V*C).reshape(V,C)
+> wpe = take(CTX*C).reshape(CTX,C)
+>
+> # Check: what if the ln weights are actually stored differently?
+> # In the grouped layout:
+> ln1w_all = take(L*C).reshape(L,C)  # all 12 layers
+> ln1b_all = take(L*C).reshape(L,C)
+> qkvw_all = take(L*C*3*C).reshape(L,C,3*C)
+> qkvb_all = take(L*3*C).reshape(L,3*C)
+> apw_all = take(L*C*C).reshape(L,C,C)
+> apb_all = take(L*C).reshape(L,C)
+> ln2w_all = take(L*C).reshape(L,C)
+> ln2b_all = take(L*C).reshape(L,C)
+> fcw_all = take(L*C*4*C).reshape(L,C,4*C)
+> fcb_all = take(L*4*C).reshape(L,4*C)
+> fpw_all = take(L*4*C*C).reshape(L,4*C,C)
+> fpb_all = take(L*C).reshape(L,C)
+> lnfw = take(C)
+> lnfb = take(C)
+>
+> # Check: just do a simple embedding lookup and logits without any transformer layers
+> # to see if the embedding table is correct
+> tokens = [15496]  # Hello
+> x = wte[tokens] + wpe[:1]
+> # Skip all layers, just do final LN and project
+> x_ln = (x - x.mean(-1,keepdims=True)) / np.sqrt(x.var(-1,keepdims=True) + 1e-5)
+> x_ln = lnfw * x_ln + lnfb
+> logits = x_ln @ wte.T
+> top5 = np.argsort(logits[0])[-5:][::-1]
+> print(f'Top 5 tokens (no layers): {top5}')
+> print(f'Top 5 logits: {logits[0][top5]}')
+>
+> # Now check: what does the embedding for token 46107 look like?
+> print(f'\nToken 46107 embedding norm: {np.linalg.norm(wte[46107]):.4f}')
+> print(f'Token 46107 embedding mean: {wte[46107].mean():.6f}')
+> print(f'Token 0 embedding norm: {np.linalg.norm(wte[0]):.4f}')
+> print(f'Token 15496 embedding norm: {np.linalg.norm(wte[15496]):.4f}')
+>
+> # Check if maybe the embedding weights are wrong - look at norms per token
+> norms = np.linalg.norm(wte, axis=1)
+> print(f'\nEmbedding norms: min={norms.min():.4f} max={norms.max():.4f} mean={norms.mean():.4f}')
+> print(f'Token with max norm: {np.argmax(norms)}')
+> print(f'Token with min norm: {np.argmin(norms)}')
+>
+> # Check if ln1w might actually be reasonable - GPT-2 layer norm
+> # In GPT-2, layer norm is: g * (x - mean) / sqrt(var + eps) + b
+> # g is initialized to 1 but can drift during training
+> print(f'\nln1w[0] first 10: {ln1w_all[0,:10]}')
+> print(f'ln1w[11] first 10: {ln1w_all[11,:10]}')
+> print(f'ln2w[0] first 10: {ln2w_all[0,:10]}')
+> EOF
+Top 5 tokens (no layers): [30531 30537 30547 30514 30554]
+Top 5 logits: [23.610365 21.962996 21.925142 19.890732 19.70837 ]
+
+Token 46107 embedding norm: 15.7532
+Token 46107 embedding mean: 0.028029
+Token 0 embedding norm: 9.4950
+Token 15496 embedding norm: 2.7443
+
+Embedding norms: min=0.1427 max=27.5460 mean=3.6601
+Token with max norm: 3079
+Token with min norm: 19903
+
+ln1w[0] first 10: [ 0.01261377  0.11125764 -0.01896115 -0.07971286 -0.19447736 -0.02286544
+ -0.04544482  0.04873777  0.03933693  0.106039  ]
+ln1w[11] first 10: [-1.7691168e-01 -2.1634379e-02  3.1985916e-04 -1.4238141e-01
+ -7.3730521e-02 -3.3879870e-01  2.7351217e-02  6.6064350e-02
+ -9.0283535e-02  1.6868111e-02]
+ln2w[0] first 10: [ 0.01407338  0.1345188   0.06339685  0.19735861  0.05144834  0.11275747
+ -0.38793367 -0.30382547  0.17386755  0.10327861]
+root@modal:/app#

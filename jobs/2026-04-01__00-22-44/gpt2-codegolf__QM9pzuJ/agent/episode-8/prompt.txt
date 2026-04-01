@@ -1,0 +1,142 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/test_gpt2.py << 'PYEOF'
+> import struct, math, sys
+> import numpy as np
+>
+> V,C,CTX,L,H = 50257,768,1024,12,12
+>
+> # Load all weights
+> with open('gpt2-124M.ckpt','rb') as f:
+>     data = f.read()
+> w = np.frombuffer(data, dtype=np.float32)
+> print(f'Total floats: {len(w)}')
+>
+> # Try llm.c parameter order (grouped by type across layers):
+> # wte[V,C], wpe[CTX,C],
+> # ln1w[L,C], ln1b[L,C],
+> # qkvw[L,C,3C], qkvb[L,3C],
+> # attprojw[L,C,C], attprojb[L,C],
+> # ln2w[L,C], ln2b[L,C],
+> # fcw[L,4C,C], fcb[L,4C],  (note: might be [L,C,4C])
+> # fcprojw[L,C,4C], fcprojb[L,C],  (note: might be [L,4C,C])
+> # lnfw[C], lnfb[C]
+>
+> off = 0
+> def take(shape):
+>     global off
+>     n = 1
+>     for s in shape: n *= s
+>     r = w[off:off+n].reshape(shape)
+>     off += n
+>     return r
+>
+> wte = take((V,C))
+> wpe = take((CTX,C))
+> ln1w = take((L,C))
+> ln1b = take((L,C))
+> qkvw = take((L,C,3*C))
+> qkvb = take((L,3*C))
+> attprojw = take((L,C,C))
+> attprojb = take((L,C))
+> ln2w = take((L,C))
+> ln2b = take((L,C))
+> fcw = take((L,C,4*C))
+> fcb = take((L,4*C))
+> fcprojw = take((L,4*C,C))
+> fcprojb = take((L,C))
+> lnfw = take((C,))
+> lnfb = take((C,))
+> print(f'Consumed: {off}, total: {len(w)}')
+>
+> # Check ln1w values
+> print(f'ln1w[0] stats: mean={ln1w[0].mean():.4f} std={ln1w[0].std():.4f} min={ln1w[0].min():.4f} max={ln1w[0].max():.4f}')
+> print(f'lnfw stats: mean={lnfw.mean():.4f} std={lnfw.std():.4f}')
+>
+> def layernorm(x, g, b):
+>     mean = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return g * (x - mean) / np.sqrt(var + 1e-5) + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x):
+>     x = x - x.max(-1, keepdims=True)
+>     e = np.exp(x)
+>     return e / e.sum(-1, keepdims=True)
+>
+> # Load BPE vocab
+> with open('vocab.bpe','r') as f:
+>     bpe_lines = f.read().split('\n')
+>
+> # Build simple tokenizer - just encode a simple string
+> # For now let's test with token IDs directly
+> # The token for "Hello" in GPT-2 is 15496
+>
+> # Forward pass for a single position
+> def forward(tokens):
+>     T = len(tokens)
+>     x = wte[tokens] + wpe[:T]  # [T, C]
+>
+>     for l in range(L):
+>         # Layer norm 1
+>         nx = layernorm(x, ln1w[l], ln1b[l])
+>
+>         # QKV
+>         qkv = nx @ qkvw[l] + qkvb[l]  # [T, 3C]
+>         q, k, v = np.split(qkv, 3, axis=-1)  # each [T, C]
+>
+>         # Multi-head attention
+>         hs = C // H  # head size = 64
+>         q = q.reshape(T, H, hs).transpose(1, 0, 2)  # [H, T, hs]
+>         k = k.reshape(T, H, hs).transpose(1, 0, 2)
+>         v = v.reshape(T, H, hs).transpose(1, 0, 2)
+>
+>         att = q @ k.transpose(0, 2, 1) / math.sqrt(hs)  # [H, T, T]
+>         # Causal mask
+>         mask = np.triu(np.ones((T, T)), k=1) * -1e10
+>         att = att + mask
+>         att = softmax(att)
+>
+>         out = att @ v  # [H, T, hs]
+>         out = out.transpose(1, 0, 2).reshape(T, C)  # [T, C]
+>
+>         # Attention projection
+>         out = out @ attprojw[l] + attprojb[l]
+>         x = x + out
+>
+>         # Layer norm 2
+>         nx = layernorm(x, ln2w[l], ln2b[l])
+>
+>         # MLP
+>         h = nx @ fcw[l] + fcb[l]  # [T, 4C]
+>         h = gelu(h)
+>         h = h @ fcprojw[l] + fcprojb[l]  # [T, C]
+>         x = x + h
+>
+>     x = layernorm(x, lnfw, lnfb)
+>     logits = x @ wte.T  # [T, V] - weight tying
+>     return logits
+>
+> # Test with "Hello" token
+> tokens = [15496]  # "Hello"
+> logits = forward(tokens)
+> next_token = np.argmax(logits[-1])
+> print(f'Next token after "Hello": {next_token}')
+>
+> # Let's generate a few tokens
+> for i in range(5):
+>     logits = forward(tokens)
+>     next_token = int(np.argmax(logits[-1]))
+>     tokens.append(next_token)
+>     print(f'Token {next_token}')
+>
+> print(f'Generated tokens: {tokens}')
+> PYEOF
+root@modal:/app# python3 /tmp/test_gpt2.py
+Traceback (most recent call last):
+  File "/tmp/test_gpt2.py", line 2, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+root@modal:/app#

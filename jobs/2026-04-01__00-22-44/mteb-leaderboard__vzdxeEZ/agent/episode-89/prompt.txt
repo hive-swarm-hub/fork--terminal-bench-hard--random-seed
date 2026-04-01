@@ -1,0 +1,100 @@
+New Terminal Output:
+
+root@modal:/app# sed -n '75,170p' /usr/local/lib/python3.10/site-packages/mteb/leaderboard/table.py
+        max_length = max(max(column_word_lengths), max(value_lengths))
+        n_pixels = 25 + (max_length * 10)
+        widths.append(f"{n_pixels}px")
+    return widths
+
+
+def get_means_per_types(per_task: pd.DataFrame):
+    task_names_per_type = defaultdict(list)
+    for task_name in per_task.columns:
+        task_type = get_task(task_name).metadata.type
+        task_names_per_type[task_type].append(task_name)
+    records = []
+    for task_type, tasks in task_names_per_type.items():
+        for model_name, scores in per_task.iterrows():
+            records.append(
+                dict(
+                    model_name=model_name,
+                    task_type=task_type,
+                    score=scores[tasks].mean(skipna=False),
+                )
+            )
+    return pd.DataFrame.from_records(records)
+
+
+def failsafe_get_model_meta(model_name):
+    try:
+        return get_model_meta(model_name)
+    except Exception:
+        return None
+
+
+def format_max_tokens(max_tokens: float | None) -> str:
+    if max_tokens is None:
+        return "Unknown"
+    if max_tokens == np.inf:
+        return "Infinite"
+    return str(int(max_tokens))
+
+
+def format_zero_shot(zero_shot_percentage: int):
+    if zero_shot_percentage == -1:
+        return "⚠️ NA"
+    return f"{zero_shot_percentage:.0f}%"
+
+
+def create_light_green_cmap():
+    cmap = plt.cm.get_cmap("Greens")
+    num_colors = 256
+    half_colors = np.linspace(0, 0.5, num_colors)
+    half_cmap = [cmap(val) for val in half_colors]
+    light_green_cmap = LinearSegmentedColormap.from_list(
+        "LightGreens", half_cmap, N=256
+    )
+    return light_green_cmap
+
+
+def scores_to_tables(scores_long: list[dict], search_query: str | None = None):
+    if not scores_long:
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return gr.DataFrame(no_results_frame), gr.DataFrame(no_results_frame)
+    data = pd.DataFrame.from_records(scores_long)
+    per_task = data.pivot(index="model_name", columns="task_name", values="score")
+    mean_per_type = get_means_per_types(per_task)
+    mean_per_type = mean_per_type.pivot(
+        index="model_name", columns="task_type", values="score"
+    )
+    mean_per_type.columns = [
+        split_on_capital(column) for column in mean_per_type.columns
+    ]
+    to_remove = per_task.isna().all(axis="columns")
+    if search_query:
+        names = per_task.index.get_level_values("model_name")
+        names = pd.Series(names, index=per_task.index)
+        to_remove |= ~names.str.contains(search_query, regex=True)
+    if to_remove.all():
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return gr.DataFrame(no_results_frame), gr.DataFrame(no_results_frame)
+    models_to_remove = list(per_task[to_remove].index)
+    typed_mean = mean_per_type.mean(skipna=False, axis=1)
+    overall_mean = per_task.mean(skipna=False, axis=1)
+    joint_table = mean_per_type.copy()
+    per_task = per_task.drop(models_to_remove, axis=0)
+    joint_table = joint_table.drop(models_to_remove, axis=0)
+    joint_table.insert(0, "mean", overall_mean)
+    joint_table.insert(1, "mean_by_task_type", typed_mean)
+    joint_table["borda_rank"] = get_borda_rank(per_task)
+    joint_table = joint_table.sort_values("borda_rank", ascending=True)
+    per_task["borda_rank"] = joint_table["borda_rank"]
+    per_task = per_task.sort_values("borda_rank", ascending=True)
+    per_task = per_task.drop(columns=["borda_rank"])
+    joint_table = joint_table.reset_index()
+    model_metas = joint_table["model_name"].map(failsafe_get_model_meta)
+root@modal:/app#

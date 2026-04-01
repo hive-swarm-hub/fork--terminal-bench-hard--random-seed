@@ -1,0 +1,164 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/verify_final.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def calc_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse files
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('/app/primers.fasta')
+> fwd_primer = primers['forward_primer'].upper()
+> rev_primer = primers['reverse_primer'].upper()
+>
+> print("=== PRIMERS ===")
+> print(f"Forward: {fwd_primer} (len={len(fwd_primer)})")
+> print(f"Reverse: {rev_primer} (len={len(rev_primer)})")
+>
+> # Find where fwd primer anneals to input (check suffix matches)
+> fwd_anneal = None
+> fwd_anneal_pos = None
+> for anneal_len in range(15, min(len(fwd_primer)+1, 46)):
+>     candidate = fwd_primer[-anneal_len:]
+>     pos = input_seq.find(candidate)
+>     if pos >= 0:
+>         fwd_anneal = candidate
+>         fwd_anneal_pos = pos
+>         fwd_tail = fwd_primer[:-anneal_len]
+>
+> # Use the longest annealing match
+> print(f"\nForward anneal: {fwd_anneal} (len={len(fwd_anneal)}, pos={fwd_anneal_pos})")
+> print(f"Forward tail (insertion): {fwd_tail} (len={len(fwd_tail)})")
+>
+> # Find where rev primer anneals to input (reverse complement)
+> rev_anneal = rev_primer  # For Q5 SDM, entire reverse primer anneals
+> rev_rc = reverse_complement(rev_anneal)
+> rev_pos = input_seq.find(rev_rc)
+> print(f"\nReverse anneal: {rev_anneal} (len={len(rev_anneal)})")
+> print(f"Reverse RC: {rev_rc}")
+> print(f"Reverse anneals at input pos: {rev_pos} to {rev_pos + len(rev_rc)}")
+>
+> # Verify Tm
+> fwd_tm = calc_tm(fwd_anneal)
+> rev_tm = calc_tm(rev_anneal)
+> print(f"\n=== TM VERIFICATION ===")
+> print(f"Fwd anneal Tm: {fwd_tm:.2f}")
+> print(f"Rev anneal Tm: {rev_tm:.2f}")
+> print(f"Tm diff: {abs(fwd_tm - rev_tm):.2f}")
+> print(f"Fwd Tm in [58,72]: {58 <= fwd_tm <= 72}")
+> print(f"Rev Tm in [58,72]: {58 <= rev_tm <= 72}")
+> print(f"Tm diff <= 5: {abs(fwd_tm - rev_tm) <= 5}")
+> print(f"Fwd anneal len in [15,45]: {15 <= len(fwd_anneal) <= 45}")
+> print(f"Rev anneal len in [15,45]: {15 <= len(rev_anneal) <= 45}")
+>
+> # Simulate Q5 SDM product
+> # The insertion point: reverse primer anneals up to position X, forward primer starts at position X
+> # Rev primer RC is at input_seq[rev_pos:rev_pos+len(rev_rc)]
+> # Fwd anneal is at input_seq[fwd_anneal_pos:fwd_anneal_pos+len(fwd_anneal)]
+> insert_pos = rev_pos + len(rev_rc)  # end of reverse primer annealing = start of forward primer annealing
+> print(f"\n=== PRODUCT VERIFICATION ===")
+> print(f"Rev primer anneals: input[{rev_pos}:{rev_pos+len(rev_rc)}]")
+> print(f"Fwd primer anneals: input[{fwd_anneal_pos}:{fwd_anneal_pos+len(fwd_anneal)}]")
+> print(f"Insert point: {insert_pos}")
+> print(f"Fwd anneal start: {fwd_anneal_pos}")
+> print(f"These should be equal: {insert_pos == fwd_anneal_pos}")
+>
+> # Product = input[:insert_pos] + fwd_tail + input[insert_pos:]
+> product = input_seq[:insert_pos] + fwd_tail + input_seq[insert_pos:]
+> print(f"\nProduct length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> print(f"Product == Output: {product == output_seq}")
+>
+> if product != output_seq:
+>     # Find where they differ
+>     for i in range(min(len(product), len(output_seq))):
+>         if product[i] != output_seq[i]:
+>             print(f"First diff at pos {i}: product={product[i]}, output={output_seq[i]}")
+>             print(f"  product[{i-5}:{i+5}] = {product[max(0,i-5):i+5]}")
+>             print(f"  output[{i-5}:{i+5}] = {output_seq[max(0,i-5):i+5]}")
+>             break
+>
+> print("\n=== MINIMUM PAIRS CHECK ===")
+> print("Number of mutation sites: 1 (single insertion)")
+> print("Number of primer pairs: 1")
+> print("This is the minimum needed.")
+>
+> print("\n=== ALL CHECKS PASSED ===") if (
+>     product == output_seq and
+>     58 <= fwd_tm <= 72 and
+>     58 <= rev_tm <= 72 and
+>     abs(fwd_tm - rev_tm) <= 5 and
+>     15 <= len(fwd_anneal) <= 45 and
+>     15 <= len(rev_anneal) <= 45 and
+>     insert_pos == fwd_anneal_pos
+> ) else print("\n=== SOME CHECKS FAILED ===")
+> PYEOF
+root@modal:/app# python3 /tmp/verify_final.py
+=== PRIMERS ===
+Forward: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT (len=57)
+Reverse: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (len=45)
+
+Forward anneal: AGCAAGGGCGAGGAGCTGTT (len=20, pos=213)
+Forward tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (len=37)
+
+Reverse anneal: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (len=45)
+Reverse RC: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Reverse anneals at input pos: 170 to 215
+
+=== TM VERIFICATION ===
+Fwd anneal Tm: 68.19
+Rev anneal Tm: 63.81
+Tm diff: 4.39
+Fwd Tm in [58,72]: True
+Rev Tm in [58,72]: True
+Tm diff <= 5: True
+Fwd anneal len in [15,45]: True
+Rev anneal len in [15,45]: True
+
+=== PRODUCT VERIFICATION ===
+Rev primer anneals: input[170:215]
+Fwd primer anneals: input[213:233]
+Insert point: 215
+Fwd anneal start: 213
+These should be equal: False
+
+Product length: 3628
+Output length: 3630
+Product == Output: False
+First diff at pos 252: product=C, output=A
+  product[247:257] = CAGAACAAGG
+  output[247:257] = CAGAAAGCAA
+
+=== MINIMUM PAIRS CHECK ===
+Number of mutation sites: 1 (single insertion)
+Number of primer pairs: 1
+This is the minimum needed.
+
+=== SOME CHECKS FAILED ===
+root@modal:/app#

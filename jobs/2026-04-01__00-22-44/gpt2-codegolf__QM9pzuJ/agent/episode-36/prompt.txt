@@ -1,0 +1,91 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'EOF'
+> import numpy as np, math
+>
+> V,C,CTX,L,H = 50257,768,1024,12,12
+>
+> with open('gpt2-124M.ckpt','rb') as f:
+>     w = np.frombuffer(f.read(), dtype=np.float32)
+>
+> off = 0
+> def take(n):
+>     global off
+>     r = w[off:off+n].copy()
+>     off += n
+>     return r
+>
+> layer_order = [0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9]
+> qkvb=[None]*12;qkvw=[None]*12;apb=[None]*12;apw=[None]*12
+> ln1b=[None]*12;ln1g=[None]*12;ln2b=[None]*12;ln2g=[None]*12
+> fcb=[None]*12;fcw=[None]*12;fpb=[None]*12;fpw=[None]*12
+>
+> for l in layer_order:
+>     qkvb[l]=take(3*C)
+>     qkvw[l]=take(C*3*C).reshape(C,3*C)
+>     apb[l]=take(C)
+>     apw[l]=take(C*C).reshape(C,C)
+>     ln1b[l]=take(C)
+>     ln1g[l]=take(C)
+>     ln2b[l]=take(C)
+>     ln2g[l]=take(C)
+>     fcb[l]=take(4*C)
+>     fcw[l]=take(C*4*C).reshape(C,4*C)
+>     fpb[l]=take(C)
+>     fpw[l]=take(4*C*C).reshape(4*C,C)
+>
+> lnfb=take(C);lnfg=take(C);wpe=take(CTX*C).reshape(CTX,C);wte=take(V*C).reshape(V,C)
+>
+> def layernorm(x,g,b):
+>     m=x.mean(-1,keepdims=True);v=x.var(-1,keepdims=True)
+>     return g*(x-m)/np.sqrt(v+1e-5)+b
+> def gelu(x): return 0.5*x*(1+np.tanh(np.sqrt(2/np.pi)*(x+0.044715*x**3)))
+> def softmax(x):
+>     x=x-x.max(-1,keepdims=True);e=np.exp(x);return e/e.sum(-1,keepdims=True)
+>
+> def forward(tokens):
+>     T=len(tokens);x=wte[tokens]+wpe[:T]
+>     for l in range(L):
+>         nx=layernorm(x,ln1g[l],ln1b[l])
+>         qkv=nx@qkvw[l]+qkvb[l]
+>         q,k,v=np.split(qkv,3,axis=-1)
+>         hs=C//H
+>         q=q.reshape(T,H,hs).transpose(1,0,2)
+>         k=k.reshape(T,H,hs).transpose(1,0,2)
+>         v=v.reshape(T,H,hs).transpose(1,0,2)
+>         att=q@k.transpose(0,2,1)/math.sqrt(hs)
+>         mask=np.triu(np.ones((T,T)),k=1)*-1e10
+>         att=softmax(att+mask)
+>         out=(att@v).transpose(1,0,2).reshape(T,C)
+>         x=x+out@apw[l]+apb[l]
+>         nx=layernorm(x,ln2g[l],ln2b[l])
+>         h=gelu(nx@fcw[l]+fcb[l])
+>         x=x+h@fpw[l]+fpb[l]
+>     x=layernorm(x,lnfg,lnfb)
+>     return x@wte.T
+>
+> # Build decoder
+> def bytes_to_unicode():
+>     bs=list(range(33,127))+list(range(161,173))+list(range(174,256))
+>     cs=bs[:];n=0
+>     for b in range(256):
+>         if b not in bs: bs.append(b);cs.append(256+n);n+=1
+>     return dict(zip(bs,[chr(c) for c in cs]))
+> be=bytes_to_unicode();bd={v:k for k,v in be.items()}
+> with open('vocab.bpe','r') as f: lines=f.read().split('\n')
+> merges=[(l.split()[0],l.split()[1]) for l in lines[1:] if l.strip() and len(l.split())==2]
+> vocab=[be[i] for i in range(256)]
+> for a,b in merges: vocab.append(a+b)
+> def decode_token(t): return bytes([bd[c] for c in vocab[t]]).decode('utf-8',errors='replace')
+>
+> tokens=[15496]
+> for i in range(20):
+>     logits=forward(tokens)
+>     nt=int(np.argmax(logits[-1]))
+>     tokens.append(nt)
+>     print(f'Token {nt}: "{decode_token(nt)}"')
+> print('Full output: "'+''.join(decode_token(t) for t in tokens[1:])+'"')
+> EOF
+Token 11: "
+           "
+

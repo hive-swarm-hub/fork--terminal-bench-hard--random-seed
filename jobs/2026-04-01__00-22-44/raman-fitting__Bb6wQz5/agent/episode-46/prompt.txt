@@ -1,0 +1,133 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data = open('/app/graphene.dat').readlines()
+> xvals = []
+> yvals = []
+> for line in data:
+>     parts = line.strip().split()
+>     if len(parts) >= 2:
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         xvals.append(x)
+>         yvals.append(y)
+>
+> x_raw = np.array(xvals[::-1])  # ascending order
+> y = np.array(yvals[::-1])
+>
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Step 1: Find laser peak center in raw units
+> mask_laser = (x_raw >= 18000) & (x_raw <= 20500)
+> popt_laser, _ = curve_fit(lorentzian, x_raw[mask_laser], y[mask_laser],
+>                           p0=[19200, 200, 70000, 15000], maxfev=50000)
+> x_laser_raw = popt_laser[0]
+> print(f"Laser peak in raw units: {x_laser_raw:.4f}")
+>
+> # Step 2: Fit G peak in raw units to find its center
+> mask_g = (x_raw >= 9500) & (x_raw <= 11500)
+> popt_g_raw, _ = curve_fit(lorentzian, x_raw[mask_g], y[mask_g],
+>                           p0=[10400, 300, 8000, 10000], maxfev=50000)
+> x_g_raw = popt_g_raw[0]
+> print(f"G peak in raw units: {x_g_raw:.4f}")
+>
+> # Step 3: Determine linear calibration
+> # Raman_shift = B * (x_laser_raw - x_raw)
+> # At G peak: 1580 = B * (x_laser_raw - x_g_raw)
+> B = 1580.0 / (x_laser_raw - x_g_raw)
+> print(f"Calibration factor B = {B:.6f}")
+> print(f"Raman_shift = {B:.6f} * ({x_laser_raw:.4f} - x)")
+>
+> # Step 4: Convert entire x-axis to Raman shift
+> raman_shift = B * (x_laser_raw - x_raw)
+>
+> # Step 5: Fit G peak in Raman shift space
+> mask_g_rs = (raman_shift >= 1300) & (raman_shift <= 1900)
+> rs_g = raman_shift[mask_g_rs]
+> y_g = y[mask_g_rs]
+> popt_g, _ = curve_fit(lorentzian, rs_g, y_g, p0=[1580, 60, 10000, 9000], maxfev=50000)
+> print(f"\nG peak (cm-1): x0={popt_g[0]:.4f}, gamma={abs(popt_g[1]):.4f}, amp={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+>
+> # Verify fit quality
+> y_fit = lorentzian(rs_g, *popt_g)
+> r2 = 1 - np.sum((y_g - y_fit)**2) / np.sum((y_g - np.mean(y_g))**2)
+> print(f"  R² = {r2:.6f}")
+>
+> # Step 6: Fit 2D peak in Raman shift space
+> mask_2d_rs = (raman_shift >= 2400) & (raman_shift <= 3000)
+> rs_2d = raman_shift[mask_2d_rs]
+> y_2d = y[mask_2d_rs]
+>
+> # Check what data looks like in this region
+> print(f"\n2D region: {len(rs_2d)} points from {rs_2d.min():.2f} to {rs_2d.max():.2f}")
+> if len(rs_2d) > 0:
+>     print(f"  y range: {y_2d.min():.2f} to {y_2d.max():.2f}")
+>     idx_max = np.argmax(y_2d)
+>     print(f"  Peak at rs={rs_2d[idx_max]:.2f}, y={y_2d[idx_max]:.2f}")
+>
+> popt_2d, _ = curve_fit(lorentzian, rs_2d, y_2d, p0=[2700, 4, 12000, 1400], maxfev=50000)
+> print(f"\n2D peak (cm-1): x0={popt_2d[0]:.4f}, gamma={abs(popt_2d[1]):.4f}, amp={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+>
+> y_fit = lorentzian(rs_2d, *popt_2d)
+> r2 = 1 - np.sum((y_2d - y_fit)**2) / np.sum((y_2d - np.mean(y_2d))**2)
+> print(f"  R² = {r2:.6f}")
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(popt_g[0]), 4),
+>         "gamma": round(float(abs(popt_g[1])), 4),
+>         "amplitude": round(float(popt_g[2]), 4),
+>         "offset": round(float(popt_g[3]), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(popt_2d[0]), 4),
+>         "gamma": round(float(abs(popt_2d[1])), 4),
+>         "amplitude": round(float(popt_2d[2]), 4),
+>         "offset": round(float(popt_2d[3]), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print("\nFinal results:")
+> print(json.dumps(results, indent=2))
+> PYEOF
+Laser peak in raw units: 19194.9009
+G peak in raw units: 10433.5466
+Calibration factor B = 0.180337
+Raman_shift = 0.180337 * (19194.9009 - x)
+
+G peak (cm-1): x0=1578.6232, gamma=64.5788, amp=10762.8316, offset=8909.0616
+  R² = 0.878261
+
+2D region: 1193 points from 2400.99 to 2999.96
+  y range: 40.09 to 12920.88
+  Peak at rs=2786.19, y=12920.88
+
+2D peak (cm-1): x0=1913.0152, gamma=28004.4571, amp=4042438.7823, offset=-4036397.3502
+  R² = 0.549473
+
+Final results:
+{
+  "G": {
+    "x0": 1578.6232,
+    "gamma": 64.5788,
+    "amplitude": 10762.8316,
+    "offset": 8909.0616
+  },
+  "2D": {
+    "x0": 1913.0152,
+    "gamma": 28004.4571,
+    "amplitude": 4042438.7823,
+    "offset": -4036397.3502
+  }
+}
+root@modal:/app#

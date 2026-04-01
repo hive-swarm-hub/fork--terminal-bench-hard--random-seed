@@ -1,0 +1,104 @@
+New Terminal Output:
+__
+root@modal:/app# cat -n /app/jump_analyzer.py | head -100
+     1  import cv2
+     2  import numpy as np
+     3  import toml
+     4  import sys
+     5
+     6
+     7  def analyze_jump(video_path):
+     8      # Read all frames
+     9      cap = cv2.VideoCapture(video_path)
+    10      frames = []
+    11      while True:
+    12          ret, frame = cap.read()
+    13          if not ret:
+    14              break
+    15          frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    16      cap.release()
+    17
+    18      n_frames = len(frames)
+    19      bg = frames[0].astype(np.float32)
+    20      height, width = frames[0].shape
+    21
+    22      # Track region to focus analysis (avoid sky/buildings at top)
+    23      track_y_start = int(height * 0.19)
+    24      track_y_end = int(height * 0.74)
+    25
+    26      # Step 1: Compute optical flow for all consecutive frame pairs
+    27      all_flow = []
+    28      for i in range(1, n_frames):
+    29          prev = frames[i - 1]
+    30          curr = frames[i]
+    31
+    32          flow = cv2.calcOpticalFlowFarneback(
+    33              prev, curr, None,
+    34              pyr_scale=0.5, levels=3, winsize=15,
+    35              iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+    36          )
+    37
+    38          vy = flow[:, :, 1]
+    39          vx = flow[:, :, 0]
+    40          motion_mag = np.sqrt(vx ** 2 + vy ** 2)
+    41
+    42          track_vy = vy[track_y_start:track_y_end, :]
+    43          track_mag = motion_mag[track_y_start:track_y_end, :]
+    44          track_mask = track_mag > 1.5
+    45
+    46          n_moving = int(np.sum(track_mask))
+    47
+    48          if n_moving > 50:
+    49              moving_vy = track_vy[track_mask]
+    50              avg_vy = float(np.mean(moving_vy))
+    51              upward_pixels = moving_vy[moving_vy < -1]
+    52              downward_pixels = moving_vy[moving_vy > 1]
+    53              upward_sum = float(np.sum(np.abs(upward_pixels))) if len(upward_pixels) > 0 else 0.0
+    54              downward_sum = float(np.sum(downward_pixels)) if len(downward_pixels) > 0 else 0.0
+    55          else:
+    56              avg_vy = 0.0
+    57              upward_sum = 0.0
+    58              downward_sum = 0.0
+    59
+    60          all_flow.append((i, avg_vy, upward_sum, downward_sum, n_moving))
+    61
+    62      # Step 2: Identify the athlete's active period
+    63      n_moving_arr = np.array([d[4] for d in all_flow])
+    64      peak_motion = np.max(n_moving_arr)
+    65      motion_threshold = max(peak_motion * 0.12, 3000)
+    66
+    67      # Smooth motion signal
+    68      window = 5
+    69      if len(n_moving_arr) > window:
+    70          motion_smooth = np.convolve(n_moving_arr, np.ones(window)/window, mode='same')
+    71      else:
+    72          motion_smooth = n_moving_arr.astype(float)
+    73
+    74      # Find continuous active regions with gap tolerance
+    75      active_regions = []
+    76      in_region = False
+    77      region_start = 0
+    78      gap_count = 0
+    79      max_gap = 3
+    80
+    81      for idx in range(len(motion_smooth)):
+    82          if motion_smooth[idx] > motion_threshold:
+    83              if not in_region:
+    84                  region_start = idx
+    85                  in_region = True
+    86              gap_count = 0
+    87          else:
+    88              if in_region:
+    89                  gap_count += 1
+    90                  if gap_count > max_gap:
+    91                      active_regions.append((region_start, idx - gap_count))
+    92                      in_region = False
+    93                      gap_count = 0
+    94      if in_region:
+    95          active_regions.append((region_start, len(motion_smooth) - 1))
+    96
+    97      # Select the longest region
+    98      if active_regions:
+    99          best_region = max(active_regions, key=lambda r: r[1] - r[0])
+   100          region_start, region_end = best_region
+root@modal:/app#
