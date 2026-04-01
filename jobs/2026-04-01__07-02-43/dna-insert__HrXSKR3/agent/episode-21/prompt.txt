@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Load sequences
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # Load primers
+> primers = parse_fasta('primers.fasta')
+> print("Primer names:", list(primers.keys()))
+>
+> fwd = primers['forward_primer'].lower()
+> rev = primers['reverse_primer'].lower()
+>
+> print(f"Forward primer: {fwd}")
+> print(f"Reverse primer: {rev}")
+> print(f"Forward length: {len(fwd)}")
+> print(f"Reverse length: {len(rev)}")
+>
+> # The insertion sequence is the 5' tail of the forward primer
+> # The annealing part of the forward primer should match the input template
+> # The reverse primer should fully anneal to the input template (as RC)
+>
+> # Find where the forward primer anneals to the input
+> # The 3' end of the forward primer should match the input
+> fwd_anneal_found = False
+> for anneal_len in range(15, 46):
+>     fwd_anneal = fwd[-anneal_len:]
+>     # Check if this anneals to the input template
+>     pos = inp.find(fwd_anneal)
+>     if pos >= 0:
+>         fwd_tail = fwd[:-anneal_len]
+>         print(f"\nForward primer annealing ({anneal_len} nt) at input pos {pos}: {fwd_anneal}")
+>         print(f"Forward primer 5' tail ({len(fwd_tail)} nt): {fwd_tail}")
+>         tm_fwd = get_tm(fwd_anneal)
+>         print(f"Tm(fwd annealing): {tm_fwd:.2f}")
+>         fwd_anneal_found = True
+>         fwd_anneal_best = fwd_anneal
+>         fwd_tail_best = fwd_tail
+>         fwd_pos = pos
+>         tm_fwd_best = tm_fwd
+>         break
+>
+> # Find where the reverse primer anneals to the input
+> # The reverse primer is the RC of a region on the input template
+> rev_rc = rc(rev)
+> rev_anneal_found = False
+> for anneal_len in range(len(rev), 14, -1):
+>     rev_anneal_template = rev_rc[:anneal_len] if anneal_len < len(rev) else rev_rc
+>     pos = inp.find(rev_anneal_template)
+>     if pos >= 0:
+>         rev_anneal = rev[-anneal_len:] if anneal_len < len(rev) else rev
+>         rev_tail = rev[:-anneal_len] if anneal_len < len(rev) else ''
+>         print(f"\nReverse primer annealing ({anneal_len} nt) at input pos {pos}: template={rev_anneal_template}")
+>         print(f"Reverse primer 5' tail: '{rev_tail}'")
+>         tm_rev = get_tm(rev_anneal_template)
+>         print(f"Tm(rev annealing): {tm_rev:.2f}")
+>         rev_anneal_found = True
+>         rev_pos = pos
+>         tm_rev_best = tm_rev
+>         rev_anneal_len = anneal_len
+>         break
+>
+> if fwd_anneal_found and rev_anneal_found:
+>     print(f"\n=== VERIFICATION ===")
+>     print(f"Fwd annealing length: {len(fwd_anneal_best)} (15-45? {15 <= len(fwd_anneal_best) <= 45})")
+>     print(f"Rev annealing length: {rev_anneal_len} (15-45? {15 <= rev_anneal_len <= 45})")
+>     print(f"Fwd Tm: {tm_fwd_best:.2f} (58-72? {58 <= tm_fwd_best <= 72})")
+>     print(f"Rev Tm: {tm_rev_best:.2f} (58-72? {58 <= tm_rev_best <= 72})")
+>     tm_diff = abs(tm_fwd_best - tm_rev_best)
+>     print(f"Tm difference: {tm_diff:.2f} (<=5? {tm_diff <= 5})")
+>
+>     # Verify reconstruction
+>     # The reverse primer anneals ending at some position
+>     # The forward primer anneals starting at some position
+>     # For back-to-back Q5 SDM: rev ends at position X, fwd starts at position X
+>     rev_end = rev_pos + rev_anneal_len  # position after last base of rev annealing
+>     fwd_start = fwd_pos  # position of first base of fwd annealing
+>     print(f"\nReverse primer anneals to input[{rev_pos}:{rev_end}]")
+>     print(f"Forward primer anneals to input[{fwd_start}:{fwd_start + len(fwd_anneal_best)}]")
+>     print(f"Back-to-back? Rev ends at {rev_end}, Fwd starts at {fwd_start}")
+>
+>     # Reconstruct: inp[0:fwd_start] is before the insertion point
+>     # The insertion (fwd_tail) goes between rev_end and fwd_start
+>     reconstructed = inp[0:fwd_start] + fwd_tail_best + inp[fwd_start:]
+>     # Wait, actually for Q5 SDM with insertion:
+>     # After PCR, the product is: [rev_primer_RC][template from rev to fwd][fwd_primer]
+>     # Which linearized gives: insertion + downstream + upstream
+>     # When circularized and ligated: upstream...insertion...downstream
+>
+>     # Simpler check: out = inp[0:X] + insertion + inp[X:] where X = fwd_start
+>     reconstructed = inp[0:fwd_start] + fwd_tail_best + inp[fwd_start:]
+>     print(f"\nReconstruction matches output: {reconstructed == out}")
+>     if reconstructed != out:
+>         # Find where they differ
+>         for i in range(min(len(reconstructed), len(out))):
+>             if reconstructed[i] != out[i]:
+>                 print(f"First diff at {i}: recon={reconstructed[i]}, out={out[i]}")
+>                 print(f"Context recon: {reconstructed[max(0,i-10):i+10]}")
+>                 print(f"Context out:   {out[max(0,i-10):i+10]}")
+>                 break
+> else:
+>     print("ERROR: Could not find primer annealing sites!")
+>
+> PYEOF
+Primer names: ['forward_primer', 'reverse_primer']
+Forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+Forward length: 55
+Reverse length: 34
+
+Forward primer annealing (15 nt) at input pos 216: aagggcgaggagctg
+Forward primer 5' tail (40 nt): tagattagaagaagaattaagaagaagattaacagaaagc
+Tm(fwd annealing): 59.54
+
+Reverse primer annealing (34 nt) at input pos 181: template=ttgtttaactttaagaaggagatatacatatgag
+Reverse primer 5' tail: ''
+Tm(rev annealing): 61.31
+
+=== VERIFICATION ===
+Fwd annealing length: 15 (15-45? True)
+Rev annealing length: 34 (15-45? True)
+Fwd Tm: 59.54 (58-72? True)
+Rev Tm: 61.31 (58-72? True)
+Tm difference: 1.78 (<=5? True)
+
+Reverse primer anneals to input[181:215]
+Forward primer anneals to input[216:231]
+Back-to-back? Rev ends at 215, Fwd starts at 216
+
+Reconstruction matches output: False
+First diff at 215: recon=c, out=t
+Context recon: tacatatgagctagattaga
+Context out:   tacatatgagtagattagaa
+root@modal:/app#

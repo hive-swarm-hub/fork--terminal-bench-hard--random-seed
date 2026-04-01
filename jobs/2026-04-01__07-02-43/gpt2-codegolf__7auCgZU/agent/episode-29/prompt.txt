@@ -1,0 +1,132 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1))+list(range(0xa1, 0xac+1))+list(range(0xae, 0xff+1))
+>     cs = list(bs)
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> be = bytes_to_unicode()
+> bd = {v:k for k,v in be.items()}
+>
+> vocab = []
+> for i in range(256):
+>     vocab.append(be[i])
+> lines = open('vocab.bpe').readlines()
+> for line in lines[1:]:
+>     line = line.strip()
+>     if not line: continue
+>     parts = line.split(' ', 1)
+>     if len(parts) == 2:
+>         vocab.append(parts[0] + parts[1])
+> vocab.append('<|endoftext|>')  # token 50256
+>
+> def decode_token(t):
+>     s = vocab[t]
+>     if s == '<|endoftext|>': return s
+>     try:
+>         return bytes([bd[c] for c in s]).decode('utf-8', errors='replace')
+>     except:
+>         return repr(s)
+>
+> for t in [46107, 17787, 16506, 15628, 30766, 30764]:
+>     print(f'Token {t}: {repr(decode_token(t))}')
+>
+> # Also check what the non-transposed version gave
+> # Let me run non-transposed
+> import math, array
+> f = open('gpt2-124M.ckpt', 'rb')
+> data = f.read()
+> f.close()
+> W = array.array('f', data)
+>
+> V=50257; C=768; T=1024; L_=12
+> off = 0
+> wte=off; off+=V*C
+> wpe=off; off+=T*C
+> ln1w=off; off+=L_*C
+> ln1b=off; off+=L_*C
+> qkvw=off; off+=L_*3*C*C
+> qkvb=off; off+=L_*3*C
+> attprojw=off; off+=L_*C*C
+> attprojb=off; off+=L_*C
+> ln2w=off; off+=L_*C
+> ln2b=off; off+=L_*C
+> fcw=off; off+=L_*4*C*C
+> fcb=off; off+=L_*4*C
+> fcprojw=off; off+=L_*4*C*C
+> fcprojb=off; off+=L_*C
+> lnfw=off; off+=C
+> lnfb=off; off+=C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     inv = 1.0 / math.sqrt(var + 1e-5)
+>     return [(x[i] - mean) * inv * W[w_off + i] + W[b_off + i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matvec(x, w_off, rows, cols):
+>     out = [0.0] * rows
+>     for i in range(rows):
+>         s = 0.0
+>         for j in range(cols):
+>             s += W[w_off + i * cols + j] * x[j]
+>         out[i] = s
+>     return out
+>
+> tk = 464
+> x = [W[wte + tk*C + i] + W[wpe + 0*C + i] for i in range(C)]
+> for l in range(L_):
+>     xn = layernorm(x, ln1w + l*C, ln1b + l*C)
+>     qkv = matvec(xn, qkvw + l*3*C*C, 3*C, C)
+>     for i in range(3*C): qkv[i] += W[qkvb + l*3*C + i]
+>     attn_out = qkv[2*C:3*C]
+>     proj = matvec(attn_out, attprojw + l*C*C, C, C)
+>     for i in range(C): proj[i] += W[attprojb + l*C + i]
+>     for i in range(C): x[i] += proj[i]
+>     xn2 = layernorm(x, ln2w + l*C, ln2b + l*C)
+>     h = matvec(xn2, fcw + l*4*C*C, 4*C, C)
+>     for i in range(4*C): h[i] = gelu(h[i] + W[fcb + l*4*C + i])
+>     mlp_out = matvec(h, fcprojw + l*4*C*C, C, 4*C)
+>     for i in range(C): mlp_out[i] += W[fcprojb + l*C + i]
+>     for i in range(C): x[i] += mlp_out[i]
+>
+> x = layernorm(x, lnfw, lnfb)
+> best = []
+> for i in range(V):
+>     s = sum(W[wte + i*C + j] * x[j] for j in range(C))
+>     best.append((s, i))
+> best.sort(reverse=True)
+> print('\nNon-transposed Top 10:')
+> for s, i in best[:10]:
+>     print(f'  token {i} ({repr(decode_token(i))}): logit={s:.4f}')
+> PYEOF
+Token 46107: ' Damien'
+Token 17787: ' cryst'
+Token 16506: ' flame'
+Token 15628: ' CAN'
+Token 30766: 'ogical'
+Token 30764: 'olithic'
+
+Non-transposed Top 10:
+  token 36714 ('croft'): logit=9.3784
+  token 26793 ('"-'): logit=8.5411
+  token 43739 (' wastes'): logit=7.7867
+  token 44898 ('Weak'): logit=7.1788
+  token 36448 (' Ves'): logit=6.6612
+  token 29994 (' (),'): logit=6.3733
+  token 35421 (' Vog'): logit=6.3324
+  token 30564 (' Enlight'): logit=5.7923
+  token 25224 ('た'): logit=5.5873
+  token 34674 ('Virgin'): logit=5.5795
+root@modal:/app#

@@ -1,0 +1,223 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/convert_masks.py << 'SCRIPT_EOF'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> from PIL import Image
+> import torch
+> from mobile_sam import sam_model_registry, SamPredictor
+> from tqdm import tqdm
+> import warnings
+> warnings.filterwarnings("ignore")
+>
+>
+> def parse_args():
+>     parser = argparse.ArgumentParser(description="Convert rectangular masks to polylines using MobileSAM")
+>     parser.add_argument("weights_path", type=str, help="Path to MobileSAM weights")
+>     parser.add_argument("output_path", type=str, help="Path to output CSV file")
+>     parser.add_argument("rgb_path", type=str, help="Path to the RGB image")
+>     parser.add_argument("csv_path", type=str, help="Path to the metadata CSV")
+>     return parser.parse_args()
+>
+>
+> def load_model(weights_path):
+>     """Load MobileSAM model."""
+>     model_type = "vit_t"
+>     device = "cpu"
+>     sam = sam_model_registry[model_type](checkpoint=weights_path)
+>     sam.to(device=device)
+>     sam.eval()
+>     predictor = SamPredictor(sam)
+>     return predictor
+>
+>
+> def get_mask_from_sam(predictor, bbox):
+>     """Get mask from SAM using bounding box prompt.
+>
+>     Args:
+>         predictor: SamPredictor with image already set
+>         bbox: [xmin, ymin, xmax, ymax]
+>
+>     Returns:
+>         mask: binary mask (H, W)
+>         score: confidence score
+>     """
+>     input_box = np.array(bbox)
+>     masks, scores, logits = predictor.predict(
+>         point_coords=None,
+>         point_labels=None,
+>         box=input_box[None, :],
+>         multimask_output=True,
+>     )
+>     # Pick the mask with the highest score
+>     best_idx = np.argmax(scores)
+>     return masks[best_idx], scores[best_idx], logits[best_idx]
+>
+>
+> def mask_to_largest_component(mask):
+>     """Keep only the largest connected component of a binary mask."""
+>     mask_uint8 = mask.astype(np.uint8)
+>     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+>
+>     if num_labels <= 1:
+>         return mask
+>
+>     # Find largest component (skip background label 0)
+>     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>     return (labels == largest_label).astype(np.uint8)
+>
+>
+> def mask_to_contour(mask):
+>     """Convert binary mask to contour coordinates.
+>
+>     Returns:
+>         coords_x, coords_y: lists of coordinates
+>         xmin, ymin, xmax, ymax: bounding box
+>     """
+>     mask_uint8 = (mask > 0).astype(np.uint8) * 255
+>     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>     if len(contours) == 0:
+>         return None, None, None, None, None, None
+>
+>     # Take the largest contour
+>     contour = max(contours, key=cv2.contourArea)
+>
+>     # Extract coordinates
+>     contour = contour.squeeze(axis=1)  # (N, 2)
+>     coords_x = contour[:, 0].tolist()
+>     coords_y = contour[:, 1].tolist()
+>
+>     # Close the contour if not already closed
+>     if coords_x[0] != coords_x[-1] or coords_y[0] != coords_y[-1]:
+>         coords_x.append(coords_x[0])
+>         coords_y.append(coords_y[0])
+>
+>     xmin = min(coords_x)
+>     xmax = max(coords_x)
+>     ymin = min(coords_y)
+>     ymax = max(coords_y)
+>
+>     return coords_x, coords_y, xmin, ymin, xmax, ymax
+>
+>
+> def resolve_overlaps(masks, scores, image_shape):
+>     """Resolve overlaps between masks by assigning each pixel to the highest-scoring mask.
+>
+>     Args:
+>         masks: list of binary masks (H, W)
+>         scores: list of confidence scores
+>         image_shape: (H, W)
+>
+>     Returns:
+>         resolved_masks: list of binary masks with no overlaps
+>     """
+>     h, w = image_shape[:2]
+>     n = len(masks)
+>
+>     # Create a label map: each pixel assigned to the mask with highest score
+>     # Initialize with -1 (no mask)
+>     label_map = np.full((h, w), -1, dtype=np.int32)
+>     score_map = np.full((h, w), -np.inf, dtype=np.float64)
+>
+>     for i in range(n):
+>         mask_pixels = masks[i] > 0
+>         better = scores[i] > score_map
+>         update = mask_pixels & better
+>         label_map[update] = i
+>         score_map[update] = scores[i]
+>
+>     # Create resolved masks
+>     resolved_masks = []
+>     for i in range(n):
+>         resolved_mask = (label_map == i).astype(np.uint8)
+>         # Keep only the largest connected component
+>         resolved_mask = mask_to_largest_component(resolved_mask)
+>         resolved_masks.append(resolved_mask)
+>
+>     return resolved_masks
+>
+>
+> def main():
+>     args = parse_args()
+>
+>     # Load image
+>     image = np.array(Image.open(args.rgb_path).convert("RGB"))
+>     h, w = image.shape[:2]
+>
+>     # Load CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     # Load model
+>     predictor = load_model(args.weights_path)
+>     predictor.set_image(image)
+>
+>     # Process all masks with SAM
+>     all_masks = []
+>     all_scores = []
+>
+>     print("Generating masks with MobileSAM...")
+>     for idx, row in tqdm(df.iterrows(), total=len(df)):
+>         bbox = [int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])]
+>         mask, score, logit = get_mask_from_sam(predictor, bbox)
+>
+>         # Keep only within bounding box region (with some margin)
+>         all_masks.append(mask.astype(np.uint8))
+>         all_scores.append(float(score))
+>
+>     # Resolve overlaps
+>     print("Resolving overlaps...")
+>     resolved_masks = resolve_overlaps(all_masks, all_scores, (h, w))
+>
+>     # Convert masks to contours and update dataframe
+>     print("Converting masks to polylines...")
+>     new_rows = []
+>     for idx, row in df.iterrows():
+>         mask = resolved_masks[idx]
+>
+>         # If mask is empty after overlap resolution, fall back to original SAM mask
+>         # but keep only the largest component
+>         if mask.sum() == 0:
+>             mask = mask_to_largest_component(all_masks[idx])
+>
+>         # If still empty, keep original coordinates
+>         if mask.sum() == 0:
+>             new_rows.append(row)
+>             continue
+>
+>         coords_x, coords_y, xmin, ymin, xmax, ymax = mask_to_contour(mask)
+>
+>         if coords_x is None:
+>             new_rows.append(row)
+>             continue
+>
+>         new_row = row.copy()
+>         new_row['xmin'] = xmin
+>         new_row['ymin'] = ymin
+>         new_row['xmax'] = xmax
+>         new_row['ymax'] = ymax
+>         new_row['coords_x'] = ','.join(map(str, coords_x))
+>         new_row['coords_y'] = ','.join(map(str, coords_y))
+>         new_row['type'] = 'polyline'
+>         new_rows.append(new_row)
+>
+>     # Create output dataframe
+>     output_df = pd.DataFrame(new_rows)
+>
+>     # Ensure output directory exists
+>     output_dir = os.path.dirname(args.output_path)
+>     if output_dir:
+>         os.makedirs(output_dir, exist_ok=True)
+>
+>     # Save
+>     output_df.to_csv(args.output_path, index=False)
+>     print(f"Saved output to {args.output_path}")
+>
+>
+> if __name__ == "__main__":
+>     main()
+> SCRIPT_EOF
+root@modal:/app#

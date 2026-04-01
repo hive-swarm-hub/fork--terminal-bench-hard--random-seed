@@ -1,0 +1,163 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> primers = parse_fasta('primers.fasta')
+> fwd = list(primers.values())[0].lower()
+> rev = list(primers.values())[1].lower()
+>
+> print(f"Forward: {fwd} ({len(fwd)} nt)")
+> print(f"Reverse: {rev} ({len(rev)} nt)")
+>
+> # Find the longest 3' match of fwd to input template
+> for L in range(len(fwd), 0, -1):
+>     suffix = fwd[-L:]
+>     pos = inp.find(suffix)
+>     if pos >= 0:
+>         fwd_anneal_len = L
+>         fwd_anneal_pos = pos
+>         fwd_anneal = suffix
+>         fwd_tail = fwd[:-L]
+>         break
+>
+> print(f"\nFwd longest 3' match: {fwd_anneal_len} nt at input pos {fwd_anneal_pos}")
+> print(f"Fwd annealing: {fwd_anneal}")
+> print(f"Fwd tail (insertion): {fwd_tail} ({len(fwd_tail)} nt)")
+>
+> # Find the longest 3' match of rev to RC of input template
+> inp_rc = rc(inp)
+> for L in range(len(rev), 0, -1):
+>     suffix = rev[-L:]
+>     pos = inp_rc.find(suffix)
+>     if pos >= 0:
+>         rev_anneal_len = L
+>         rev_anneal_pos_rc = pos
+>         rev_anneal = suffix
+>         rev_tail = rev[:-L] if L < len(rev) else ''
+>         break
+>
+> # Convert RC position to forward strand position
+> # If rev matches inp_rc[pos:pos+L], then on forward strand it's inp[len(inp)-pos-L:len(inp)-pos]
+> rev_template_start = len(inp) - rev_anneal_pos_rc - rev_anneal_len
+> rev_template_end = len(inp) - rev_anneal_pos_rc
+> rev_template_seq = inp[rev_template_start:rev_template_end]
+>
+> print(f"\nRev longest 3' match: {rev_anneal_len} nt")
+> print(f"Rev annealing: {rev_anneal}")
+> print(f"Rev tail: '{rev_tail}'")
+> print(f"Rev template region: inp[{rev_template_start}:{rev_template_end}] = {rev_template_seq}")
+> print(f"RC of rev template region: {rc(rev_template_seq)}")
+> print(f"Matches rev primer: {rc(rev_template_seq) == rev_anneal}")
+>
+> # Compute Tm
+> tm_fwd = get_tm(fwd_anneal)
+> tm_rev = get_tm(rev_template_seq)  # Tm computed on the template strand
+> tm_rev2 = get_tm(rev_anneal)  # Same result expected
+>
+> print(f"\nTm(fwd annealing): {tm_fwd:.2f}")
+> print(f"Tm(rev template): {tm_rev:.2f}")
+> print(f"Tm(rev primer): {tm_rev2:.2f}")
+> print(f"Tm difference: {abs(tm_fwd - tm_rev):.2f}")
+>
+> # Constraints check
+> print(f"\n=== CONSTRAINT CHECKS ===")
+> print(f"Fwd annealing length {fwd_anneal_len}: 15-45? {15 <= fwd_anneal_len <= 45}")
+> print(f"Rev annealing length {rev_anneal_len}: 15-45? {15 <= rev_anneal_len <= 45}")
+> print(f"Fwd Tm {tm_fwd:.2f}: 58-72? {58 <= tm_fwd <= 72}")
+> print(f"Rev Tm {tm_rev:.2f}: 58-72? {58 <= tm_rev <= 72}")
+> print(f"Tm diff {abs(tm_fwd - tm_rev):.2f}: <=5? {abs(tm_fwd - tm_rev) <= 5}")
+> print(f"Fwd tail (no annealing): '{rev_tail}' (should be empty for rev)")
+>
+> # Reconstruction check
+> # Back-to-back: rev anneals to inp[rev_template_start:rev_template_end]
+> # fwd anneals to inp[fwd_anneal_pos:fwd_anneal_pos+fwd_anneal_len]
+> print(f"\nRev anneals to inp[{rev_template_start}:{rev_template_end}]")
+> print(f"Fwd anneals to inp[{fwd_anneal_pos}:{fwd_anneal_pos+fwd_anneal_len}]")
+> print(f"Back-to-back? Rev ends at {rev_template_end}, Fwd starts at {fwd_anneal_pos}: {rev_template_end == fwd_anneal_pos}")
+>
+> # The output should be: inp[0:fwd_anneal_pos] + fwd_tail + inp[fwd_anneal_pos:]
+> reconstructed = inp[0:fwd_anneal_pos] + fwd_tail + inp[fwd_anneal_pos:]
+> print(f"\nReconstruction matches output: {reconstructed == out}")
+> print(f"Number of primer pairs: 1")
+> print(f"\nAll checks passed!" if all([
+>     15 <= fwd_anneal_len <= 45,
+>     15 <= rev_anneal_len <= 45,
+>     58 <= tm_fwd <= 72,
+>     58 <= tm_rev <= 72,
+>     abs(tm_fwd - tm_rev) <= 5,
+>     rev_template_end == fwd_anneal_pos,
+>     reconstructed == out,
+>     rev_tail == ''
+> ]) else "SOME CHECKS FAILED!")
+>
+> PYEOF
+Forward: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag (54 nt)
+Reverse: catatgtatatctccttcttaaagttaaacaa (32 nt)
+
+Fwd longest 3' match: 15 nt at input pos 213
+Fwd annealing: agcaagggcgaggag
+Fwd tail (insertion): agtagattagaagaagaattaagaagaagattaacagaa (39 nt)
+
+Rev longest 3' match: 32 nt
+Rev annealing: catatgtatatctccttcttaaagttaaacaa
+Rev tail: ''
+Rev template region: inp[181:213] = ttgtttaactttaagaaggagatatacatatg
+RC of rev template region: catatgtatatctccttcttaaagttaaacaa
+Matches rev primer: True
+
+Tm(fwd annealing): 59.54
+Tm(rev template): 59.74
+Tm(rev primer): 59.74
+Tm difference: 0.21
+
+=== CONSTRAINT CHECKS ===
+Fwd annealing length 15: 15-45? True
+Rev annealing length 32: 15-45? True
+Fwd Tm 59.54: 58-72? True
+Rev Tm 59.74: 58-72? True
+Tm diff 0.21: <=5? True
+Fwd tail (no annealing): '' (should be empty for rev)
+
+Rev anneals to inp[181:213]
+Fwd anneals to inp[213:228]
+Back-to-back? Rev ends at 213, Fwd starts at 213: True
+
+Reconstruction matches output: True
+Number of primer pairs: 1
+
+All checks passed!
+root@modal:/app#

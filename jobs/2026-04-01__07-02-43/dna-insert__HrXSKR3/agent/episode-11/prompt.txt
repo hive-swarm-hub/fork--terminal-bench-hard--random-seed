@@ -1,0 +1,113 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     try:
+>         return float(result.stdout.strip())
+>     except:
+>         print(f"Error computing Tm for '{seq}': {result.stdout} {result.stderr}", file=sys.stderr)
+>         return None
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # Try all valid insertion points
+> best = None
+> best_diff = 999
+>
+> for X in [213, 214, 215]:
+>     insertion = out[X:X+39]
+>     # Verify
+>     assert inp[0:X] + insertion + inp[X:] == out, f"Insertion at X={X} doesn't reconstruct output"
+>
+>     # Forward primer: 5'-insertion-[annealing]-3'
+>     # Annealing part: inp[X:X+L_fwd]
+>     # Reverse primer: RC(inp[X-L_rev:X])
+>     # Annealing part: inp[X-L_rev:X]
+>
+>     for L_fwd in range(15, 37):  # oligotm max is 36
+>         fwd_anneal = inp[X:X+L_fwd]
+>         tm_fwd = get_tm(fwd_anneal)
+>         if tm_fwd is None or tm_fwd < 58 or tm_fwd > 72:
+>             continue
+>
+>         for L_rev in range(15, 37):
+>             rev_anneal = inp[X-L_rev:X]
+>             tm_rev = get_tm(rev_anneal)
+>             if tm_rev is None or tm_rev < 58 or tm_rev > 72:
+>                 continue
+>
+>             diff = abs(tm_fwd - tm_rev)
+>             if diff <= 5:
+>                 if best is None or diff < best_diff:
+>                     best_diff = diff
+>                     fwd_full = insertion + fwd_anneal
+>                     rev_full = rc(rev_anneal)
+>                     best = {
+>                         'X': X,
+>                         'fwd_anneal': fwd_anneal,
+>                         'rev_anneal': rev_anneal,
+>                         'fwd_full': fwd_full,
+>                         'rev_full': rev_full,
+>                         'tm_fwd': tm_fwd,
+>                         'tm_rev': tm_rev,
+>                         'diff': diff,
+>                         'L_fwd': L_fwd,
+>                         'L_rev': L_rev,
+>                         'insertion': insertion
+>                     }
+>
+> if best:
+>     print(f"Best primer pair found:")
+>     print(f"  Insertion point: X={best['X']}")
+>     print(f"  Insertion: {best['insertion']}")
+>     print(f"  Forward primer: {best['fwd_full']}")
+>     print(f"    Annealing part ({best['L_fwd']} nt): {best['fwd_anneal']}")
+>     print(f"    Tm(annealing): {best['tm_fwd']:.2f}")
+>     print(f"  Reverse primer: {best['rev_full']}")
+>     print(f"    Annealing part ({best['L_rev']} nt): {best['rev_anneal']}")
+>     print(f"    Tm(annealing): {best['tm_rev']:.2f}")
+>     print(f"  Tm difference: {best['diff']:.2f}")
+>
+>     # Write output
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{best['fwd_full']}\n")
+>         f.write(f">reverse_primer\n{best['rev_full']}\n")
+>     print("\nPrimers written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@modal:/app# python3 /app/design_primers.py
+

@@ -1,0 +1,175 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     # -tp 1 -sc 1 -mv 50 -dv 2 -n 0.8 -d 500
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # Find common prefix and suffix
+> prefix_len = 0
+> for i in range(min(len(inp), len(out))):
+>     if inp[i] == out[i]:
+>         prefix_len = i + 1
+>     else:
+>         break
+>
+> suffix_len = 0
+> for i in range(1, min(len(inp), len(out))+1):
+>     if inp[-i] == out[-i]:
+>         suffix_len = i
+>     else:
+>         break
+>
+> print(f"Common prefix length: {prefix_len}")
+> print(f"Common suffix length: {suffix_len}")
+> print(f"Input length: {len(inp)}")
+> print(f"Output length: {len(out)}")
+>
+> # The insertion point in the input template
+> # Due to 2-base overlap, we can choose the insertion point
+> # Let's place it so that the insertion is cleanly between two positions
+> # Input unique region: inp[prefix_len : len(inp)-suffix_len] (empty for pure insertion)
+> # Output unique region: out[prefix_len : len(out)-suffix_len]
+>
+> inp_mut_start = prefix_len  # 215
+> inp_mut_end = len(inp) - suffix_len  # 213
+>
+> out_mut_start = prefix_len  # 215
+> out_mut_end = len(out) - suffix_len  # 252
+>
+> inserted_seq = out[out_mut_start:out_mut_end]
+> print(f"\nInsertion between input positions {inp_mut_end-1} and {inp_mut_start}")
+> print(f"Inserted sequence: {inserted_seq} ({len(inserted_seq)} bases)")
+>
+> # For Q5 SDM kit insertion:
+> # The insertion point on the template. Due to overlap, we pick position 213
+> # (the suffix starts at inp[213:])
+> #
+> # Reverse primer: anneals to template upstream of insertion point
+> #   - Binds to inp[213-L_rev : 213] (reverse complement)
+> #   - Its 3' end is at position 212 (0-indexed), pointing left/upstream
+> #
+> # Forward primer: has insertion as 5' tail, anneals downstream
+> #   - 5' tail = inserted_seq_on_output = the full insertion
+> #   - Annealing part binds to inp[213 : 213+L_fwd]
+> #   - Its 3' end points right/downstream
+> #
+> # Wait, for back-to-back primers in Q5 SDM:
+> # The reverse primer's 5' end is at the insertion point
+> # The forward primer's 5' end carries the insertion
+> # They sit back-to-back on the template
+>
+> # Let me reconsider the insertion point.
+> # The overlap means inp[213:215] = out[213:215] = "ag"
+> # And also inp[213:215] = out[252:254] (part of suffix match)
+> #
+> # The actual biological change:
+> # Input:  ...atgag + caagggc...
+> # Output: ...atgag + tagattagaagaagaattaagaagaagattaacagaaag + caagggc...
+> #
+> # So the insertion of 39 bases happens between input position 214 and 215.
+> # Wait no. Let me look at this from the output perspective:
+> # out[210:215] = "atgag" (same as input)
+> # out[215:254] = "tagattagaagaagaattaagaagaagattaacagaaag" (39 bases)
+> # out[254:] should equal inp[215:]
+> # Let me check: inp[215] = 'c', out[254] = ?
+>
+> print(f"\nChecking insertion boundaries:")
+> print(f"inp[210:220] = {inp[210:220]}")
+> print(f"out[210:220] = {out[210:220]}")
+> print(f"out[250:260] = {out[250:260]}")
+>
+> # Actually let me just find the exact inserted sequence by looking at the output
+> # The output = inp[0:X] + INSERTION + inp[X:]
+> # We need to find X and INSERTION such that this works
+>
+> # From prefix: inp[0:215] == out[0:215]
+> # From suffix: inp[213:] == out[252:]
+> # So X can be 213, 214, or 215
+>
+> # If X = 213: INSERTION = out[213:252] = out[213:252]
+> # Verify: inp[0:213] + out[213:252] + inp[213:] should equal out
+> # But that would duplicate inp[213:] at the junction
+>
+> # If X = 215: INSERTION = out[215:252]
+> # Verify: inp[0:215] + out[215:252] + inp[215:]
+> # = out[0:215] + out[215:252] + out[252+2:] ... no
+>
+> # The correct formula: out = inp[0:X] + INSERTION + inp[X:]
+> # len(out) = X + len(INSERTION) + len(inp) - X = len(inp) + len(INSERTION)
+> # So len(INSERTION) = len(out) - len(inp) = 39
+>
+> # For X = 213: INSERTION = out[213:213+39] = out[213:252]
+> test_213 = inp[0:213] + out[213:252] + inp[213:]
+> print(f"\nX=213: match = {test_213 == out}")
+> if test_213 == out:
+>     print(f"  INSERTION = {out[213:252]}")
+>
+> # For X = 214: INSERTION = out[214:214+39] = out[214:253]
+> test_214 = inp[0:214] + out[214:253] + inp[214:]
+> print(f"X=214: match = {test_214 == out}")
+> if test_214 == out:
+>     print(f"  INSERTION = {out[214:253]}")
+>
+> # For X = 215: INSERTION = out[215:215+39] = out[215:254]
+> test_215 = inp[0:215] + out[215:254] + inp[215:]
+> print(f"X=215: match = {test_215 == out}")
+> if test_215 == out:
+>     print(f"  INSERTION = {out[215:254]}")
+>
+> PYEOF
+root@modal:/app# python3 /app/design_primers.py
+Common prefix length: 215
+Common suffix length: 3378
+Input length: 3591
+Output length: 3630
+
+Insertion between input positions 212 and 215
+Inserted sequence: tagattagaagaagaattaagaagaagattaacagaa (37 bases)
+
+Checking insertion boundaries:
+inp[210:220] = atgagcaagg
+out[210:220] = atgagtagat
+out[250:260] = aaagcaaggg
+
+X=213: match = True
+  INSERTION = agtagattagaagaagaattaagaagaagattaacagaa
+X=214: match = True
+  INSERTION = gtagattagaagaagaattaagaagaagattaacagaaa
+X=215: match = True
+  INSERTION = tagattagaagaagaattaagaagaagattaacagaaag
+root@modal:/app#

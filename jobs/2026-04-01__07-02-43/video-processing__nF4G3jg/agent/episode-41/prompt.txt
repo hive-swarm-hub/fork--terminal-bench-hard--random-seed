@@ -1,0 +1,205 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner present)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>
+>     frame_height, frame_width = bg_frame.shape[:2]
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     frame_idx = 0
+>     all_detections = {}  # frame -> dict of detection info
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(gray_blur, bg_blur)
+>         _, thresh = cv2.threshold(diff.astype(np.uint8), 25, 255, cv2.THRESH_BINARY)
+>
+>         # Focus on the lower portion of the frame (track area + runner)
+>         # The track/runner area starts at roughly 46% of frame height
+>         track_top = int(frame_height * 0.46)
+>         thresh[:track_top, :] = 0
+>
+>         # Morphological operations to clean up noise
+>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>         thresh = cv2.dilate(thresh, kernel, iterations=3)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         if contours:
+>             largest = max(contours, key=cv2.contourArea)
+>             area = cv2.contourArea(largest)
+>             if area > 200:
+>                 x, y, w, h = cv2.boundingRect(largest)
+>                 all_detections[frame_idx] = {
+>                     'bottom_y': y + h, 'top_y': y,
+>                     'cx': x + w // 2, 'area': area,
+>                     'bbox_x': x, 'bbox_w': w, 'bbox_h': h
+>                 }
+>
+>     cap.release()
+>
+>     if len(all_detections) < 5:
+>         raise ValueError("Not enough detections to analyze jump")
+>
+>     # ---- Step 1: Filter for reliable detections ----
+>     # Exclude frames where runner is clipped by frame edges
+>     reliable = {}
+>     for f, d in all_detections.items():
+>         if d['bbox_x'] > 5 and d['bbox_x'] + d['bbox_w'] < frame_width - 5:
+>             if d['area'] > 800:
+>                 reliable[f] = d
+>
+>     if len(reliable) < 5:
+>         reliable = {f: d for f, d in all_detections.items() if d['area'] > 400}
+>     if len(reliable) < 3:
+>         reliable = all_detections.copy()
+>
+>     # ---- Step 2: Determine ground level ----
+>     # Use frames with largest detection area (runner fully visible on ground)
+>     areas = np.array([d['area'] for d in reliable.values()])
+>     area_threshold = np.percentile(areas, 70)
+>     ground_candidates = [d['bottom_y'] for d in reliable.values() if d['area'] >= area_threshold]
+>
+>     if ground_candidates:
+>         ground_level = float(np.median(ground_candidates))
+>     else:
+>         ground_level = float(np.percentile([d['bottom_y'] for d in reliable.values()], 85))
+>
+>     # ---- Step 3: Build bottom_y time series and find jump ----
+>     sorted_frames = sorted(reliable.items())
+>     frame_nums = np.array([f for f, _ in sorted_frames])
+>     bottom_ys = np.array([d['bottom_y'] for _, d in sorted_frames])
+>
+>     # Calculate deviation from ground (positive = feet above ground)
+>     deviation = ground_level - bottom_ys
+>
+>     # Find detection gaps that might indicate jump peak
+>     all_detected = sorted(all_detections.keys())
+>     gaps = []
+>     for i in range(len(all_detected) - 1):
+>         gap_size = all_detected[i + 1] - all_detected[i]
+>         if gap_size > 1:
+>             gaps.append((
+>                 all_detected[i] + 1,  # gap start
+>                 all_detected[i + 1] - 1,  # gap end
+>                 all_detected[i],  # frame before gap
+>                 all_detected[i + 1]  # frame after gap
+>             ))
+>
+>     # Find jump peak: maximum deviation or gap with adjacent low bottom_y
+>     jump_peak_frame = int(frame_nums[np.argmax(deviation)])
+>
+>     # Check if a detection gap represents the actual peak
+>     for gs, ge, before, after in gaps:
+>         if abs(gs - jump_peak_frame) <= 5 or abs(ge - jump_peak_frame) <= 5:
+>             jump_peak_frame = (gs + ge) // 2
+>             break
+>         if before in all_detections and after in all_detections:
+>             b_by = all_detections[before]['bottom_y']
+>             a_by = all_detections[after]['bottom_y']
+>             if b_by < ground_level - 20 and a_by < ground_level - 20:
+>                 jump_peak_frame = (gs + ge) // 2
+>                 break
+>
+>     # ---- Step 4: Find takeoff and landing ----
+>     # Adaptive ground margin based on jump depth
+>     jump_depth = ground_level - float(min(bottom_ys))
+>     # Ground margin: feet are considered "on ground" if within 20% of jump depth
+>     # but at least 10 pixels and at most 25 pixels
+>     ground_margin = max(10.0, min(25.0, jump_depth * 0.2))
+>     ground_threshold = ground_level - ground_margin
+>
+>     sorted_all = sorted(all_detections.items())
+>
+>     # Takeoff: last frame at ground level before jump peak
+>     takeoff_frame = None
+>     for f, d in sorted_all:
+>         if f >= jump_peak_frame:
+>             break
+>         if d['bottom_y'] >= ground_threshold:
+>             takeoff_frame = f
+>
+>     # Landing: first frame at ground level after jump peak
+>     landing_frame = None
+>     for f, d in sorted_all:
+>         if f <= jump_peak_frame:
+>             continue
+>         if d['bottom_y'] >= ground_threshold:
+>             landing_frame = f
+>             break
+>
+>     # ---- Fallbacks ----
+>     if takeoff_frame is None:
+>         pre = [(f, d) for f, d in sorted_all if f < jump_peak_frame]
+>         if pre:
+>             takeoff_frame = max(pre, key=lambda x: x[1]['bottom_y'])[0]
+>         else:
+>             takeoff_frame = jump_peak_frame - 3
+>
+>     if landing_frame is None:
+>         post = [(f, d) for f, d in sorted_all if f > jump_peak_frame]
+>         if post:
+>             landing_frame = max(post[:5], key=lambda x: x[1]['bottom_y'])[0]
+>         else:
+>             landing_frame = jump_peak_frame + 3
+>
+>     # Ensure native Python int types
+>     return int(takeoff_frame), int(landing_frame)
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': int(takeoff_frame),
+>         'jump_land_frame_number': int(landing_frame),
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@modal:/app# python3 /app/jump_analyzer.py /app/example_video.mp4 && cat /app/output.toml
+Takeoff frame: 53
+Landing frame: 62
+Output written to /app/output.toml
+jump_takeoff_frame_number = 53
+jump_land_frame_number = 62
+root@modal:/app#

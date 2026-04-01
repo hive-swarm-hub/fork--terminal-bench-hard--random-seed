@@ -1,0 +1,109 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import struct, os, math
+>
+> # Load all weights
+> f = open('gpt2-124M.ckpt', 'rb')
+> data = f.read()
+> f.close()
+> total = len(data) // 4
+> W = struct.unpack(f'{total}f', data)
+>
+> V=50257; C=768; T=1024; L=12; H=12
+> HS = C // H  # 64
+>
+> # Try the llm.c / karpathy layout (grouped by parameter type)
+> # wte[V*C], wpe[T*C], ln1w[L*C], ln1b[L*C], qkvw[L*3C*C], qkvb[L*3C],
+> # attprojw[L*C*C], attprojb[L*C], ln2w[L*C], ln2b[L*C],
+> # fcw[L*4C*C], fcb[L*4C], fcprojw[L*4C*C], fcprojb[L*C], lnfw[C], lnfb[C]
+>
+> def get(off, n):
+>     return list(W[off:off+n])
+>
+> off = 0
+> wte = off; off += V*C
+> wpe = off; off += T*C
+> ln1w = off; off += L*C
+> ln1b = off; off += L*C
+> qkvw = off; off += L*3*C*C
+> qkvb = off; off += L*3*C
+> attprojw = off; off += L*C*C
+> attprojb = off; off += L*C
+> ln2w = off; off += L*C
+> ln2b = off; off += L*C
+> fcw = off; off += L*4*C*C
+> fcb = off; off += L*4*C
+> fcprojw = off; off += L*4*C*C
+> fcprojb = off; off += L*C
+> lnfw = off; off += C
+> lnfb = off; off += C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     inv = 1.0 / math.sqrt(var + 1e-5)
+>     return [(x[i] - mean) * inv * W[w_off + i] + W[b_off + i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matmul(x, w_off, rows, cols):
+>     # x is [cols], W[w_off] is [rows, cols] stored row-major
+>     # output is [rows]
+>     out = [0.0] * rows
+>     for i in range(rows):
+>         s = 0.0
+>         for j in range(cols):
+>             s += W[w_off + i * cols + j] * x[j]
+>         out[i] = s
+>     return out
+>
+> # Simple test: token 464 = " the"
+> tokens = [464]  # " the"
+> pos = 0
+>
+> # Get embedding: wte[token] + wpe[pos]
+> x = [W[wte + tokens[0]*C + i] + W[wpe + pos*C + i] for i in range(C)]
+>
+> # Layer 0 only for testing
+> l = 0
+> # LN1
+> xn = layernorm(x, ln1w + l*C, ln1b + l*C)
+>
+> # QKV: matmul xn by qkvw[l], shape [3C, C], add qkvb[l]
+> qkv = matmul(xn, qkvw + l*3*C*C, 3*C, C)
+> for i in range(3*C):
+>     qkv[i] += W[qkvb + l*3*C + i]
+>
+> print(f'QKV first 5: {qkv[:5]}')
+> print(f'QKV[C:C+5]: {qkv[C:C+5]}')
+> print(f'QKV[2C:2C+5]: {qkv[2*C:2*C+5]}')
+>
+> # Single token, single head attention is just softmax of q*k/sqrt(d) = just v
+> # With single token, attention output = v
+> attn_out = qkv[2*C:3*C]  # V part
+>
+> # attn proj
+> proj = matmul(attn_out, attprojw + l*C*C, C, C)
+> for i in range(C):
+>     proj[i] += W[attprojb + l*C + i]
+>
+> # Residual
+> for i in range(C):
+>     x[i] += proj[i]
+>
+> # LN2
+> xn2 = layernorm(x, ln2w + l*C, ln2b + l*C)
+>
+> print(f'After layer 0 LN2 first 5: {xn2[:5]}')
+> print('Testing if output makes sense...')
+>
+> PYEOF
+QKV first 5: [1.8891913268465623, 0.4043136296187101, -0.6307060923018901, -0.4158846880732691, -0.21640268600201995]
+QKV[C:C+5]: [-0.20087624988282543, -0.06982396613551697, -0.4225422502540804, -0.20269108762852953, -0.04093601347807329]
+QKV[2C:2C+5]: [-0.22451182345908227, 0.6533618098080618, -0.14448112154506246, 1.0019676480184656, 0.22196143734478016]
+After layer 0 LN2 first 5: [0.22291207028892096, 0.3285613037285594, 0.15576152942123983, -0.043104371718848136, -0.04743458521051624]
+Testing if output makes sense...
+root@modal:/app#

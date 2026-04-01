@@ -1,0 +1,107 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> fwd = 'tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg'
+>
+> # The longest 3' match to input is 18 nt at position 213
+> fwd_anneal_18 = fwd[-18:]  # agcaagggcgaggagctg
+> fwd_tail_37 = fwd[:-18]    # tagattagaagaagaattaagaagaagattaacagaa
+>
+> print(f"If annealing = 18 nt: {fwd_anneal_18}")
+> print(f"Tail = {fwd_tail_37} ({len(fwd_tail_37)} bases)")
+> print(f"Tm(18 nt): {get_tm(fwd_anneal_18):.2f}")
+>
+> # Check reconstruction with this interpretation
+> # insertion point at 213, insertion = tail_37
+> recon = inp[0:213] + fwd_tail_37 + inp[213:]
+> print(f"Reconstruction with 18nt annealing (insert at 213): {recon == out}")
+> print(f"Recon length: {len(recon)}, out length: {len(out)}")
+>
+> # Hmm, the tail is only 37 bases but we need 39 base insertion
+> # This won't work because the insertion is 39 bases
+>
+> # The issue: with 18nt annealing starting at pos 213, the reverse primer
+> # ends at pos 215. So there's a 2-base OVERLAP (213, 214).
+> # This means the primers overlap, which is wrong for Q5 SDM.
+>
+> # For Q5 SDM back-to-back: rev ends at X, fwd annealing starts at X
+> # Rev anneals to inp[181:215], so rev ends at 215
+> # Fwd annealing of 18nt starts at 213 -> overlap of 2 bases
+>
+> # This is problematic. I need to either:
+> # 1. Move the reverse primer so it ends at 213 (matching fwd annealing start)
+> # 2. Redesign so there's no ambiguity
+>
+> # Option 1: Rev anneals to inp[X-L:213], Fwd anneals starting at inp[213]
+> print("\n--- Option 1: Rev ends at 213, Fwd starts at 213 ---")
+> for L_rev in range(15, 37):
+>     rev_anneal = inp[213-L_rev:213]
+>     tm_rev = get_tm(rev_anneal)
+>     if 58 <= tm_rev <= 72:
+>         tm_fwd_18 = get_tm(fwd_anneal_18)
+>         diff = abs(tm_fwd_18 - tm_rev)
+>         if diff <= 5:
+>             print(f"  L_rev={L_rev}, Tm_rev={tm_rev:.2f}, Tm_fwd={tm_fwd_18:.2f}, diff={diff:.2f}")
+>
+> # But wait - if fwd annealing starts at 213 and rev ends at 213,
+> # the insertion (tail) goes between them. But the tail is only 37 bases,
+> # and we need 39 base insertion. Let me check.
+> print(f"\nWith rev ending at 213, fwd starting at 213:")
+> print(f"Insertion = tail = {fwd_tail_37} ({len(fwd_tail_37)} bases)")
+> recon2 = inp[0:213] + fwd_tail_37 + inp[213:]
+> print(f"Reconstruction: {recon2 == out}")
+> if recon2 != out:
+>     for i in range(min(len(recon2), len(out))):
+>         if recon2[i] != out[i]:
+>             print(f"First diff at {i}")
+>             print(f"recon: {recon2[max(0,i-5):i+15]}")
+>             print(f"out:   {out[max(0,i-5):i+15]}")
+>             break
+>
+> PYEOF
+If annealing = 18 nt: agcaagggcgaggagctg
+Tail = tagattagaagaagaattaagaagaagattaacagaa (37 bases)
+Tm(18 nt): 66.27
+Reconstruction with 18nt annealing (insert at 213): False
+Recon length: 3628, out length: 3630
+
+--- Option 1: Rev ends at 213, Fwd starts at 213 ---
+
+With rev ending at 213, fwd starting at 213:
+Insertion = tail = tagattagaagaagaattaagaagaagattaacagaa (37 bases)
+Reconstruction: False
+First diff at 213
+recon: atatgtagattagaagaaga
+out:   atatgagtagattagaagaa
+root@modal:/app#

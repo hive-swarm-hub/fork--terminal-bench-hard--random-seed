@@ -1,0 +1,129 @@
+New Terminal Output:
+
+root@modal:/app# python3 << 'PYEOF'
+> import math, array
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> data = f.read()
+> f.close()
+> W = array.array('f', data)
+>
+> V=50257; C=768; T=1024; L_=12; H=12; D=64
+>
+> # Per-layer format
+> wte = 0
+> wpe = V*C
+> base = V*C + T*C
+>
+> # Per layer: ln1w(C), ln1b(C), qkvw(3CC), qkvb(3C), projw(CC), projb(C), ln2w(C), ln2b(C), fcw(4CC), fcb(4C), fcprojw(4CC), fcprojb(C)
+> per_layer = 2*C + 3*C*C + 3*C + C*C + C + 2*C + 4*C*C + 4*C + 4*C*C + C  # = 12C^2 + 13C = 7087872
+>
+> def get_layer_offsets(l):
+>     b = base + l * per_layer
+>     o = {}
+>     off = b
+>     o['ln1w'] = off; off += C
+>     o['ln1b'] = off; off += C
+>     o['qkvw'] = off; off += 3*C*C
+>     o['qkvb'] = off; off += 3*C
+>     o['projw'] = off; off += C*C
+>     o['projb'] = off; off += C
+>     o['ln2w'] = off; off += C
+>     o['ln2b'] = off; off += C
+>     o['fcw'] = off; off += 4*C*C
+>     o['fcb'] = off; off += 4*C
+>     o['fpw'] = off; off += 4*C*C
+>     o['fpb'] = off; off += C
+>     return o
+>
+> lnfw = base + L_ * per_layer
+> lnfb = lnfw + C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     inv = 1.0 / math.sqrt(var + 1e-5)
+>     return [(x[i] - mean) * inv * W[w_off + i] + W[b_off + i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matvec(x, w_off, rows, cols):
+>     out = [0.0] * rows
+>     for i in range(rows):
+>         s = 0.0
+>         for j in range(cols):
+>             s += W[w_off + i * cols + j] * x[j]
+>         out[i] = s
+>     return out
+>
+> tk = 464
+> x = [W[wte + tk*C + i] + W[wpe + 0*C + i] for i in range(C)]
+> for l in range(L_):
+>     o = get_layer_offsets(l)
+>     xn = layernorm(x, o['ln1w'], o['ln1b'])
+>     qkv = matvec(xn, o['qkvw'], 3*C, C)
+>     for i in range(3*C): qkv[i] += W[o['qkvb'] + i]
+>     attn_out = qkv[2*C:3*C]
+>     proj = matvec(attn_out, o['projw'], C, C)
+>     for i in range(C): proj[i] += W[o['projb'] + i]
+>     for i in range(C): x[i] += proj[i]
+>     xn2 = layernorm(x, o['ln2w'], o['ln2b'])
+>     h = matvec(xn2, o['fcw'], 4*C, C)
+>     for i in range(4*C): h[i] = gelu(h[i] + W[o['fcb'] + i])
+>     mlp_out = matvec(h, o['fpw'], C, 4*C)
+>     for i in range(C): mlp_out[i] += W[o['fpb'] + i]
+>     for i in range(C): x[i] += mlp_out[i]
+>
+> x = layernorm(x, lnfw, lnfb)
+> best = []
+> for i in range(V):
+>     s = sum(W[wte + i*C + j] * x[j] for j in range(C))
+>     best.append((s, i))
+> best.sort(reverse=True)
+>
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1))+list(range(0xa1, 0xac+1))+list(range(0xae, 0xff+1))
+>     cs = list(bs)
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> be = bytes_to_unicode()
+> bd = {v:k for k,v in be.items()}
+> vocab = [be[i] for i in range(256)]
+> lines = open('vocab.bpe').readlines()
+> for line in lines[1:]:
+>     line = line.strip()
+>     if not line: continue
+>     parts = line.split(' ', 1)
+>     if len(parts) == 2: vocab.append(parts[0] + parts[1])
+> vocab.append('<|endoftext|>')
+>
+> def decode_token(t):
+>     s = vocab[t]
+>     if s == '<|endoftext|>': return s
+>     try: return bytes([bd[c] for c in s]).decode('utf-8', errors='replace')
+>     except: return repr(s)
+>
+> print('Per-layer Top 10:')
+> for s, i in best[:10]:
+>     print(f'  token {i} ({repr(decode_token(i))}): logit={s:.4f}')
+> PYEOF
+Per-layer Top 10:
+  token 36714 ('croft'): logit=11.6926
+  token 29994 (' (),'): logit=8.4494
+  token 34397 (' carrots'): logit=7.3733
+  token 34303 ('rences'): logit=7.2332
+  token 34385 (' 237'): logit=7.0503
+  token 30009 (' Recre'): logit=6.8628
+  token 30015 (' Unique'): logit=6.4905
+  token 34247 ('ا�'): logit=6.2573
+  token 36448 (' Ves'): logit=6.1403
+  token 30045 ('arling'): logit=5.9764
+root@modal:/app#

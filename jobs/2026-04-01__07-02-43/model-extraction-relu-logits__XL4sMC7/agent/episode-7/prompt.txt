@@ -1,0 +1,160 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/steal.py << 'ENDOFSCRIPT'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient of forward(x) w.r.t. x using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_breakpoints_on_line(x0, direction, t_range=(-10, 10), n_steps=200):
+>     """Find ReLU breakpoints along the line x0 + t*direction.
+>     Returns list of (t, grad_before, grad_after) at each breakpoint."""
+>     ts = np.linspace(t_range[0], t_range[1], n_steps)
+>
+>     # Compute 1D derivative df/dt at each point
+>     eps = 1e-7
+>     derivs = []
+>     for t in ts:
+>         x = x0 + t * direction
+>         f_plus = forward(x + eps * direction)
+>         f_minus = forward(x - eps * direction)
+>         derivs.append((f_plus - f_minus) / (2 * eps))
+>     derivs = np.array(derivs)
+>
+>     # Find where derivative changes significantly
+>     breakpoints = []
+>     for i in range(1, len(derivs)):
+>         if abs(derivs[i] - derivs[i-1]) > 1e-5:
+>             # Binary search for exact breakpoint
+>             t_lo, t_hi = ts[i-1], ts[i]
+>             for _ in range(50):  # binary search iterations
+>                 t_mid = (t_lo + t_hi) / 2
+>                 x_mid = x0 + t_mid * direction
+>                 # Check which side t_mid is on by comparing derivative
+>                 f_plus = forward(x_mid + eps * direction)
+>                 f_minus = forward(x_mid - eps * direction)
+>                 d_mid = (f_plus - f_minus) / (2 * eps)
+>                 if abs(d_mid - derivs[i-1]) < abs(d_mid - derivs[i]):
+>                     t_lo = t_mid
+>                 else:
+>                     t_hi = t_mid
+>
+>             # Compute full gradient on both sides of breakpoint
+>             t_break = (t_lo + t_hi) / 2
+>             delta = 1e-5
+>             grad_before = compute_gradient(x0 + (t_break - delta) * direction)
+>             grad_after = compute_gradient(x0 + (t_break + delta) * direction)
+>             breakpoints.append((t_break, grad_before, grad_after))
+>
+>     return breakpoints
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     # Collect rows of A1 (up to scaling by A2) by finding gradient changes at ReLU breakpoints
+>     all_row_candidates = []  # each is A2[0,j] * A1[j,:]
+>
+>     n_lines = 50  # number of random lines to search
+>     for line_idx in range(n_lines):
+>         x0 = np.random.randn(10) * 2.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         breakpoints = find_breakpoints_on_line(x0, direction, t_range=(-10, 10), n_steps=100)
+>
+>         for t_break, grad_before, grad_after in breakpoints:
+>             diff = grad_after - grad_before
+>             norm = np.linalg.norm(diff)
+>             if norm > 1e-6:
+>                 all_row_candidates.append(diff)
+>
+>         if (line_idx + 1) % 10 == 0:
+>             print(f"Searched {line_idx + 1} lines, found {len(all_row_candidates)} candidates so far")
+>
+>     print(f"Total candidates: {len(all_row_candidates)}")
+>
+>     # Cluster candidates by direction (parallel vectors = same neuron)
+>     # Each candidate = A2[0,j] * A1[j,:], so parallel candidates correspond to same neuron j
+>     clusters = []  # list of (direction, [members])
+>
+>     for row in all_row_candidates:
+>         norm = np.linalg.norm(row)
+>         if norm < 1e-8:
+>             continue
+>         direction = row / norm
+>
+>         found = False
+>         for ci in range(len(clusters)):
+>             center_dir = clusters[ci][0]
+>             if abs(np.dot(direction, center_dir)) > 0.999:
+>                 clusters[ci][1].append(row)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append((direction.copy(), [row]))
+>
+>     print(f"Found {len(clusters)} direction clusters")
+>
+>     # Sort by cluster size (larger clusters = more confident)
+>     clusters.sort(key=lambda c: len(c[1]), reverse=True)
+>
+>     for i, (d, members) in enumerate(clusters[:25]):
+>         norms = [np.linalg.norm(m) for m in members]
+>         print(f"  Cluster {i}: {len(members)} members, norm range [{min(norms):.6f}, {max(norms):.6f}]")
+>
+>     # Extract one representative row per cluster
+>     # The minimum-norm member is the single-neuron flip
+>     final_rows = []
+>     for direction, members in clusters:
+>         # Use the member closest to median norm (robust)
+>         norms = [np.linalg.norm(m) for m in members]
+>         min_idx = np.argmin(norms)
+>         final_rows.append(members[min_idx])
+>         if len(final_rows) >= 20:
+>             break
+>
+>     A1_stolen = np.array(final_rows)
+>     print(f"\nStolen A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     return A1_stolen
+>
+> if __name__ == '__main__':
+>     A1_stolen = steal_A1()
+>
+>     # Verify: compare with actual A1
+>     # Load actual A1 for comparison
+>     np.random.seed(0)
+>     A1_actual = np.random.randn(20, 10) * 0.1
+>
+>     print("\n=== Verification ===")
+>     # For each stolen row, find the best matching actual row
+>     matched = set()
+>     for i, stolen_row in enumerate(A1_stolen):
+>         stolen_dir = stolen_row / np.linalg.norm(stolen_row)
+>         best_match = -1
+>         best_cos = 0
+>         for j in range(20):
+>             actual_dir = A1_actual[j] / np.linalg.norm(A1_actual[j])
+>             cos_sim = abs(np.dot(stolen_dir, actual_dir))
+>             if cos_sim > best_cos:
+>                 best_cos = cos_sim
+>                 best_match = j
+>         matched.add(best_match)
+>         print(f"  Stolen row {i} -> Actual row {best_match}, cos_sim = {best_cos:.6f}")
+>
+>     print(f"\nMatched {len(matched)} out of 20 actual neurons")
+> ENDOFSCRIPT
+root@modal:/app#

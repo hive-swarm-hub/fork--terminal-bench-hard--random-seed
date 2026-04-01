@@ -1,0 +1,67 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/train_final.py << 'PYEOF'
+> import pandas as pd
+> import fasttext
+> import os
+>
+> # Read data
+> print("Reading data...")
+> df = pd.read_parquet('data/train-00000-of-00001.parquet')
+> df_test = pd.read_parquet('data/test-00000-of-00001.parquet')
+>
+> # Minimal preprocessing - keep punctuation, just clean whitespace
+> def preprocess(text):
+>     text = str(text)
+>     text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+>     # Keep punctuation! It carries sentiment
+>     text = ' '.join(text.split())  # normalize whitespace
+>     return text
+>
+> # Write fasttext format
+> print("Writing training file...")
+> with open('/tmp/train.txt', 'w') as f:
+>     for label, text in zip(df['label'].values, df['text'].values):
+>         text = preprocess(text)
+>         f.write(f'__label__{label} {text}\n')
+>
+> print("Writing test file...")
+> with open('/tmp/test.txt', 'w') as f:
+>     for label, text in zip(df_test['label'].values, df_test['text'].values):
+>         text = preprocess(text)
+>         f.write(f'__label__{label} {text}\n')
+>
+> # Train with dim=100, bucket=200000 -> ~127MB
+> print("Training...")
+> model = fasttext.train_supervised(
+>     input='/tmp/train.txt',
+>     epoch=50,
+>     lr=1.0,
+>     wordNgrams=2,
+>     dim=100,
+>     loss='softmax',
+>     bucket=200000,
+>     minCount=1,
+>     thread=4
+> )
+>
+> result = model.test('/tmp/test.txt')
+> print(f"Test: {result[0]} samples, Precision: {result[1]:.4f}")
+>
+> model.save_model('/app/model.bin')
+> size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+> print(f"Model size: {size_mb:.1f} MB")
+>
+> if size_mb > 150:
+>     print("Too large, quantizing...")
+>     model.quantize(input='/tmp/train.txt', retrain=False)
+>     model.save_model('/app/model.bin')
+>     size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+>     print(f"Quantized size: {size_mb:.1f} MB")
+>     result = model.test('/tmp/test.txt')
+>     print(f"After quantize: Precision: {result[1]:.4f}")
+>
+> print("Done!")
+> PYEOF
+root@modal:/app# python3 /app/train_final.py 2>&1 | tee /tmp/train_final_log.txt
+

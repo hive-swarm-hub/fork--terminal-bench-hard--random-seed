@@ -1,0 +1,291 @@
+New Terminal Output:
+
+root@modal:/app# cat > /tmp/write_filter.py << 'ENDOFPYTHON'
+> import os
+>
+> code = r'''
+> import sys
+> import re
+>
+> def filter_html(content):
+>     # 1. Remove <script> tags and their contents (including multiline)
+>     content = re.sub(
+>         r'<\s*script\b[^>]*>.*?<\s*/\s*script\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     content = re.sub(
+>         r'<\s*script\b[^>]*/\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>     content = re.sub(
+>         r'<\s*script\b[^>]*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>     content = re.sub(
+>         r'<\s*/\s*script\s*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Remove <embed>, <object>, <applet> tags and contents
+>     for tag in ['embed', 'object', 'applet']:
+>         content = re.sub(
+>             r'<\s*' + tag + r'\b[^>]*>.*?<\s*/\s*' + tag + r'\s*>',
+>             '',
+>             content,
+>             flags=re.IGNORECASE | re.DOTALL
+>         )
+>         content = re.sub(
+>             r'<\s*' + tag + r'\b[^>]*/\s*>',
+>             '',
+>             content,
+>             flags=re.IGNORECASE
+>         )
+>         content = re.sub(
+>             r'<\s*' + tag + r'\b[^>]*>',
+>             '',
+>             content,
+>             flags=re.IGNORECASE
+>         )
+>
+>     # 3. Remove event handler attributes (on*="...")
+>     def remove_dangerous_attrs(match):
+>         tag_content = match.group(0)
+>         # Remove on* attributes with double-quoted values
+>         tag_content = re.sub(
+>             r'\s+on\w+\s*=\s*"[^"]*"',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with single-quoted values
+>         tag_content = re.sub(
+>             r"\s+on\w+\s*=\s*'[^']*'",
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with unquoted values
+>         tag_content = re.sub(
+>             r'\s+on\w+\s*=\s*[^\'\s"<>]+',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* bare attributes (no value)
+>         tag_content = re.sub(
+>             r'\s+on\w+(?=\s|/?>)',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     content = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_dangerous_attrs,
+>         content,
+>         flags=re.DOTALL
+>     )
+>
+>     # Handle tags like <svg/onload=alert(1)> where / separates tag name from attr
+>     content = re.sub(
+>         r"<([a-zA-Z]+)/+on\w+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]*)([^>]*)>",
+>         r'<\1\2>',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 4. Remove javascript:/vbscript:/livescript: URIs in ALL attributes
+>     def remove_js_uris(match):
+>         tag_content = match.group(0)
+>         tag_content = re.sub(
+>             r'(\s+\w[\w-]*\s*=\s*)"\s*(?:javascript|vbscript|livescript)\s*:[^"]*"',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         tag_content = re.sub(
+>             r"(\s+\w[\w-]*\s*=\s*)'\s*(?:javascript|vbscript|livescript)\s*:[^']*'",
+>             r"\1''",
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         tag_content = re.sub(
+>             r'(\s+\w[\w-]*\s*=\s*)(?:javascript|vbscript|livescript)\s*:[^\s>]*',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     content = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_js_uris,
+>         content,
+>         flags=re.DOTALL
+>     )
+>
+>     # 5. Handle HTML entity encoded javascript in attribute values
+>     def remove_encoded_js(match):
+>         tag_content = match.group(0)
+>
+>         def check_attr_dq(attr_match):
+>             prefix = attr_match.group(1)
+>             value = attr_match.group(2)
+>             decoded = re.sub(r'&#[xX]([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)), value)
+>             decoded = re.sub(r'&#(\d+);?', lambda m: chr(int(m.group(1))), decoded)
+>             decoded = decoded.replace('&Tab;', '\t').replace('&NewLine;', '\n')
+>             decoded = re.sub(r'&[a-zA-Z]+;', '', decoded)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded)
+>             if re.match(r'(?:javascript|vbscript|livescript):', decoded_stripped, re.IGNORECASE):
+>                 return prefix + '""'
+>             return attr_match.group(0)
+>
+>         def check_attr_sq(attr_match):
+>             prefix = attr_match.group(1)
+>             value = attr_match.group(2)
+>             decoded = re.sub(r'&#[xX]([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)), value)
+>             decoded = re.sub(r'&#(\d+);?', lambda m: chr(int(m.group(1))), decoded)
+>             decoded = decoded.replace('&Tab;', '\t').replace('&NewLine;', '\n')
+>             decoded = re.sub(r'&[a-zA-Z]+;', '', decoded)
+>             decoded_stripped = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded)
+>             if re.match(r'(?:javascript|vbscript|livescript):', decoded_stripped, re.IGNORECASE):
+>                 return prefix + "''"
+>             return attr_match.group(0)
+>
+>         tag_content = re.sub(
+>             r'(\s+\w[\w-]*\s*=\s*)"([^"]*)"',
+>             check_attr_dq,
+>             tag_content
+>         )
+>         tag_content = re.sub(
+>             r"(\s+\w[\w-]*\s*=\s*)'([^']*)'",
+>             check_attr_sq,
+>             tag_content
+>         )
+>         return tag_content
+>
+>     content = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_encoded_js,
+>         content,
+>         flags=re.DOTALL
+>     )
+>
+>     # 6. Handle meta refresh with javascript URL
+>     def clean_meta_refresh(match):
+>         tag = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag, re.IGNORECASE):
+>             content_match = re.search(r'content\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+>             if content_match:
+>                 content_val = content_match.group(1)
+>                 if re.search(r'(?:javascript|vbscript|livescript)\s*:', content_val, re.IGNORECASE):
+>                     return ''
+>         return tag
+>
+>     content = re.sub(
+>         r'<\s*meta\b[^>]*>',
+>         clean_meta_refresh,
+>         content,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     # 7. Remove <base> tags with javascript href
+>     content = re.sub(
+>         r'<\s*base\b[^>]*href\s*=\s*["\']\s*javascript:[^>]*>',
+>         '',
+>         content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 8. Clean <style> tags that contain javascript/expression
+>     def clean_style_tags(match):
+>         full = match.group(0)
+>         inner = match.group(1)
+>         if re.search(r'(?:javascript|expression|vbscript)\s*[:(]', inner, re.IGNORECASE):
+>             return ''
+>         return full
+>
+>     content = re.sub(
+>         r'<\s*style\b[^>]*>(.*?)<\s*/\s*style\s*>',
+>         clean_style_tags,
+>         content,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     # 9. Clean style attributes that contain expression() or javascript:
+>     def clean_style_attrs(match):
+>         tag_content = match.group(0)
+>
+>         def check_style_dq(m):
+>             value = m.group(2)
+>             if re.search(r'(?:expression|javascript|vbscript)\s*[:(]', value, re.IGNORECASE):
+>                 return m.group(1) + '""'
+>             return m.group(0)
+>
+>         def check_style_sq(m):
+>             value = m.group(2)
+>             if re.search(r'(?:expression|javascript|vbscript)\s*[:(]', value, re.IGNORECASE):
+>                 return m.group(1) + "''"
+>             return m.group(0)
+>
+>         tag_content = re.sub(
+>             r'(\s+style\s*=\s*)"([^"]*)"',
+>             check_style_dq,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         tag_content = re.sub(
+>             r"(\s+style\s*=\s*)'([^']*)'",
+>             check_style_sq,
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     content = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         clean_style_attrs,
+>         content,
+>         flags=re.DOTALL
+>     )
+>
+>     return content
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_html(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> '''.lstrip()
+>
+> with open('/app/filter.py', 'w') as f:
+>     f.write(code)
+>
+> print('filter.py written successfully')
+> ENDOFPYTHON
+root@modal:/app# python3 /tmp/write_filter.py
+filter.py written successfully
+root@modal:/app#

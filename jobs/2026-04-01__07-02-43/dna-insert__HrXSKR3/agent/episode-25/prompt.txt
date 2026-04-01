@@ -1,0 +1,164 @@
+New Terminal Output:
+
+root@modal:/app# cat > /app/design_primers2.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     try:
+>         return float(result.stdout.strip())
+>     except:
+>         return None
+>
+> def find_longest_3prime_match(primer, template):
+>     """Find the longest suffix of primer that matches template."""
+>     best_len = 0
+>     best_pos = -1
+>     for L in range(len(primer), 0, -1):
+>         suffix = primer[-L:]
+>         pos = template.find(suffix)
+>         if pos >= 0:
+>             return L, pos
+>     return 0, -1
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # The output = inp[0:X] + INSERTION + inp[X:] for X in {213, 214, 215}
+> # We need to design primers where the forward primer's longest 3' match
+> # to the template defines the annealing region unambiguously.
+>
+> # For each valid insertion point X:
+> # - Forward primer = INSERTION + inp[X:X+L_fwd]
+> # - The longest 3' match of fwd to inp should be exactly L_fwd
+> #   (i.e., the tail should NOT extend the match)
+> # - Reverse primer = RC(inp[X-L_rev:X])
+> # - The longest 3' match of rev to RC(inp) should be exactly L_rev
+>
+> best = None
+> best_score = 999
+>
+> for X in [213, 214, 215]:
+>     insertion = out[X:X+39]  # 39-base insertion
+>     # Verify reconstruction
+>     assert inp[0:X] + insertion + inp[X:] == out
+>
+>     for L_fwd in range(15, 37):
+>         fwd_anneal = inp[X:X+L_fwd]
+>         fwd_full = insertion + fwd_anneal
+>
+>         # Check: longest 3' match should be exactly L_fwd
+>         actual_anneal_len, actual_pos = find_longest_3prime_match(fwd_full, inp)
+>
+>         if actual_anneal_len != L_fwd:
+>             # The tail extends the annealing - skip this
+>             continue
+>
+>         tm_fwd = get_tm(fwd_anneal)
+>         if tm_fwd is None or tm_fwd < 58 or tm_fwd > 72:
+>             continue
+>
+>         for L_rev in range(15, 37):
+>             rev_anneal_template = inp[X-L_rev:X]
+>             rev_full = rc(rev_anneal_template)
+>
+>             # Check: longest 3' match of rev to inp_rc should be exactly L_rev
+>             # Actually, for the reverse primer, the whole thing should anneal
+>             # (no tail). So longest match of RC(rev) to inp should be L_rev.
+>             actual_rev_len, actual_rev_pos = find_longest_3prime_match(rc(rev_full), inp)
+>             # rc(rev_full) = rc(rc(rev_anneal_template)) = rev_anneal_template
+>             # So this checks if rev_anneal_template is found in inp, which it always is.
+>             # For the reverse primer, we need to check the longest 3' match of
+>             # rev_full against the reverse complement of inp.
+>             inp_rc = rc(inp)
+>             actual_rev_len2, _ = find_longest_3prime_match(rev_full, inp_rc)
+>             if actual_rev_len2 != L_rev:
+>                 continue
+>
+>             tm_rev = get_tm(rev_anneal_template)
+>             if tm_rev is None or tm_rev < 58 or tm_rev > 72:
+>                 continue
+>
+>             diff = abs(tm_fwd - tm_rev)
+>             if diff <= 5:
+>                 if best is None or diff < best_score:
+>                     best_score = diff
+>                     best = {
+>                         'X': X,
+>                         'insertion': insertion,
+>                         'fwd_full': fwd_full,
+>                         'rev_full': rev_full,
+>                         'fwd_anneal': fwd_anneal,
+>                         'rev_anneal_template': rev_anneal_template,
+>                         'tm_fwd': tm_fwd,
+>                         'tm_rev': tm_rev,
+>                         'diff': diff,
+>                         'L_fwd': L_fwd,
+>                         'L_rev': L_rev,
+>                         'actual_fwd_anneal_len': actual_anneal_len,
+>                     }
+>                     print(f"Found: X={X}, L_fwd={L_fwd}, L_rev={L_rev}, Tm_fwd={tm_fwd:.2f}, Tm_rev={tm_rev:.2f}, diff={diff:.2f}")
+>
+> if best:
+>     print(f"\nBest primer pair:")
+>     print(f"  X={best['X']}, L_fwd={best['L_fwd']}, L_rev={best['L_rev']}")
+>     print(f"  Forward: {best['fwd_full']}")
+>     print(f"  Reverse: {best['rev_full']}")
+>     print(f"  Fwd anneal: {best['fwd_anneal']} (Tm={best['tm_fwd']:.2f})")
+>     print(f"  Rev anneal (template): {best['rev_anneal_template']} (Tm={best['tm_rev']:.2f})")
+>     print(f"  Tm diff: {best['diff']:.2f}")
+>
+>     # Double-check longest match
+>     ll, pp = find_longest_3prime_match(best['fwd_full'], inp)
+>     print(f"  Longest fwd 3' match: {ll} nt at pos {pp}")
+>
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{best['fwd_full']}\n")
+>         f.write(f">reverse_primer\n{best['rev_full']}\n")
+>     print("Written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@modal:/app# python3 /app/design_primers2.py
+Found: X=213, L_fwd=15, L_rev=30, Tm_fwd=59.54, Tm_rev=58.08, diff=1.45
+Found: X=213, L_fwd=15, L_rev=31, Tm_fwd=59.54, Tm_rev=59.31, diff=0.22
+Found: X=213, L_fwd=15, L_rev=32, Tm_fwd=59.54, Tm_rev=59.74, diff=0.21
+
+Best primer pair:
+  X=213, L_fwd=15, L_rev=32
+  Forward: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag
+  Reverse: catatgtatatctccttcttaaagttaaacaa
+  Fwd anneal: agcaagggcgaggag (Tm=59.54)
+  Rev anneal (template): ttgtttaactttaagaaggagatatacatatg (Tm=59.74)
+  Tm diff: 0.21
+  Longest fwd 3' match: 15 nt at pos 213
+Written to primers.fasta
+root@modal:/app#
