@@ -1,0 +1,183 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> # Load weights
+> f = open('gpt2-124M.ckpt', 'rb')
+> W = f.read()
+> f.close()
+>
+> E, V, C, L, H = 768, 50257, 1024, 12, 12
+> D = E // H  # 64
+> PL = 7087872  # per layer
+>
+> def getf(off, n):
+>     return list(struct.unpack_from(f'<{n}f', W, off*4))
+>
+> # Layer offsets within a layer:
+> # attn/c_attn/b: 0, size 3*E
+> # attn/c_attn/w: 3*E, size E*3*E
+> # attn/c_proj/b: 3*E+E*3*E, size E
+> # attn/c_proj/w: 3*E+E*3*E+E, size E*E
+> # ln_1/b: 3*E+E*3*E+E+E*E, size E
+> # ln_1/g: 3*E+E*3*E+E+E*E+E, size E
+> # ln_2/b: 3*E+E*3*E+E+E*E+2*E, size E
+> # ln_2/g: 3*E+E*3*E+E+E*E+3*E, size E
+> # mlp/c_fc/b: 3*E+E*3*E+E+E*E+4*E, size 4*E
+> # mlp/c_fc/w: 3*E+E*3*E+E+E*E+4*E+4*E, size E*4*E
+> # mlp/c_proj/b: 3*E+E*3*E+E+E*E+4*E+4*E+E*4*E, size E
+> # mlp/c_proj/w: 3*E+E*3*E+E+E*E+4*E+4*E+E*4*E+E, size 4*E*E
+>
+> def layer_norm(x, g, b):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((v-mean)**2 for v in x)/n
+>     s = 1.0/math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)*s*g[i]+b[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x*x*x)))
+>
+> def matmul(x, w, b, rows, cols):
+>     # x[rows], w[rows*cols] (row-major: w[i*cols+j]), b[cols]
+>     out = [0.0]*cols
+>     for j in range(cols):
+>         s = b[j]
+>         for i in range(rows):
+>             s += x[i] * w[i*cols+j]
+>         out[j] = s
+>     return out
+>
+> def forward_one_token(token_ids):
+>     T = len(token_ids)
+>
+>     # Get embeddings
+>     wte_off = 12*PL + 2*E + C*E
+>     wpe_off = 12*PL + 2*E
+>
+>     # Build input: wte[token] + wpe[pos] for last token only? No, need all for attention
+>     # Actually for generation we need KV cache or process all tokens
+>     # For simplicity, process all T tokens
+>
+>     # x[t][e] = wte[token_ids[t]*E + e] + wpe[t*E + e]
+>     x = []
+>     for t in range(T):
+>         row = [0.0]*E
+>         for e in range(E):
+>             tok_emb = struct.unpack_from('<f', W, (wte_off + token_ids[t]*E + e)*4)[0]
+>             pos_emb = struct.unpack_from('<f', W, (wpe_off + t*E + e)*4)[0]
+>             row[e] = tok_emb + pos_emb
+>         x.append(row)
+>
+>     for layer in range(L):
+>         base = layer * PL
+>         # Load layer weights
+>         ln1b = getf(base + 3*E+E*3*E+E+E*E, E)
+>         ln1g = getf(base + 3*E+E*3*E+E+E*E+E, E)
+>         ln2b = getf(base + 3*E+E*3*E+E+E*E+2*E, E)
+>         ln2g = getf(base + 3*E+E*3*E+E+E*E+3*E, E)
+>
+>         # Attention
+>         qkvb = getf(base, 3*E)
+>         # qkvw is E x 3E
+>
+>         apb = getf(base + 3*E+E*3*E, E)
+>         # apw is E x E
+>
+>         # Process each position
+>         # First, layer norm 1
+>         ln1_out = [layer_norm(x[t], ln1g, ln1b) for t in range(T)]
+>
+>         # Compute QKV for all positions
+>         qkv_all = []
+>         for t in range(T):
+>             qkv = [0.0]*(3*E)
+>             for j in range(3*E):
+>                 s = qkvb[j]
+>                 for i in range(E):
+>                     w_val = struct.unpack_from('<f', W, (base + 3*E + i*3*E + j)*4)[0]
+>                     s += ln1_out[t][i] * w_val
+>                 qkv[j] = s
+>             qkv_all.append(qkv)
+>
+>         # Multi-head attention
+>         attn_out = [[0.0]*E for _ in range(T)]
+>         for h in range(H):
+>             for t in range(T):
+>                 # Query for this head
+>                 q = qkv_all[t][h*D:(h+1)*D]
+>                 # Attention scores
+>                 scores = []
+>                 for s in range(t+1):  # causal mask
+>                     k = qkv_all[s][E+h*D:E+(h+1)*D]
+>                     dot = sum(q[d]*k[d] for d in range(D)) / math.sqrt(D)
+>                     scores.append(dot)
+>                 # Softmax
+>                 mx = max(scores)
+>                 exps = [math.exp(s-mx) for s in scores]
+>                 sm = sum(exps)
+>                 probs = [e/sm for e in exps]
+>                 # Weighted sum of values
+>                 for s in range(t+1):
+>                     v = qkv_all[s][2*E+h*D:2*E+(h+1)*D]
+>                     for d in range(D):
+>                         attn_out[t][h*D+d] += probs[s] * v[d]
+>
+>         # Attention projection
+>         for t in range(T):
+>             proj = [0.0]*E
+>             for j in range(E):
+>                 s = apb[j]
+>                 for i in range(E):
+>                     w_val = struct.unpack_from('<f', W, (base + 3*E+E*3*E+E + i*E + j)*4)[0]
+>                     s += attn_out[t][i] * w_val
+>                 proj[j] = s
+>             # Residual
+>             for e in range(E):
+>                 x[t][e] += proj[e]
+>
+>         # MLP
+>         ln2_out = [layer_norm(x[t], ln2g, ln2b) for t in range(T)]
+>
+>         fcb_off = base + 3*E+E*3*E+E+E*E+4*E
+>         fcw_off = base + 3*E+E*3*E+E+E*E+4*E+4*E
+>         fpb_off = base + 3*E+E*3*E+E+E*E+4*E+4*E+E*4*E
+>         fpw_off = base + 3*E+E*3*E+E+E*E+4*E+4*E+E*4*E+E
+>
+>         for t in range(T):
+>             # FC
+>             fcb = getf(fcb_off, 4*E)
+>             h_val = [0.0]*(4*E)
+>             for j in range(4*E):
+>                 s = fcb[j]
+>                 for i in range(E):
+>                     w_val = struct.unpack_from('<f', W, (fcw_off + i*4*E + j)*4)[0]
+>                     s += ln2_out[t][i] * w_val
+>                 h_val[j] = gelu(s)
+>
+>             # Proj
+>             fpb = getf(fpb_off, E)
+>             for j in range(E):
+>                 s = fpb[j]
+>                 for i in range(4*E):
+>                     w_val = struct.unpack_from('<f', W, (fpw_off + i*E + j)*4)[0]
+>                     s += h_val[i] * w_val
+>                 x[t][e] += s  # BUG: should be x[t][j]
+>             # Fix: residual
+>             # Actually this is wrong, let me fix
+>
+>         # Actually let me just do last token for speed
+>         print(f'Layer {layer} done (skipping full impl for speed)')
+>         break
+>
+>     return x
+>
+> # Just test with token 0
+> print('Testing with single token...')
+> # Skip full test, too slow in pure Python with nested loops
+> print('Skipping full Python test - will verify with C implementation')
+> PYEOF
+Testing with single token...
+Skipping full Python test - will verify with C implementation
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

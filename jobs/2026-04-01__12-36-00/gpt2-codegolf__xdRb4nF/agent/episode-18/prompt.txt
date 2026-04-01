@@ -1,0 +1,256 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define E 768
+> #define V 50257
+> #define C 1024
+> #define L 12
+> #define H 12
+> #define D 64
+> #define PL 7087872
+> #define E4 3072
+> float *W;
+> char vocab[V][64];
+> int nvocab;
+>
+> // GPT-2 byte encoder: maps byte values to unicode code points
+> int byte_enc[256];
+> void init_byte_enc(){
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>             byte_enc[i]=i;
+>         else byte_enc[i]=256+n++;
+>     }
+> }
+>
+> // Encode a unicode code point to UTF-8 into buf, return bytes written
+> int to_utf8(int cp, char *buf){
+>     if(cp<0x80){buf[0]=cp;return 1;}
+>     if(cp<0x800){buf[0]=0xC0|(cp>>6);buf[1]=0x80|(cp&0x3F);return 2;}
+>     buf[0]=0xE0|(cp>>12);buf[1]=0x80|((cp>>6)&0x3F);buf[2]=0x80|(cp&0x3F);return 3;
+> }
+>
+> // Decode UTF-8 char, return code point, advance *p
+> int from_utf8(const char **p){
+>     unsigned char c=**p;(*p)++;
+>     if(c<0x80)return c;
+>     if(c<0xE0){int r=(c&0x1F)<<6;r|=(**p&0x3F);(*p)++;return r;}
+>     int r=(c&0x0F)<<12;r|=((**p)&0x3F)<<6;(*p)++;r|=(**p&0x3F);(*p)++;return r;
+> }
+>
+> void load_bpe(const char *path){
+>     FILE*f=fopen(path,"r");
+>     char line[256];
+>     fgets(line,256,f); // skip header
+>     // Build vocab: first 256 entries are single byte tokens
+>     init_byte_enc();
+>     for(int i=0;i<256;i++){
+>         int n=to_utf8(byte_enc[i],vocab[i]);
+>         vocab[i][n]=0;
+>     }
+>     nvocab=256;
+>     // Read merges and create merged tokens
+>     while(fgets(line,256,f)&&nvocab<V){
+>         // line is "token1 token2\n"
+>         char *sp=strchr(line,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         char *t2=sp+1;
+>         char *nl=strchr(t2,'\n');if(nl)*nl=0;
+>         snprintf(vocab[nvocab],64,"%s%s",line,t2);
+>         nvocab++;
+>     }
+>     fclose(f);
+> }
+>
+> int find_token(const char *s, int len){
+>     for(int i=nvocab-1;i>=0;i--){
+>         if((int)strlen(vocab[i])==len && memcmp(vocab[i],s,len)==0)return i;
+>     }
+>     return -1;
+> }
+>
+> // BPE encode: convert input string to token ids
+> int tokenize(const char *text, int *tokens){
+>     // Convert each byte to its byte-level token
+>     int n=0;
+>     char pieces[C][64];
+>     for(int i=0;text[i];i++){
+>         int cp=byte_enc[(unsigned char)text[i]];
+>         int len=to_utf8(cp,pieces[n]);
+>         pieces[n][len]=0;
+>         n++;
+>     }
+>     // Apply BPE merges
+>     for(int m=256;m<nvocab;m++){
+>         for(int i=0;i<n-1;i++){
+>             char merged[128];
+>             snprintf(merged,128,"%s%s",pieces[i],pieces[i+1]);
+>             if(strcmp(merged,vocab[m])==0){
+>                 strcpy(pieces[i],merged);
+>                 for(int j=i+1;j<n-1;j++)strcpy(pieces[j],pieces[j+1]);
+>                 n--;
+>                 i--; // recheck this position
+>             }
+>         }
+>     }
+>     // Convert pieces to token ids
+>     for(int i=0;i<n;i++){
+>         tokens[i]=find_token(pieces[i],strlen(pieces[i]));
+>     }
+>     return n;
+> }
+>
+> // Decode token to string (writes UTF-8 bytes corresponding to byte values)
+> void decode_token(int tok, char *buf){
+>     const char *s=vocab[tok];
+>     int bi=0;
+>     while(*s){
+>         int cp=from_utf8(&s);
+>         // Find which byte this cp represents
+>         for(int b=0;b<256;b++){
+>             if(byte_enc[b]==cp){buf[bi++]=b;break;}
+>         }
+>     }
+>     buf[bi]=0;
+> }
+>
+> float x[C][E], qkv[C][3*E], attn_out[C][E], h[E4], proj[E];
+>
+> void layer_norm(float *out, float *in, float *g, float *b){
+>     float mean=0,var=0;
+>     for(int i=0;i<E;i++)mean+=in[i];
+>     mean/=E;
+>     for(int i=0;i<E;i++){float d=in[i]-mean;var+=d*d;}
+>     float s=1.0f/sqrtf(var/E+1e-5f);
+>     for(int i=0;i<E;i++)out[i]=(in[i]-mean)*s*g[i]+b[i];
+> }
+>
+> float gelu(float x){
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> void forward(int *tokens, int T){
+>     // Embeddings
+>     float *wte=W+12*PL+2*E+C*E;
+>     float *wpe=W+12*PL+2*E;
+>     for(int t=0;t<T;t++)
+>         for(int e=0;e<E;e++)
+>             x[t][e]=wte[tokens[t]*E+e]+wpe[t*E+e];
+>
+>     for(int l=0;l<L;l++){
+>         float *base=W+l*PL;
+>         float *qkvb=base;
+>         float *qkvw=base+3*E;
+>         float *apb=base+3*E+E*3*E;
+>         float *apw=apb+E;
+>         float *ln1b=apw+E*E;
+>         float *ln1g=ln1b+E;
+>         float *ln2b=ln1g+E;
+>         float *ln2g=ln2b+E;
+>         float *fcb=ln2g+E;
+>         float *fcw=fcb+E4;
+>         float *fpb=fcw+(long)E*E4;
+>         float *fpw=fpb+E;
+>
+>         float ln[E];
+>         // Attention
+>         for(int t=0;t<T;t++){
+>             layer_norm(ln,x[t],ln1g,ln1b);
+>             for(int j=0;j<3*E;j++){
+>                 float s=qkvb[j];
+>                 for(int i=0;i<E;i++)s+=ln[i]*qkvw[i*3*E+j];
+>                 qkv[t][j]=s;
+>             }
+>         }
+>         for(int t=0;t<T;t++)memset(attn_out[t],0,E*4);
+>         for(int hi=0;hi<H;hi++){
+>             for(int t=0;t<T;t++){
+>                 float scores[C];
+>                 float mx=-1e30f;
+>                 for(int s=0;s<=t;s++){
+>                     float dot=0;
+>                     for(int d=0;d<D;d++)
+>                         dot+=qkv[t][hi*D+d]*qkv[s][E+hi*D+d];
+>                     scores[s]=dot/sqrtf(D);
+>                     if(scores[s]>mx)mx=scores[s];
+>                 }
+>                 float sm=0;
+>                 for(int s=0;s<=t;s++){scores[s]=expf(scores[s]-mx);sm+=scores[s];}
+>                 for(int s=0;s<=t;s++){
+>                     float p=scores[s]/sm;
+>                     for(int d=0;d<D;d++)
+>                         attn_out[t][hi*D+d]+=p*qkv[s][2*E+hi*D+d];
+>                 }
+>             }
+>         }
+>         // Attn proj + residual
+>         for(int t=0;t<T;t++){
+>             for(int j=0;j<E;j++){
+>                 float s=apb[j];
+>                 for(int i=0;i<E;i++)s+=attn_out[t][i]*apw[i*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>         // MLP
+>         for(int t=0;t<T;t++){
+>             layer_norm(ln,x[t],ln2g,ln2b);
+>             for(int j=0;j<E4;j++){
+>                 float s=fcb[j];
+>                 for(int i=0;i<E;i++)s+=ln[i]*fcw[i*E4+j];
+>                 h[j]=gelu(s);
+>             }
+>             for(int j=0;j<E;j++){
+>                 float s=fpb[j];
+>                 for(int i=0;i<E4;i++)s+=h[i]*fpw[i*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>     }
+> }
+>
+> int argmax_logits(int T){
+>     float *lnfb=W+12*PL;
+>     float *lnfg=lnfb+E;
+>     float *wte=W+12*PL+2*E+C*E;
+>     float ln[E];
+>     layer_norm(ln,x[T-1],lnfg,lnfb);
+>     int best=-1;float bv=-1e30f;
+>     for(int v=0;v<V;v++){
+>         float s=0;
+>         for(int i=0;i<E;i++)s+=ln[i]*wte[v*E+i];
+>         if(s>bv){bv=s;best=v;}
+>     }
+>     return best;
+> }
+>
+> int main(int argc,char**argv){
+>     if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>     // mmap weights
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     load_bpe(argv[2]);
+>     int tokens[C],T=tokenize(argv[3],tokens);
+>     for(int step=0;step<20;step++){
+>         forward(tokens,T);
+>         int next=argmax_logits(T);
+>         tokens[T++]=next;
+>         char buf[64];
+>         decode_token(next,buf);
+>         printf("%s",buf);
+>         fflush(stdout);
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rev_comp(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> junction = 215
+> inserted = 'tagattagaagaagaattaagaagaagattaacagaaag'  # 39bp
+>
+> # Verify
+> test = input_seq[:junction] + inserted + input_seq[junction:]
+> assert test == output_seq, 'Insertion verification failed!'
+> print('Insertion verified: input[:215] + 39bp + input[215:] == output')
+> print(f'Inserted sequence (39bp): {inserted}')
+>
+> # Design primers
+> print(f'\n=== Designing primers ===')
+> print(f'Junction: {junction}')
+> print(f'Input around junction: ...{input_seq[junction-10:junction]}|{input_seq[junction:junction+10]}...')
+>
+> best_pairs = []
+>
+> for fwd_len in range(15, min(37, 46)):  # oligotm max 36 bases
+>     fwd_anneal = input_seq[junction:junction+fwd_len]
+>     if len(fwd_anneal) < fwd_len:
+>         fwd_anneal = input_seq[junction:] + input_seq[:fwd_len-len(input_seq[junction:])]
+>
+>     try:
+>         fwd_tm = get_tm(fwd_anneal)
+>     except:
+>         continue
+>
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_len in range(15, min(37, 46)):
+>         rev_start = junction - rev_len
+>         if rev_start < 0:
+>             rev_anneal = input_seq[rev_start:] + input_seq[:junction]
+>         else:
+>             rev_anneal = input_seq[rev_start:junction]
+>
+>         if len(rev_anneal) != rev_len:
+>             continue
+>
+>         try:
+>             rev_tm = get_tm(rev_anneal)
+>         except:
+>             continue
+>
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         if abs(fwd_tm - rev_tm) > 5:
+>             continue
+>
+>         best_pairs.append({
+>             'fwd_anneal': fwd_anneal,
+>             'fwd_len': fwd_len,
+>             'fwd_tm': fwd_tm,
+>             'rev_anneal': rev_anneal,
+>             'rev_len': rev_len,
+>             'rev_tm': rev_tm,
+>             'tm_diff': abs(fwd_tm - rev_tm)
+>         })
+>
+> print(f'Found {len(best_pairs)} valid primer pairs')
+>
+> # Sort by Tm difference, then by total length
+> best_pairs.sort(key=lambda x: (x['tm_diff'], x['fwd_len'] + x['rev_len']))
+>
+> if best_pairs:
+>     best = best_pairs[0]
+>     print(f'\nBest pair:')
+>     print(f'  Fwd anneal ({best["fwd_len"]}bp, Tm={best["fwd_tm"]:.2f}): {best["fwd_anneal"]}')
+>     print(f'  Rev anneal ({best["rev_len"]}bp, Tm={best["rev_tm"]:.2f}): {best["rev_anneal"]}')
+>     print(f'  Tm difference: {best["tm_diff"]:.2f}')
+>
+>     # Full forward primer: 39bp insertion tail + annealing region
+>     fwd_full = inserted + best['fwd_anneal']
+>     # Full reverse primer: reverse complement of upstream annealing region
+>     rev_full = rev_comp(best['rev_anneal'])
+>
+>     print(f'\nFull forward primer ({len(fwd_full)}bp): {fwd_full}')
+>     print(f'Full reverse primer ({len(rev_full)}bp): {rev_full}')
+>
+>     # Verify: simulate Q5 SDM product
+>     # PCR product after circularization:
+>     # input[:junction] + inserted + input[junction:]
+>     product = input_seq[:junction] + inserted + input_seq[junction:]
+>     assert product == output_seq, 'Product does not match output!'
+>     print('\nProduct verification: PASSED')
+>
+>     # Verify Tm constraints
+>     assert 58 <= best['fwd_tm'] <= 72, f'Fwd Tm out of range: {best["fwd_tm"]}'
+>     assert 58 <= best['rev_tm'] <= 72, f'Rev Tm out of range: {best["rev_tm"]}'
+>     assert abs(best['fwd_tm'] - best['rev_tm']) <= 5, f'Tm diff too large: {best["tm_diff"]}'
+>     assert 15 <= best['fwd_len'] <= 45, f'Fwd anneal length out of range: {best["fwd_len"]}'
+>     assert 15 <= best['rev_len'] <= 45, f'Rev anneal length out of range: {best["rev_len"]}'
+>     print('All constraints verified!')
+>
+>     # Write to primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f'>forward_primer\n{fwd_full}\n')
+>         f.write(f'>reverse_primer\n{rev_full}\n')
+>     print('\nPrimers written to primers.fasta')
+> else:
+>     print('No valid pairs found!')
+> PYEOF
+Insertion verified: input[:215] + 39bp + input[215:] == output
+Inserted sequence (39bp): tagattagaagaagaattaagaagaagattaacagaaag
+
+=== Designing primers ===
+Junction: 215
+Input around junction: ...tacatatgag|caagggcgag...
+Found 37 valid primer pairs
+
+Best pair:
+  Fwd anneal (16bp, Tm=61.24): caagggcgaggagctg
+  Rev anneal (34bp, Tm=61.31): ttgtttaactttaagaaggagatatacatatgag
+  Tm difference: 0.07
+
+Full forward primer (55bp): tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+Full reverse primer (34bp): ctcatatgtatatctccttcttaaagttaaacaa
+
+Product verification: PASSED
+All constraints verified!
+
+Primers written to primers.fasta
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app#

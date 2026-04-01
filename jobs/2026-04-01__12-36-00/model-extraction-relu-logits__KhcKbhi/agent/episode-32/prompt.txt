@@ -1,0 +1,175 @@
+New Terminal Output:
+
+root@697ad52f-fc40-4d64-a05a-fe0aa4a38270:/app# cat /app/steal.py
+import numpy as np
+import sys
+sys.path.insert(0, '/app')
+from forward import forward
+
+def numerical_gradient(x, eps=1e-5):
+    """Compute numerical gradient using central differences."""
+    grad = np.zeros(10)
+    for i in range(10):
+        x_plus = x.copy()
+        x_minus = x.copy()
+        x_plus[i] += eps
+        x_minus[i] -= eps
+        grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+    return grad
+
+def normalize_row(row):
+    norm = np.linalg.norm(row)
+    if norm < 1e-10:
+        return row
+    return row / norm
+
+def cosine_sim(a, b):
+    return abs(np.dot(normalize_row(a), normalize_row(b)))
+
+print("Phase 1: Collecting gradient differences along random rays...")
+
+all_diffs = []
+np.random.seed(42)
+
+for attempt in range(100):
+    x0 = np.random.randn(10) * 1.0
+    direction = np.random.randn(10)
+    direction = direction / np.linalg.norm(direction)
+
+    num_samples = 500
+    ts = np.linspace(-5, 5, num_samples)
+
+    prev_g = numerical_gradient(x0 + ts[0] * direction)
+
+    for idx in range(1, num_samples):
+        t = ts[idx]
+        g = numerical_gradient(x0 + t * direction)
+        diff = g - prev_g
+        diff_norm = np.linalg.norm(diff)
+
+        if diff_norm > 0.0005:
+            all_diffs.append(diff.copy())
+
+        prev_g = g
+
+    if (attempt + 1) % 20 == 0:
+        print(f"  Attempt {attempt+1}, collected {len(all_diffs)} gradient differences")
+
+print(f"\nTotal gradient differences collected: {len(all_diffs)}")
+
+# Phase 2: Cluster the gradient differences to find unique neuron directions
+print("\nPhase 2: Clustering to find unique neuron directions...")
+
+# Sort by norm (descending) - larger norms are more likely to be single-neuron switches
+all_diffs.sort(key=lambda x: np.linalg.norm(x), reverse=True)
+
+# Greedy clustering
+clusters = []  # Each cluster: list of diffs that are parallel
+for diff in all_diffs:
+    diff_norm = normalize_row(diff)
+    found_cluster = False
+    for cluster in clusters:
+        rep_norm = normalize_row(cluster[0])
+        if cosine_sim(diff, cluster[0]) > 0.98:
+            cluster.append(diff)
+            found_cluster = True
+            break
+    if not found_cluster:
+        clusters.append([diff])
+
+print(f"Found {len(clusters)} clusters")
+for i, c in enumerate(clusters):
+    print(f"  Cluster {i}: {len(c)} members, representative norm={np.linalg.norm(c[0]):.6f}")
+
+# Phase 3: Take the best representative from each cluster
+# For clusters with many members, the representative is reliable
+# For small clusters, they might be noise or combined switches
+print("\nPhase 3: Selecting representatives...")
+
+# First pass: collect "confident" rows (clusters with many members)
+confident_rows = []
+for cluster in clusters:
+    if len(cluster) >= 3:  # Seen multiple times = likely a real neuron
+        # Use the median direction for robustness
+        # Normalize all to same sign convention
+        ref = normalize_row(cluster[0])
+        aligned = []
+        for d in cluster:
+            d_norm = normalize_row(d)
+            if np.dot(d_norm, ref) < 0:
+                aligned.append(-d_norm)
+            else:
+                aligned.append(d_norm)
+        avg = np.mean(aligned, axis=0)
+        avg = normalize_row(avg)
+        confident_rows.append(avg)
+
+print(f"Confident rows (clusters with >=3 members): {len(confident_rows)}")
+
+# Second pass: for remaining clusters, check if they are sums of known rows
+# or genuinely new rows
+for cluster in clusters:
+    if len(cluster) < 3:
+        diff = cluster[0]
+        diff_n = normalize_row(diff)
+
+        # Check if it's already represented
+        is_known = False
+        for cr in confident_rows:
+            if cosine_sim(diff, cr) > 0.95:
+                is_known = True
+                break
+
+        if not is_known:
+            # Check if it's a sum of two known rows
+            # diff = alpha * row_i + beta * row_j
+            # Try subtracting scaled known rows
+            found_decomp = False
+            for cr in confident_rows:
+                # Project diff onto cr and get residual
+                proj_coeff = np.dot(diff, cr)  # cr is unit norm
+                residual = diff - proj_coeff * cr
+                res_norm = np.linalg.norm(residual)
+
+                if res_norm > 0.0003:  # Non-trivial residual
+                    res_n = normalize_row(residual)
+                    # Check if residual matches any known row
+                    for cr2 in confident_rows:
+                        if cosine_sim(residual, cr2) > 0.95:
+                            found_decomp = True
+                            break
+
+                    if not found_decomp:
+                        # Residual is a new direction!
+                        # Check it's not already in confident_rows
+                        is_new = True
+                        for cr2 in confident_rows:
+                            if cosine_sim(residual, cr2) > 0.95:
+                                is_new = False
+                                break
+                        if is_new and res_norm > 0.0003:
+                            confident_rows.append(normalize_row(residual))
+                            print(f"  Found new row from decomposition, residual norm={res_norm:.6f}")
+                            found_decomp = True
+                            break
+
+            if not found_decomp:
+                # Just add it as is
+                confident_rows.append(diff_n)
+                print(f"  Added small cluster row, norm={np.linalg.norm(diff):.6f}")
+
+print(f"\nTotal rows found: {len(confident_rows)}")
+
+# Take first 20 rows
+A1_stolen = np.array(confident_rows[:20])
+
+# Ensure unit norm
+for i in range(len(A1_stolen)):
+    norm = np.linalg.norm(A1_stolen[i])
+    if norm > 1e-10:
+        A1_stolen[i] = A1_stolen[i] / norm
+
+print(f"Stolen A1 shape: {A1_stolen.shape}")
+np.save('/app/stolen_A1.npy', A1_stolen)
+print("Saved to /app/stolen_A1.npy")
+root@697ad52f-fc40-4d64-a05a-fe0aa4a38270:/app#

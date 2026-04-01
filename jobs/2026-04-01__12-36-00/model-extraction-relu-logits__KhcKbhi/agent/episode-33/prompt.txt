@@ -1,0 +1,165 @@
+New Terminal Output:
+
+root@697ad52f-fc40-4d64-a05a-fe0aa4a38270:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-5):
+>     """Compute numerical gradient using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def normalize_row(row):
+>     norm = np.linalg.norm(row)
+>     if norm < 1e-10:
+>         return row
+>     return row / norm
+>
+> def cosine_sim(a, b):
+>     return abs(np.dot(normalize_row(a), normalize_row(b)))
+>
+> print("Phase 1: Collecting gradient differences along random rays...")
+> print("(Each gradient change along a ray corresponds to a ReLU neuron switching on/off)")
+>
+> all_diffs = []
+> np.random.seed(42)
+>
+> for attempt in range(100):
+>     x0 = np.random.randn(10) * 1.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     num_samples = 500
+>     ts = np.linspace(-5, 5, num_samples)
+>
+>     prev_g = numerical_gradient(x0 + ts[0] * direction)
+>
+>     for idx in range(1, num_samples):
+>         t = ts[idx]
+>         g = numerical_gradient(x0 + t * direction)
+>         diff = g - prev_g
+>         diff_norm = np.linalg.norm(diff)
+>
+>         if diff_norm > 0.0005:
+>             all_diffs.append(diff.copy())
+>
+>         prev_g = g
+>
+>     if (attempt + 1) % 20 == 0:
+>         print(f"  Attempt {attempt+1}, collected {len(all_diffs)} gradient differences")
+>
+> print(f"Total gradient differences collected: {len(all_diffs)}")
+>
+> # Phase 2: Cluster the gradient differences to find unique neuron directions
+> print("\nPhase 2: Clustering to find unique neuron directions...")
+>
+> # Sort by norm (descending) - larger norms are more likely to be single-neuron switches
+> all_diffs.sort(key=lambda x: np.linalg.norm(x), reverse=True)
+>
+> # Greedy clustering
+> clusters = []
+> for diff in all_diffs:
+>     found_cluster = False
+>     for cluster in clusters:
+>         if cosine_sim(diff, cluster[0]) > 0.98:
+>             cluster.append(diff)
+>             found_cluster = True
+>             break
+>     if not found_cluster:
+>         clusters.append([diff])
+>
+> print(f"Found {len(clusters)} clusters")
+>
+> # Phase 3: Take the best representative from each cluster
+> print("\nPhase 3: Selecting representatives...")
+>
+> # Confident rows: clusters with many members (seen repeatedly = real neuron)
+> confident_rows = []
+> for cluster in clusters:
+>     if len(cluster) >= 3:
+>         # Average the normalized directions for robustness
+>         ref = normalize_row(cluster[0])
+>         aligned = []
+>         for d in cluster:
+>             d_norm = normalize_row(d)
+>             if np.dot(d_norm, ref) < 0:
+>                 aligned.append(-d_norm)
+>             else:
+>                 aligned.append(d_norm)
+>         avg = np.mean(aligned, axis=0)
+>         avg = normalize_row(avg)
+>         confident_rows.append(avg)
+>
+> print(f"Confident rows (clusters with >=3 members): {len(confident_rows)}")
+>
+> # For small clusters, check if they reveal new directions
+> # (could be sums of two neurons switching simultaneously)
+> for cluster in clusters:
+>     if len(cluster) < 3:
+>         diff = cluster[0]
+>         diff_n = normalize_row(diff)
+>
+>         # Check if already represented
+>         is_known = False
+>         for cr in confident_rows:
+>             if cosine_sim(diff, cr) > 0.95:
+>                 is_known = True
+>                 break
+>
+>         if not is_known:
+>             # Try decomposing as sum of two known rows
+>             found_decomp = False
+>             for cr in confident_rows:
+>                 proj_coeff = np.dot(diff, cr)
+>                 residual = diff - proj_coeff * cr
+>                 res_norm = np.linalg.norm(residual)
+>
+>                 if res_norm > 0.0003:
+>                     # Check if residual matches known row
+>                     for cr2 in confident_rows:
+>                         if cosine_sim(residual, cr2) > 0.95:
+>                             found_decomp = True
+>                             break
+>
+>                     if not found_decomp:
+>                         # Residual is a new direction
+>                         is_new = True
+>                         for cr2 in confident_rows:
+>                             if cosine_sim(residual, cr2) > 0.95:
+>                                 is_new = False
+>                                 break
+>                         if is_new and res_norm > 0.0003:
+>                             confident_rows.append(normalize_row(residual))
+>                             print(f"  Found new row from decomposition, residual norm={res_norm:.6f}")
+>                             found_decomp = True
+>                             break
+>
+>             if not found_decomp:
+>                 confident_rows.append(diff_n)
+>                 print(f"  Added small cluster row, norm={np.linalg.norm(diff):.6f}")
+>
+> num_neurons = len(confident_rows)
+> print(f"\nDiscovered {num_neurons} neurons")
+>
+> # Build the output matrix
+> A1_stolen = np.array(confident_rows)
+>
+> # Ensure unit norm for each row
+> for i in range(len(A1_stolen)):
+>     norm = np.linalg.norm(A1_stolen[i])
+>     if norm > 1e-10:
+>         A1_stolen[i] = A1_stolen[i] / norm
+>
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print("Saved to /app/stolen_A1.npy")
+> PYEOF
+root@697ad52f-fc40-4d64-a05a-fe0aa4a38270:/app#

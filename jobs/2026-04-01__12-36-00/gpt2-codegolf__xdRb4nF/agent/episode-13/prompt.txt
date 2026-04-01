@@ -1,0 +1,96 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> all_data = f.read()
+> f.close()
+>
+> E = 768
+> total_floats = len(all_data) // 4
+>
+> # Search with wider tolerance and not just E-aligned
+> # But that's too slow for all positions. Let me try a different approach.
+> # Check if LN gammas might all be positive (even if not near 1.0)
+> # In trained GPT-2, LN gammas are positive but can vary
+>
+> # Let me try the llm.c grouped format and just check if the structure makes sense
+> V, C, L = 50257, 1024, 12
+>
+> # llm.c format: wte[V*E], wpe[C*E], ln1w[L*E], ln1b[L*E], ...
+> base = V*E + C*E
+>
+> # Read what would be ln1w for all layers (L*E = 9216 floats)
+> ln1w_start = base
+> ln1w = struct.unpack_from(f'<{L*E}f', all_data, ln1w_start * 4)
+>
+> # Check statistics per layer
+> for layer in range(L):
+>     chunk = ln1w[layer*E:(layer+1)*E]
+>     avg = sum(chunk)/E
+>     mn = min(chunk)
+>     mx = max(chunk)
+>     all_pos = all(v > 0 for v in chunk)
+>     print(f'Layer {layer} ln1w: avg={avg:.4f} min={mn:.4f} max={mx:.4f} all_pos={all_pos}')
+>
+> # Also check what would be ln1b
+> ln1b_start = base + L*E
+> ln1b = struct.unpack_from(f'<{L*E}f', all_data, ln1b_start * 4)
+> for layer in range(L):
+>     chunk = ln1b[layer*E:(layer+1)*E]
+>     avg = sum(chunk)/E
+>     print(f'Layer {layer} ln1b: avg={avg:.4f}')
+>
+> print()
+> # Maybe the format is per-layer interleaved. Let me try another layout.
+> # OpenAI original order per layer: ln1.g, ln1.b, attn.c_attn.w, attn.c_attn.b, attn.c_proj.w, attn.c_proj.b, ln2.g, ln2.b, mlp.c_fc.w, mlp.c_fc.b, mlp.c_proj.
+w, mlp.c_proj.b
+> per_layer = 2*E + 3*E*E + 3*E + E*E + E + 2*E + 4*E*E + 4*E + 4*E*E + E
+> print(f'Per layer size: {per_layer} (expected 7087872: {per_layer == 7087872})')
+>
+> # Check layer 0 with this layout
+> for layer in range(1):
+>     lbase = base + layer * per_layer
+>     # ln1.g
+>     chunk = struct.unpack_from(f'<{E}f', all_data, lbase * 4)
+>     avg = sum(chunk)/E
+>     all_pos = all(v > 0 for v in chunk)
+>     print(f'Layer {layer} ln1.g: avg={avg:.4f} all_pos={all_pos} first5={[round(v,3) for v in chunk[:5]]}')
+>
+>     # ln1.b
+>     off = lbase + E
+>     chunk = struct.unpack_from(f'<{E}f', all_data, off * 4)
+>     avg = sum(chunk)/E
+>     print(f'Layer {layer} ln1.b: avg={avg:.4f} first5={[round(v,3) for v in chunk[:5]]}')
+>
+> PYEOF
+Layer 0 ln1w: avg=0.0147 min=-0.4365 max=0.4971 all_pos=False
+Layer 1 ln1w: avg=0.0149 min=-0.3512 max=0.5670 all_pos=False
+Layer 2 ln1w: avg=0.0156 min=-0.4138 max=0.3613 all_pos=False
+Layer 3 ln1w: avg=0.0097 min=-0.3803 max=0.3392 all_pos=False
+Layer 4 ln1w: avg=-0.0075 min=-0.5073 max=0.3787 all_pos=False
+Layer 5 ln1w: avg=-0.0133 min=-0.4439 max=0.4485 all_pos=False
+Layer 6 ln1w: avg=-0.0108 min=-0.4169 max=0.4377 all_pos=False
+Layer 7 ln1w: avg=-0.0131 min=-0.4846 max=0.3830 all_pos=False
+Layer 8 ln1w: avg=-0.0177 min=-0.4460 max=0.3989 all_pos=False
+Layer 9 ln1w: avg=-0.0244 min=-0.4779 max=0.3791 all_pos=False
+Layer 10 ln1w: avg=-0.0169 min=-0.3517 max=0.4074 all_pos=False
+Layer 11 ln1w: avg=-0.0112 min=-0.5068 max=0.4056 all_pos=False
+Layer 0 ln1b: avg=-0.0163
+Layer 1 ln1b: avg=-0.0066
+Layer 2 ln1b: avg=-0.0087
+Layer 3 ln1b: avg=-0.0080
+Layer 4 ln1b: avg=0.0139
+Layer 5 ln1b: avg=-0.0044
+Layer 6 ln1b: avg=0.0070
+Layer 7 ln1b: avg=0.0076
+Layer 8 ln1b: avg=0.0210
+Layer 9 ln1b: avg=0.0223
+Layer 10 ln1b: avg=0.0180
+Layer 11 ln1b: avg=0.0173
+
+Per layer size: 7087872 (expected 7087872: True)
+Layer 0 ln1.g: avg=0.0147 all_pos=False first5=[0.013, 0.111, -0.019, -0.08, -0.194]
+Layer 0 ln1.b: avg=0.0149 first5=[0.251, -0.024, -0.102, -0.035, 0.176]
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

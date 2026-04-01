@@ -1,0 +1,134 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# cat > /tmp/debug3.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define E 768
+> #define V 50257
+> #define C 1024
+> #define L 12
+> #define H 12
+> #define D 64
+> #define PL 7087872
+> #define E4 3072
+> float *W;
+> float x[C][E], qkv[C][3*E], ao[C][E], hh[E4];
+> void ln(float *out, float *in, float *g, float *b){
+>     float mean=0,var=0;
+>     for(int i=0;i<E;i++)mean+=in[i];
+>     mean/=E;
+>     for(int i=0;i<E;i++){float d=in[i]-mean;var+=d*d;}
+>     float s=1.0f/sqrtf(var/E+1e-5f);
+>     for(int i=0;i<E;i++)out[i]=(in[i]-mean)*s*g[i]+b[i];
+> }
+> float geluf(float x){
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+> void forward(int *tokens, int T){
+>     float *wte=W+12*PL+2*E+C*E;
+>     float *wpe=W+12*PL+2*E;
+>     for(int t=0;t<T;t++)
+>         for(int e=0;e<E;e++)
+>             x[t][e]=wte[tokens[t]*E+e]+wpe[t*E+e];
+>     for(int l=0;l<L;l++){
+>         float *base=W+(long)l*PL;
+>         float *qkvb=base;
+>         float *qkvw=base+3*E;
+>         float *apb=base+3*E+(long)E*3*E;
+>         float *apw=apb+E;
+>         float *ln1b=apw+(long)E*E;
+>         float *ln1g=ln1b+E;
+>         float *ln2b=ln1g+E;
+>         float *ln2g=ln2b+E;
+>         float *fcb=ln2g+E;
+>         float *fcw=fcb+E4;
+>         float *fpb=fcw+(long)E*E4;
+>         float *fpw=fpb+E;
+>         float tmp[E];
+>         for(int t=0;t<T;t++){
+>             ln(tmp,x[t],ln1g,ln1b);
+>             for(int j=0;j<3*E;j++){
+>                 float s=qkvb[j];
+>                 for(int i=0;i<E;i++)s+=tmp[i]*qkvw[(long)i*3*E+j];
+>                 qkv[t][j]=s;
+>             }
+>         }
+>         for(int t=0;t<T;t++)memset(ao[t],0,E*4);
+>         for(int hi=0;hi<H;hi++){
+>             for(int t=0;t<T;t++){
+>                 float scores[C];
+>                 float mx=-1e30f;
+>                 for(int s=0;s<=t;s++){
+>                     float dot=0;
+>                     for(int d=0;d<D;d++)
+>                         dot+=qkv[t][hi*D+d]*qkv[s][E+hi*D+d];
+>                     scores[s]=dot/sqrtf(D);
+>                     if(scores[s]>mx)mx=scores[s];
+>                 }
+>                 float sm=0;
+>                 for(int s=0;s<=t;s++){scores[s]=expf(scores[s]-mx);sm+=scores[s];}
+>                 for(int s=0;s<=t;s++){
+>                     float p=scores[s]/sm;
+>                     for(int d=0;d<D;d++)
+>                         ao[t][hi*D+d]+=p*qkv[s][2*E+hi*D+d];
+>                 }
+>             }
+>         }
+>         for(int t=0;t<T;t++){
+>             for(int j=0;j<E;j++){
+>                 float s=apb[j];
+>                 for(int i=0;i<E;i++)s+=ao[t][i]*apw[(long)i*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>         for(int t=0;t<T;t++){
+>             ln(tmp,x[t],ln2g,ln2b);
+>             for(int j=0;j<E4;j++){
+>                 float s=fcb[j];
+>                 for(int i=0;i<E;i++)s+=tmp[i]*fcw[(long)i*E4+j];
+>                 hh[j]=geluf(s);
+>             }
+>             for(int j=0;j<E;j++){
+>                 float s=fpb[j];
+>                 for(int i=0;i<E4;i++)s+=hh[i]*fpw[(long)i*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>     }
+> }
+> int argmax_logits(int T){
+>     float *lnfb=W+12*PL;
+>     float *lnfg=lnfb+E;
+>     float *wte=W+12*PL+2*E+C*E;
+>     float tmp[E];
+>     ln(tmp,x[T-1],lnfg,lnfb);
+>     int best=-1;float bv=-1e30f;
+>     for(int v=0;v<V;v++){
+>         float s=0;
+>         for(int i=0;i<E;i++)s+=tmp[i]*wte[v*E+i];
+>         if(s>bv){bv=s;best=v;}
+>     }
+>     return best;
+> }
+> int main(int argc,char**argv){
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     int tokens[C]={15496};
+>     int T=1;
+>     for(int step=0;step<5;step++){
+>         forward(tokens,T);
+>         int next=argmax_logits(T);
+>         fprintf(stderr,"Step %d: T=%d -> token %d\n",step,T,next);
+>         tokens[T++]=next;
+>     }
+>     return 0;
+> }
+> CEOF
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# gcc -O3 -o /tmp/debug3 /tmp/debug3.c -lm 2>&1
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

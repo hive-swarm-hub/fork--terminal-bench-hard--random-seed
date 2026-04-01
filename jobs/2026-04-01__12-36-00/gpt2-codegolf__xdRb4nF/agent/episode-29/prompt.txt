@@ -1,0 +1,119 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> # Let me do a manual forward pass in Python for just 1 token to verify
+> f = open('gpt2-124M.ckpt', 'rb')
+> W = f.read()
+> f.close()
+>
+> E, V, Ctx, Layers, Heads = 768, 50257, 1024, 12, 12
+> D = 64
+> PL = 7087872
+>
+> def gf(off):
+>     return struct.unpack_from('<f', W, off*4)[0]
+>
+> def gfn(off, n):
+>     return list(struct.unpack_from(f'<{n}f', W, off*4))
+>
+> # Token for "Hello" - in GPT-2, "Hello" is token 15496
+> # Let me check: H=72, e=101, l=108, l=108, o=111
+> # byte_enc[72]=72 (H), byte_enc[101]=101 (e), etc.
+> # So pieces start as ['H','e','l','l','o']
+> # BPE merges would combine these
+>
+> # For now, let's just test with a single token - say token 15496 ("Hello")
+> # Actually let me use token 198 which is '\n' typically, or just token 0
+>
+> # Let me use token 15496 at position 0
+> # First check if 15496 is actually "Hello"
+>
+> # Actually let me just test with token 0 at position 0
+> token = 0
+> wte_off = 12*PL + 2*E + Ctx*E
+> wpe_off = 12*PL + 2*E
+>
+> # Embedding
+> x = [gf(wte_off + token*E + e) + gf(wpe_off + 0*E + e) for e in range(E)]
+> print(f'Embedding first 5: {[round(v,4) for v in x[:5]]}')
+> print(f'Embedding norm: {math.sqrt(sum(v*v for v in x)):.4f}')
+>
+> # Layer 0
+> base = 0
+> ln1b = gfn(base + 3*E + E*3*E + E + E*E, E)
+> ln1g = gfn(base + 3*E + E*3*E + E + E*E + E, E)
+>
+> # Layer norm
+> mean = sum(x)/E
+> var = sum((v-mean)**2 for v in x)/E
+> s = 1.0/math.sqrt(var + 1e-5)
+> ln = [(x[i]-mean)*s*ln1g[i]+ln1b[i] for i in range(E)]
+> print(f'\nAfter LN1 first 5: {[round(v,4) for v in ln[:5]]}')
+>
+> # QKV
+> qkvb = gfn(base, 3*E)
+> qkvw_off = base + 3*E
+>
+> # Compute first few QKV values
+> for j in range(3):
+>     s = qkvb[j]
+>     for i in range(E):
+>         s += ln[i] * gf(qkvw_off + i*3*E + j)
+>     print(f'QKV[{j}] = {s:.4f}')
+>
+> # After full attention with just 1 token, softmax is trivially 1.0
+> # So attn_out = V (the value vector)
+> # Let me compute full QKV
+> qkv = [0.0]*(3*E)
+> for j in range(3*E):
+>     s = qkvb[j]
+>     for i in range(E):
+>         s += ln[i] * gf(qkvw_off + i*3*E + j)
+>     qkv[j] = s
+>
+> print(f'\nQ first 5: {[round(qkv[i],4) for i in range(5)]}')
+> print(f'K first 5: {[round(qkv[E+i],4) for i in range(5)]}')
+> print(f'V first 5: {[round(qkv[2*E+i],4) for i in range(5)]}')
+>
+> # With 1 token, attention output = V
+> attn_out = qkv[2*E:3*E]
+>
+> # Attention projection
+> apb = gfn(base + 3*E + E*3*E, E)
+> apw_off = base + 3*E + E*3*E + E
+>
+> proj = [0.0]*E
+> for j in range(E):
+>     s = apb[j]
+>     for i in range(E):
+>         s += attn_out[i] * gf(apw_off + i*E + j)
+>     proj[j] = s
+>
+> # Residual
+> for j in range(E):
+>     x[j] += proj[j]
+>
+> print(f'\nAfter attn+residual first 5: {[round(v,4) for v in x[:5]]}')
+> print(f'After attn+residual norm: {math.sqrt(sum(v*v for v in x)):.4f}')
+>
+> print('\nDone layer 0 attention. Skipping rest for speed.')
+> PYEOF
+Embedding first 5: [-0.1289, -0.2367, 0.0371, 0.1452, 0.0153]
+Embedding norm: 10.2135
+
+After LN1 first 5: [-0.0788, -0.0872, -0.0465, 0.0731, -0.0044]
+QKV[0] = 0.1790
+QKV[1] = -0.4041
+QKV[2] = 0.0674
+
+Q first 5: [0.179, -0.4041, 0.0674, -0.9877, -0.3079]
+K first 5: [-1.2244, 2.271, 0.7146, 0.0673, 0.4848]
+V first 5: [-0.043, -0.0021, -0.0942, -0.0106, -0.0716]
+
+After attn+residual first 5: [-1.4655, 0.1313, 0.7491, 0.1513, 0.0846]
+After attn+residual norm: 30.2165
+
+Done layer 0 attention. Skipping rest for speed.
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

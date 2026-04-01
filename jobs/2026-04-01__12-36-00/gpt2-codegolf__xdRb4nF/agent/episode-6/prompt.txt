@@ -1,0 +1,67 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+>
+> def read_floats(offset, count):
+>     f.seek(offset * 4)
+>     data = f.read(count * 4)
+>     return struct.unpack(f'<{count}f', data)
+>
+> V, C, E, L = 50257, 1024, 768, 12
+>
+> # Maybe the order is different. Let me check llm.c format:
+> # In llm.c, the order is:
+> # wte[V*E], wpe[C*E], ln1w[L*E], ln1b[L*E], qkvw[L*3E*E], qkvb[L*3E], attprojw[L*E*E], attprojb[L*E],
+> # ln2w[L*E], ln2b[L*E], fcw[L*4E*E], fcb[L*4E], fcprojw[L*4E*E], fcprojb[L*E], lnfw[E], lnfb[E]
+> # All layer norms grouped together!
+>
+> base = V * E + C * E  # after wte and wpe
+> print(f'Base offset (after wte+wpe): {base}')
+>
+> # Check if ln1w starts here (all L layers' ln1 gamma, should be ~1.0)
+> vals = read_floats(base, 10)
+> print(f'At base: {vals}')
+> print('All ~1.0?', all(abs(v - 1.0) < 0.2 for v in vals))
+>
+> # Maybe wpe comes before wte?
+> base2 = C * E
+> print(f'\nAt offset {base2} (if wpe first):')
+> vals = read_floats(base2, 10)
+> print(vals)
+>
+> # Let me scan for a region of 768 consecutive values near 1.0
+> chunk_size = 100000
+> for start in range(0, 124439808, chunk_size):
+>     vals = read_floats(start, min(chunk_size, 124439808 - start))
+>     for i in range(len(vals) - 768):
+>         if all(abs(v - 1.0) < 0.3 for v in vals[i:i+20]):
+>             actual_offset = start + i
+>             print(f'\nFound potential LN weights at offset {actual_offset}')
+>             sample = read_floats(actual_offset, 20)
+>             print(sample)
+>             # Check more
+>             sample2 = read_floats(actual_offset, 768)
+>             avg = sum(sample2) / len(sample2)
+>             print(f'Mean of 768 values: {avg}')
+>             if abs(avg - 1.0) < 0.1:
+>                 print('LIKELY LAYER NORM GAMMA!')
+>                 print(f'Offset from start of layers: {actual_offset - V*E - C*E}')
+>                 break
+>     else:
+>         continue
+>     break
+>
+> f.close()
+> PYEOF
+Base offset (after wte+wpe): 39383808
+At base: (0.012613765895366669, 0.1112576425075531, -0.018961146473884583, -0.07971286028623581, -0.1944773644208908, -0.022865435108542442, -0.0454448163509368
+9, 0.048737768083810806, 0.039336930960416794, 0.10603900253772736)
+All ~1.0? False
+
+At offset 786432 (if wpe first):
+(-0.12090792506933212, -0.2216065376996994, -0.07166704535484314, 0.2791760265827179, -0.3004489243030548, 0.02167167142033577, 0.33975857496261597, 0.186233550
+3101349, 0.08878385275602341, -0.28129053115844727)
+

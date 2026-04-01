@@ -1,0 +1,75 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> # Let me check what token "]" maps to
+> # In GPT-2, "]" is byte 93, which maps to code point 93 (since 33<=93<=126)
+> # So the byte_enc for ']' is 93
+> # The UTF-8 for code point 93 is just the byte 93 = ']'
+> # So vocab entry for ']' should be at index 93 (the 93rd single-byte token)
+> print(f"']' byte value: {ord(']')}")
+> print(f"']' is in range 33-126: {33 <= ord(']') <= 126}")
+> print(f"So byte_enc[93] = 93")
+> print(f"Token index for ']' should be 93")
+>
+> # Let me verify by checking what the model outputs
+> # The issue might be in the weight pointer arithmetic
+> # Let me verify the PL constant
+> E = 768
+> PL = 3*E + E*3*E + E + E*E + E + E + E + E + 4*E + E*4*E + E + 4*E*E
+> print(f"\nPL calculation: {PL}")
+> print(f"Expected: 7087872")
+> print(f"Match: {PL == 7087872}")
+>
+> # Let me also check the pointer arithmetic for fpw
+> # fpb = fcw + E*E4 = fcw + 768*3072 = fcw + 2359296
+> # But in C: float *fpb=fcw+(long)E*E4;
+> # E*E4 = 768*3072 = 2359296 - this is fine for int
+> # But wait - in C, E and E4 are #defines (int), so E*E4 could overflow 32-bit int?
+> # 768 * 3072 = 2,359,296 - fits in int
+> # But base + l*PL could overflow when l*PL is large
+> # l*PL for l=11: 11*7087872 = 77,966,592 - fits in int
+> # W + l*PL: pointer arithmetic, should be fine on 64-bit
+>
+> # Wait - the issue might be simpler. Let me check if the weight layout within
+> # a layer is correct by checking specific values.
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> all_data = f.read()
+> f.close()
+>
+> # In my C code, layer 0 layout:
+> # qkvb = base + 0 = offset 0
+> # qkvw = base + 3*E = offset 2304
+> # apb = base + 3*E + E*3*E = offset 2304 + 1769472 = 1771776
+> # apw = apb + E = 1771776 + 768 = 1772544
+> # ln1b = apw + E*E = 1772544 + 589824 = 2362368
+> # ln1g = ln1b + E = 2362368 + 768 = 2363136
+> # ln2b = ln1g + E = 2363136 + 768 = 2363904
+> # ln2g = ln2b + E = 2363904 + 768 = 2364672
+> # fcb = ln2g + E = 2364672 + 768 = 2365440
+> # fcw = fcb + E4 = 2365440 + 3072 = 2368512
+> # fpb = fcw + E*E4 = 2368512 + 2359296 = 4727808
+> # fpw = fpb + E = 4727808 + 768 = 4728576
+> # end = fpw + 4*E*E = 4728576 + 2359296 = 7087872 ✓
+>
+> print(f"\nLayer 0 ln1g at offset 2363136:")
+> chunk = struct.unpack_from(f'<5f', all_data, 2363136*4)
+> print(f"  Values: {[round(v,4) for v in chunk]}")
+> print(f"  (Expected: [0.2232, 0.182, 0.1534, 0.1917, 0.2036])")
+>
+> PYEOF
+']' byte value: 93
+']' is in range 33-126: True
+So byte_enc[93] = 93
+Token index for ']' should be 93
+
+PL calculation: 7087872
+Expected: 7087872
+Match: True
+
+Layer 0 ln1g at offset 2363136:
+  Values: [0.2232, 0.182, 0.1534, 0.1917, 0.2036]
+  (Expected: [0.2232, 0.182, 0.1534, 0.1917, 0.2036])
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

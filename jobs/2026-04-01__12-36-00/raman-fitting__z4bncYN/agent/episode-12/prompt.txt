@@ -1,0 +1,159 @@
+New Terminal Output:
+
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app# cat > /app/fit_peaks2.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data_x = []
+> data_y = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line: continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         data_x.append(x)
+>         data_y.append(y)
+>
+> x = np.array(data_x)
+> y = np.array(data_y)
+> idx = np.argsort(x)
+> x = x[idx]
+> y = y[idx]
+>
+> # Convert to Raman shift
+> laser = 19139.54
+> raman_shift = laser - x
+>
+> # Sort by Raman shift (ascending)
+> idx2 = np.argsort(raman_shift)
+> rs = raman_shift[idx2]
+> ys = y[idx2]
+>
+> print(f"Total points: {len(rs)}")
+> print(f"Raman shift range: {rs.min():.1f} to {rs.max():.1f}")
+>
+> # Lorentzian: amplitude / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude / ((x - x0)**2 + gamma**2) + offset
+>
+> # ============ Fit 2D peak ============
+> # Use data from 2400 to 3300 cm-1 Raman shift
+> mask_2d = (rs > 2400) & (rs < 3300)
+> x_2d = rs[mask_2d]
+> y_2d = ys[mask_2d]
+> print(f"\n2D peak: {len(x_2d)} points")
+>
+> # Initial guesses
+> i_max = np.argmax(y_2d)
+> x0_2d = x_2d[i_max]
+> offset_2d = np.min(y_2d)
+> gamma_2d = 50.0
+> amp_2d = (np.max(y_2d) - offset_2d) * gamma_2d**2
+>
+> print(f"2D initial guesses: x0={x0_2d:.1f}, gamma={gamma_2d}, amp={amp_2d:.1f}, offset={offset_2d:.1f}")
+>
+> popt_2d, pcov_2d = curve_fit(lorentzian, x_2d, y_2d,
+>                               p0=[x0_2d, gamma_2d, amp_2d, offset_2d],
+>                               maxfev=50000)
+> print(f"2D fit: x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amp={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+>
+> # Residuals
+> y_fit_2d = lorentzian(x_2d, *popt_2d)
+> residuals_2d = y_2d - y_fit_2d
+> print(f"2D fit residuals: mean={np.mean(residuals_2d):.2f}, std={np.std(residuals_2d):.2f}")
+>
+> # ============ Fit G peak ============
+> # The G peak region has very few points and sits on a sloped background
+> # Let's use a wider region and try Lorentzian + linear background
+> mask_g = (rs > 1000) & (rs < 2200)
+> x_g = rs[mask_g]
+> y_g = ys[mask_g]
+> print(f"\nG peak: {len(x_g)} points")
+> for i in range(len(x_g)):
+>     print(f"  shift={x_g[i]:.1f}, y={y_g[i]:.1f}")
+>
+> # Try Lorentzian + linear background
+> def lorentzian_with_bg(x, x0, gamma, amplitude, offset):
+>     return amplitude / ((x - x0)**2 + gamma**2) + offset
+>
+> # The background is steeply rising. Let's try to see if there's a bump.
+> # Actually, with so few points, let's just try a simple Lorentzian fit
+> i_max_g = np.argmax(y_g)
+> print(f"\nG region max at shift={x_g[i_max_g]:.1f}, y={y_g[i_max_g]:.1f}")
+> print(f"G region min at shift={x_g[np.argmin(y_g)]:.1f}, y={y_g[np.argmin(y_g)]:.1f}")
+>
+> # The y values are monotonically decreasing with increasing Raman shift
+> # This means there's no visible G peak - just background
+> # But the task requires fitting it. Let's try with a Lorentzian anyway.
+> # Maybe the G peak is there but hidden in the background slope.
+>
+> # Let's try: Lorentzian peak + sloped background
+> def lorentzian_slope(x, x0, gamma, amplitude, offset, slope):
+>     return amplitude / ((x - x0)**2 + gamma**2) + offset + slope * x
+>
+> # Estimate background slope from the edges
+> if len(x_g) >= 2:
+>     slope_est = (y_g[-1] - y_g[0]) / (x_g[-1] - x_g[0])
+>     offset_est = y_g[0] - slope_est * x_g[0]
+>     print(f"Background slope estimate: {slope_est:.4f}")
+>     print(f"Background offset estimate: {offset_est:.4f}")
+>
+>     # Subtract background and look for residual peak
+>     y_bg = offset_est + slope_est * x_g
+>     y_resid = y_g - y_bg
+>     print("Residuals after bg subtraction:")
+>     for i in range(len(x_g)):
+>         print(f"  shift={x_g[i]:.1f}, residual={y_resid[i]:.1f}")
+>
+> PYEOF
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app# python3 /app/fit_peaks2.py
+Total points: 3565
+Raman shift range: -28044.0 to 17490.8
+
+2D peak: 14 points
+2D initial guesses: x0=2894.0, gamma=50.0, amp=4406390.5, offset=16397.3
+2D fit: x0=2933.4760, gamma=177.9095, amp=67490105.5805, offset=16135.0350
+2D fit residuals: mean=0.00, std=116.32
+
+G peak: 15 points
+  shift=1076.9, y=24222.5
+  shift=1161.0, y=23027.7
+  shift=1244.4, y=22176.0
+  shift=1326.9, y=21422.0
+  shift=1408.6, y=20815.0
+  shift=1489.5, y=20340.8
+  shift=1569.7, y=19755.7
+  shift=1649.2, y=19327.4
+  shift=1727.8, y=19004.1
+  shift=1805.8, y=18560.4
+  shift=1883.1, y=18199.4
+  shift=1959.6, y=17693.5
+  shift=2035.4, y=17686.8
+  shift=2110.5, y=17167.6
+  shift=2185.0, y=17175.1
+
+G region max at shift=1076.9, y=24222.5
+G region min at shift=2110.5, y=17167.6
+Background slope estimate: -6.3601
+Background offset estimate: 31071.8579
+Residuals after bg subtraction:
+  shift=1076.9, residual=0.0
+  shift=1161.0, residual=-659.9
+  shift=1244.4, residual=-981.7
+  shift=1326.9, residual=-1210.9
+  shift=1408.6, residual=-1298.2
+  shift=1489.5, residual=-1257.6
+  shift=1569.7, residual=-1332.7
+  shift=1649.2, residual=-1255.7
+  shift=1727.8, residual=-1078.5
+  shift=1805.8, residual=-1026.4
+  shift=1883.1, residual=-896.2
+  shift=1959.6, residual=-915.3
+  shift=2035.4, residual=-439.8
+  shift=2110.5, residual=-481.1
+  shift=2185.0, residual=0.0
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app#

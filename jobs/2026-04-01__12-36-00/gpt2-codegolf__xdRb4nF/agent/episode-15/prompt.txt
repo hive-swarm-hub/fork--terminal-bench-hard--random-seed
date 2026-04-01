@@ -1,0 +1,80 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> all_data = f.read()
+> f.close()
+>
+> E = 768
+> V, C, L = 50257, 1024, 12
+> per_layer = 7087872
+>
+> # Hypothesis: layers start at offset 0 (no wte/wpe prefix)
+> # Then after 12 layers: ln_f/b, ln_f/g, wpe, wte
+> # 12 * 7087872 = 85054464
+> # + E (ln_f/b) = 85055232
+> # + E (ln_f/g) = 85056000
+> # + C*E (wpe) = 85842432
+> # + V*E (wte) = 124439808 ✓
+>
+> # We already verified ln_f/g at 85054464 + 768 = 85055232 and it had avg=1.5078
+> # And wte at 85842432
+>
+> # But we need to verify layer 0 starts at 0
+> # Layer 0 alphabetical: attn/c_attn/b (3*E=2304 floats)
+> # These should be bias values (near 0 typically)
+> chunk = struct.unpack_from(f'<20f', all_data, 0)
+> print(f'File start (should be layer0 attn/c_attn/b): {[round(v,4) for v in chunk[:10]]}')
+> avg = sum(struct.unpack_from(f'<{3*E}f', all_data, 0)) / (3*E)
+> print(f'First 3*E avg: {avg:.4f}')
+>
+> # After c_attn/b (3*E), c_attn/w starts (E*3*E)
+> off = 3*E
+> chunk = struct.unpack_from(f'<10f', all_data, off*4)
+> print(f'\nAt 3*E (should be c_attn/w): {[round(v,4) for v in chunk]}')
+>
+> # Verify layer 1 starts at per_layer
+> off1 = per_layer
+> chunk = struct.unpack_from(f'<10f', all_data, off1*4)
+> print(f'\nAt per_layer (should be layer1 c_attn/b): {[round(v,4) for v in chunk]}')
+> avg = sum(struct.unpack_from(f'<{3*E}f', all_data, off1*4)) / (3*E)
+> print(f'Layer1 first 3*E avg: {avg:.4f}')
+>
+> # Check ln_1/g for layer 1
+> ln1g_in_layer = 3*E + E*3*E + E + E*E + E
+> off_l1_ln1g = per_layer + ln1g_in_layer
+> chunk = struct.unpack_from(f'<{E}f', all_data, off_l1_ln1g*4)
+> avg = sum(chunk)/E
+> all_pos = all(v > 0 for v in chunk)
+> print(f'\nLayer 1 ln_1/g: avg={avg:.4f} all_pos={all_pos} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> # Check layer 0 ln_1/g again from offset 0
+> off_l0_ln1g = ln1g_in_layer
+> chunk = struct.unpack_from(f'<{E}f', all_data, off_l0_ln1g*4)
+> avg = sum(chunk)/E
+> all_pos = all(v > 0 for v in chunk)
+> print(f'Layer 0 ln_1/g: avg={avg:.4f} all_pos={all_pos} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> # Verify wte at end
+> wte_off = 12*per_layer + 2*E + C*E
+> remaining = (len(all_data)//4) - wte_off
+> print(f'\nwte offset: {wte_off}, remaining floats: {remaining}, expected V*E={V*E}')
+> print(f'Match: {remaining == V*E}')
+>
+> PYEOF
+File start (should be layer0 attn/c_attn/b): [0.4803, -0.5254, -0.4293, -0.206, -0.1277, -0.0954, -0.3529, -0.0765, -0.0459, -0.0375]
+First 3*E avg: -0.0007
+
+At 3*E (should be c_attn/w): [-0.4738, -0.2614, -0.0978, -0.3499, 0.2243, -0.0429, 0.4187, 0.1744, -0.1883, 0.1836]
+
+At per_layer (should be layer1 c_attn/b): [0.0092, -0.1241, -0.228, -0.1516, -0.0643, -0.0903, 0.2054, 0.0799, -0.2014, -0.2923]
+Layer1 first 3*E avg: 0.0008
+
+Layer 1 ln_1/g: avg=0.2228 all_pos=True first5=[0.2086, 0.2185, 0.2183, 0.2372, 0.2126]
+Layer 0 ln_1/g: avg=0.1804 all_pos=True first5=[0.2232, 0.182, 0.1534, 0.1917, 0.2036]
+
+wte offset: 85842432, remaining floats: 38597376, expected V*E=38597376
+Match: True
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

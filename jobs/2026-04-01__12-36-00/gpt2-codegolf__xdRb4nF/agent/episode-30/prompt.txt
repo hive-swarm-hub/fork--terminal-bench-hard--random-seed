@@ -1,0 +1,121 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# cat > /tmp/debug_gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define E 768
+> #define V 50257
+> #define C 1024
+> #define L 12
+> #define H 12
+> #define D 64
+> #define PL 7087872
+> #define E4 3072
+> float *W;
+> char vocab[V][64];
+> int nvocab;
+> int byte_enc[256];
+> void init_byte_enc(){
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>             byte_enc[i]=i;
+>         else byte_enc[i]=256+n++;
+>     }
+> }
+> int to_utf8(int cp, char *buf){
+>     if(cp<0x80){buf[0]=cp;return 1;}
+>     if(cp<0x800){buf[0]=0xC0|(cp>>6);buf[1]=0x80|(cp&0x3F);return 2;}
+>     buf[0]=0xE0|(cp>>12);buf[1]=0x80|((cp>>6)&0x3F);buf[2]=0x80|(cp&0x3F);return 3;
+> }
+> void load_bpe(const char *path){
+>     FILE*f=fopen(path,"r");
+>     char line[256];
+>     fgets(line,256,f);
+>     init_byte_enc();
+>     for(int i=0;i<256;i++){
+>         int n=to_utf8(byte_enc[i],vocab[i]);
+>         vocab[i][n]=0;
+>     }
+>     nvocab=256;
+>     while(fgets(line,256,f)&&nvocab<V){
+>         char *sp=strchr(line,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         char *t2=sp+1;
+>         char *nl=strchr(t2,'\n');if(nl)*nl=0;
+>         snprintf(vocab[nvocab],64,"%s%s",line,t2);
+>         nvocab++;
+>     }
+>     fclose(f);
+> }
+> int find_token(const char *s, int len){
+>     for(int i=nvocab-1;i>=0;i--){
+>         if((int)strlen(vocab[i])==len && memcmp(vocab[i],s,len)==0)return i;
+>     }
+>     return -1;
+> }
+> int tokenize(const char *text, int *tokens){
+>     int n=0;
+>     char pieces[C][64];
+>     for(int i=0;text[i];i++){
+>         int cp=byte_enc[(unsigned char)text[i]];
+>         int len=to_utf8(cp,pieces[n]);
+>         pieces[n][len]=0;
+>         n++;
+>     }
+>     for(int m=256;m<nvocab;m++){
+>         for(int i=0;i<n-1;i++){
+>             char merged[128];
+>             snprintf(merged,128,"%s%s",pieces[i],pieces[i+1]);
+>             if(strcmp(merged,vocab[m])==0){
+>                 strcpy(pieces[i],merged);
+>                 for(int j=i+1;j<n-1;j++)strcpy(pieces[j],pieces[j+1]);
+>                 n--;
+>                 i--;
+>             }
+>         }
+>     }
+>     for(int i=0;i<n;i++){
+>         tokens[i]=find_token(pieces[i],strlen(pieces[i]));
+>         fprintf(stderr,"Token %d: id=%d piece='%s'\n",i,tokens[i],pieces[i]);
+>     }
+>     return n;
+> }
+> int main(int argc,char**argv){
+>     if(argc<4)return 1;
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     load_bpe(argv[2]);
+>     int tokens[C],T=tokenize(argv[3],tokens);
+>     fprintf(stderr,"Total tokens: %d\n",T);
+>     fprintf(stderr,"nvocab: %d\n",nvocab);
+>     return 0;
+> }
+> CEOF
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# gcc -O3 -o /tmp/debug_gpt2 /tmp/debug_gpt2.c -lm 2>&1
+/tmp/debug_gpt2.c: In function ‘load_bpe’:
+/tmp/debug_gpt2.c:36:5: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   36 |     fgets(line,256,f);
+      |     ^~~~~~~~~~~~~~~~~
+/tmp/debug_gpt2.c:49:36: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 64 [-Wformat-truncation=]
+   49 |         snprintf(vocab[nvocab],64,"%s%s",line,t2);
+      |                                    ^~    ~~~~
+In file included from /usr/include/stdio.h:980,
+                 from /tmp/debug_gpt2.c:1:
+In function ‘snprintf’,
+    inlined from ‘load_bpe’ at /tmp/debug_gpt2.c:49:9:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output 1 or more bytes (assuming 256) into a destination of size 64
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

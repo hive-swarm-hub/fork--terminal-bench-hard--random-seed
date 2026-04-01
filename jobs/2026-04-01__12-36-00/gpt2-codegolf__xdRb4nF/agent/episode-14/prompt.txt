@@ -1,0 +1,122 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> # The file is exactly V*E + C*E + 12*per_layer + 2*E floats with no header
+> # But the layout might be different. Let me try TF alphabetical variable ordering.
+>
+> # TF GPT-2 variable names (alphabetical):
+> # model/h0/attn/c_attn/b  [2304]  = 3*E
+> # model/h0/attn/c_attn/w  [768, 2304] = E*3E  (but TF stores as [1, 768, 2304] sometimes)
+> # model/h0/attn/c_proj/b  [768] = E
+> # model/h0/attn/c_proj/w  [768, 768] = E*E
+> # model/h0/ln_1/b  [768] = E
+> # model/h0/ln_1/g  [768] = E
+> # model/h0/ln_2/b  [768] = E
+> # model/h0/ln_2/g  [768] = E
+> # model/h0/mlp/c_fc/b  [3072] = 4*E
+> # model/h0/mlp/c_fc/w  [768, 3072] = E*4E
+> # model/h0/mlp/c_proj/b  [768] = E
+> # model/h0/mlp/c_proj/w  [3072, 768] = 4E*E
+> # ... repeat for h1..h11 ...
+> # model/ln_f/b  [768] = E
+> # model/ln_f/g  [768] = E
+> # model/wpe  [1024, 768] = C*E
+> # model/wte  [50257, 768] = V*E
+>
+> # So alphabetical per-layer order:
+> # attn/c_attn/b (3E), attn/c_attn/w (E*3E), attn/c_proj/b (E), attn/c_proj/w (E*E),
+> # ln_1/b (E), ln_1/g (E), ln_2/b (E), ln_2/g (E),
+> # mlp/c_fc/b (4E), mlp/c_fc/w (E*4E), mlp/c_proj/b (E), mlp/c_proj/w (4E*E)
+> # Per layer total: 3E + E*3E + E + E*E + E + E + E + E + 4E + E*4E + E + 4E*E
+> # = 3*768 + 768*2304 + 768 + 768*768 + 768 + 768 + 768 + 768 + 3072 + 768*3072 + 768 + 3072*768
+> # = 2304 + 1769472 + 768 + 589824 + 768 + 768 + 768 + 768 + 3072 + 2359296 + 768 + 2359296
+> # = 7087872 ✓
+>
+> # Global order: 12 layers, then ln_f/b, ln_f/g, wpe, wte
+> # Total: 12*7087872 + 768 + 768 + 1024*768 + 50257*768 = 85054464 + 1536 + 786432 + 38597376 = 124439808 ✓
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> all_data = f.read()
+> f.close()
+>
+> E = 768
+> V, C, L = 50257, 1024, 12
+>
+> # Per-layer layout (alphabetical):
+> # attn/c_attn/b: 3*E
+> # attn/c_attn/w: E*3*E
+> # attn/c_proj/b: E
+> # attn/c_proj/w: E*E
+> # ln_1/b: E
+> # ln_1/g: E
+> # ln_2/b: E
+> # ln_2/g: E
+> # mlp/c_fc/b: 4*E
+> # mlp/c_fc/w: E*4*E
+> # mlp/c_proj/b: E
+> # mlp/c_proj/w: 4*E*E
+>
+> per_layer = 3*E + E*3*E + E + E*E + E + E + E + E + 4*E + E*4*E + E + 4*E*E
+> print(f'Per layer: {per_layer} (expected 7087872: {per_layer == 7087872})')
+>
+> # Layer 0 starts at offset 0
+> # ln_1/g offset within layer: 3*E + E*3*E + E + E*E + E =
+> ln1g_offset = 3*E + E*3*E + E + E*E + E
+> print(f'ln_1/g offset in layer: {ln1g_offset}')
+>
+> chunk = struct.unpack_from(f'<{E}f', all_data, ln1g_offset * 4)
+> avg = sum(chunk)/E
+> mn = min(chunk)
+> mx = max(chunk)
+> all_pos = all(v > 0 for v in chunk)
+> print(f'Layer 0 ln_1/g: avg={avg:.4f} min={mn:.4f} max={mx:.4f} all_pos={all_pos}')
+> print(f'  First 5: {[round(v,4) for v in chunk[:5]]}')
+>
+> # ln_1/b is right before ln_1/g
+> ln1b_offset = 3*E + E*3*E + E + E*E
+> chunk = struct.unpack_from(f'<{E}f', all_data, ln1b_offset * 4)
+> avg = sum(chunk)/E
+> print(f'Layer 0 ln_1/b: avg={avg:.4f} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> # ln_2/g offset: ln1g_offset + E + E = ln1g_offset + E (for ln_2/b) + E
+> ln2b_offset = ln1g_offset + E
+> ln2g_offset = ln2b_offset + E
+> chunk = struct.unpack_from(f'<{E}f', all_data, ln2g_offset * 4)
+> avg = sum(chunk)/E
+> all_pos = all(v > 0 for v in chunk)
+> print(f'Layer 0 ln_2/g: avg={avg:.4f} all_pos={all_pos} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> # Check wte at the very end
+> wte_offset = 12 * per_layer + E + E + C*E  # after all layers + ln_f/b + ln_f/g + wpe
+> chunk = struct.unpack_from(f'<5f', all_data, wte_offset * 4)
+> print(f'\nwte start (at offset {wte_offset}): {[round(v,4) for v in chunk]}')
+> print(f'File start: {[round(v,4) for v in struct.unpack_from("<5f", all_data, 0)]}')
+>
+> # Check ln_f/g
+> lnfg_offset = 12 * per_layer + E  # after all layers + ln_f/b
+> chunk = struct.unpack_from(f'<{E}f', all_data, lnfg_offset * 4)
+> avg = sum(chunk)/E
+> all_pos = all(v > 0 for v in chunk)
+> print(f'\nln_f/g: avg={avg:.4f} all_pos={all_pos} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> lnfb_offset = 12 * per_layer
+> chunk = struct.unpack_from(f'<{E}f', all_data, lnfb_offset * 4)
+> avg = sum(chunk)/E
+> print(f'ln_f/b: avg={avg:.4f} first5={[round(v,4) for v in chunk[:5]]}')
+>
+> PYEOF
+Per layer: 7087872 (expected 7087872: True)
+ln_1/g offset in layer: 2363136
+Layer 0 ln_1/g: avg=0.1804 min=0.0419 max=0.2527 all_pos=True
+  First 5: [0.2232, 0.182, 0.1534, 0.1917, 0.2036]
+Layer 0 ln_1/b: avg=-0.0066 first5=[-0.0037, 0.0272, -0.064, -0.005, -0.0157]
+Layer 0 ln_2/g: avg=0.8678 all_pos=True first5=[0.131, 0.2093, 0.2066, 1.2542, 1.2638]
+
+wte start (at offset 85842432): [-0.1101, -0.0393, 0.0331, 0.1338, -0.0485]
+File start: [0.4803, -0.5254, -0.4293, -0.206, -0.1277]
+
+ln_f/g: avg=1.5078 all_pos=True first5=[1.3971, 1.375, 1.887, 1.1688, 1.2724]
+ln_f/b: avg=-0.0031 first5=[0.0011, 0.0365, -0.0673, 0.0002, -0.0674]
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

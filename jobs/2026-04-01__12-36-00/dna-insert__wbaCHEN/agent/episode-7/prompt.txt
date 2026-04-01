@@ -1,0 +1,260 @@
+New Terminal Output:
+
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app# cat << 'PYEOF' > /tmp/design_primers.py
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rev_comp(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     # Note: oligotm has max 36 bases
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Find common prefix length
+> prefix_len = 0
+> for i in range(min(len(input_seq), len(output_seq))):
+>     if input_seq[i] == output_seq[i]:
+>         prefix_len = i + 1
+>     else:
+>         break
+>
+> # Find common suffix length
+> suffix_len = 0
+> for i in range(1, min(len(input_seq), len(output_seq)) + 1):
+>     if input_seq[-i] == output_seq[-i]:
+>         suffix_len = i
+>     else:
+>         break
+>
+> print(f'Common prefix length: {prefix_len}')
+> print(f'Common suffix length: {suffix_len}')
+>
+> # The insertion point in the input sequence
+> # Prefix covers input[0:prefix_len], suffix covers input[len(input_seq)-suffix_len:]
+> # There may be overlap
+> insertion_start = len(input_seq) - suffix_len  # where suffix starts in input
+> print(f'Insertion region in input: {prefix_len} to {insertion_start}')
+> print(f'Overlap: {prefix_len - insertion_start} bases')
+>
+> # The inserted sequence
+> inserted = output_seq[prefix_len:len(output_seq)-suffix_len]
+> print(f'Inserted sequence ({len(inserted)} bp): {inserted}')
+>
+> # For Q5 SDM insertion:
+> # The insertion point is at position prefix_len in the input (between prefix_len-1 and prefix_len)
+> # But there's overlap, so we can choose the exact cut point
+> # Let's use insertion_start as the cut point (position 213)
+> # Actually for a clean insertion, the cut point should be where prefix and suffix overlap
+> # The forward primer anneals starting at the insertion point going downstream
+> # The reverse primer anneals ending at the insertion point going upstream (reverse complement)
+>
+> # Since there's a 2bp overlap (positions 213, 214), the insertion is between
+> # the end of the unique prefix region and start of the suffix.
+> # Let's set the insertion point at position 213 (0-indexed)
+> # Forward primer: inserted_seq + input[213:213+anneal_len]
+> # Reverse primer: rev_comp(input[213-anneal_len:213])
+>
+> # Actually, for Q5 SDM, the standard approach is:
+> # Forward primer: 5'-[new sequence]-[annealing downstream]-3'
+> # Reverse primer: 5'-[annealing upstream, reverse complement]-3'
+> # The two primers sit back-to-back at the insertion point
+>
+> # The insertion point: between input[214] and input[215]
+> # (or equivalently, we can pick any point in the overlap region)
+> # Let me use the clean boundary: after position 214 (end of prefix match)
+>
+> # Actually, let me reconsider. The overlap means:
+> # input[0:215] matches output[0:215]  (prefix)
+> # input[213:] matches output[252:]    (suffix)
+> # So input[213] = output[252], input[214] = output[253], input[215] = output[254]
+> # And output[215:252] = inserted sequence
+>
+> # The insertion is RIGHT at position 215 in the input.
+> # Forward primer anneals to input starting at position 215 (downstream)
+> # Reverse primer anneals to input ending at position 215 (upstream), as reverse complement
+>
+> # But we could also place the cut at position 213 or 214 due to the overlap.
+> # The key insight: the inserted sequence in the output is at positions 215-251.
+> # Before that (output[0:215]) = input[0:215]
+> # After that (output[252:]) = input[213:]
+>
+> # So in the input, positions 213 and 214 can be considered part of either side.
+> # For the cleanest design:
+> # Cut point at input position 215
+> # Forward: inserted_seq + input[215:215+N]  (the inserted seq starts with the new bases)
+> # Reverse: rev_comp(input[215-M:215])  (anneals just upstream)
+>
+> # Wait, but the inserted sequence is "tagattagaagaagaattaagaagaagattaacagaa"
+> # And input[213:215] = "ag"
+> # And output[213:215] = "ag" (same, part of prefix)
+> # output[215:252] = "tagattagaagaagaattaagaagaagattaacagaa" (37 bp)
+> # output[252:] = input[213:] ... but output[252] should equal input[213]
+> # output[252] and input[213]: let me verify
+>
+> print(f'input[213:216] = {input_seq[213:216]}')
+> print(f'output[252:255] = {output_seq[252:255]}')
+> print(f'output[213:216] = {output_seq[213:216]}')
+> print(f'output[215:252] = {output_seq[215:252]}')
+>
+> # For Q5 SDM insertion, I'll place the junction at input position 215
+> # (right where the prefix ends)
+> # Forward primer: 5' tail (inserted bases) + annealing region downstream
+> # Reverse primer: annealing region upstream (reverse complement)
+>
+> junction = 215  # insertion point in input
+>
+> print(f'\n=== Designing primers ===')
+> print(f'Junction point: {junction}')
+> print(f'Input around junction: ...{input_seq[junction-10:junction]}|{input_seq[junction:junction+10]}...')
+>
+> # Try different annealing lengths for forward and reverse primers
+> # Annealing length must be 15-45 nt
+> # Tm must be 58-72°C
+> # Forward and reverse Tm must be within 5°C
+>
+> best_pairs = []
+>
+> for fwd_len in range(15, 46):
+>     fwd_anneal = input_seq[junction:junction+fwd_len]
+>     if len(fwd_anneal) < fwd_len:
+>         # Wrap around for circular plasmid
+>         fwd_anneal = input_seq[junction:] + input_seq[:fwd_len-len(input_seq[junction:])]
+>
+>     # oligotm has 36 base limit
+>     if len(fwd_anneal) > 36:
+>         continue
+>
+>     try:
+>         fwd_tm = get_tm(fwd_anneal)
+>     except:
+>         continue
+>
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_len in range(15, 46):
+>         rev_anneal_region = input_seq[junction-rev_len:junction]
+>         if len(rev_anneal_region) < rev_len:
+>             continue
+>
+>         if len(rev_anneal_region) > 36:
+>             continue
+>
+>         try:
+>             rev_tm = get_tm(rev_anneal_region)
+>         except:
+>             continue
+>
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         if abs(fwd_tm - rev_tm) > 5:
+>             continue
+>
+>         # Valid pair found
+>         best_pairs.append({
+>             'fwd_anneal': fwd_anneal,
+>             'fwd_len': fwd_len,
+>             'fwd_tm': fwd_tm,
+>             'rev_anneal': rev_anneal_region,
+>             'rev_len': rev_len,
+>             'rev_tm': rev_tm,
+>             'tm_diff': abs(fwd_tm - rev_tm)
+>         })
+>
+> print(f'\nFound {len(best_pairs)} valid primer pairs')
+>
+> # Sort by Tm difference, then by total primer length (shorter is better)
+> best_pairs.sort(key=lambda x: (x['tm_diff'], x['fwd_len'] + x['rev_len']))
+>
+> if best_pairs:
+>     best = best_pairs[0]
+>     print(f'\nBest pair:')
+>     print(f'  Fwd anneal ({best["fwd_len"]} bp, Tm={best["fwd_tm"]:.1f}): {best["fwd_anneal"]}')
+>     print(f'  Rev anneal ({best["rev_len"]} bp, Tm={best["rev_tm"]:.1f}): {best["rev_anneal"]}')
+>     print(f'  Tm difference: {best["tm_diff"]:.1f}')
+>
+>     # Full forward primer: inserted sequence + annealing region
+>     fwd_full = inserted + best['fwd_anneal']
+>     # Full reverse primer: reverse complement of upstream annealing region
+>     rev_full = rev_comp(best['rev_anneal'])
+>
+>     print(f'\nFull forward primer: {fwd_full}')
+>     print(f'Full reverse primer: {rev_full}')
+>
+>     # Write to primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f'>forward_primer\n{fwd_full}\n')
+>         f.write(f'>reverse_primer\n{rev_full}\n')
+>     print('\nPrimers written to primers.fasta')
+>
+>     # Show top 5 pairs
+>     print('\nTop 5 pairs:')
+>     for i, p in enumerate(best_pairs[:5]):
+>         print(f'  {i+1}. Fwd({p["fwd_len"]}, Tm={p["fwd_tm"]:.1f}) Rev({p["rev_len"]}, Tm={p["rev_tm"]:.1f}) diff={p["tm_diff"]:.1f}')
+> else:
+>     print('No valid pairs found!')
+> PYEOF
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app# python3 /tmp/design_primers.py
+Common prefix length: 215
+Common suffix length: 3378
+Insertion region in input: 215 to 213
+Overlap: 2 bases
+Inserted sequence (37 bp): tagattagaagaagaattaagaagaagattaacagaa
+input[213:216] = agc
+output[252:255] = agc
+output[213:216] = agt
+output[215:252] = tagattagaagaagaattaagaagaagattaacagaa
+
+=== Designing primers ===
+Junction point: 215
+Input around junction: ...tacatatgag|caagggcgag...
+
+Found 37 valid primer pairs
+
+Best pair:
+  Fwd anneal (16 bp, Tm=61.2): caagggcgaggagctg
+  Rev anneal (34 bp, Tm=61.3): ttgtttaactttaagaaggagatatacatatgag
+  Tm difference: 0.1
+
+Full forward primer: tagattagaagaagaattaagaagaagattaacagaacaagggcgaggagctg
+Full reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+
+Primers written to primers.fasta
+
+Top 5 pairs:
+  1. Fwd(16, Tm=61.2) Rev(34, Tm=61.3) diff=0.1
+  2. Fwd(16, Tm=61.2) Rev(33, Tm=61.0) diff=0.3
+  3. Fwd(15, Tm=59.5) Rev(32, Tm=59.8) diff=0.3
+  4. Fwd(16, Tm=61.2) Rev(35, Tm=61.6) diff=0.4
+  5. Fwd(15, Tm=59.5) Rev(31, Tm=58.9) diff=0.6
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app#

@@ -1,0 +1,200 @@
+New Terminal Output:
+
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app# cat > /app/fit_final3.py << 'PYEOF'
+, offset={popt_2d_rs[3]:.4f}")
+
+# G> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data_x = []
+> data_y = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line: continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         data_x.append(x)
+>         data_y.append(y)
+>
+> x_raw = np.array(data_x)
+> y_raw = np.array(data_y)
+> idx = np.argsort(x_raw)
+> x_raw = x_raw[idx]
+> y_raw = y_raw[idx]
+>
+> # The x-axis is absolute wavenumber in cm-1
+> # Laser at the maximum y value
+> laser_idx = np.argmax(y_raw)
+> laser_wn = x_raw[laser_idx]
+> print(f"Laser: x={laser_wn:.2f} cm-1, y={y_raw[laser_idx]:.1f}")
+>
+> # Lorentzian model
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude / ((x - x0)**2 + gamma**2) + offset
+>
+> # ============ Fit 2D peak (absolute wavenumber ~16245) ============
+> # Use a focused window around the 2D peak
+> mask_2d = (x_raw > 15800) & (x_raw < 16700)
+> x_2d = x_raw[mask_2d]
+> y_2d = y_raw[mask_2d]
+>
+> print(f"\n2D peak: {len(x_2d)} points")
+> i_max = np.argmax(y_2d)
+> x0_guess = x_2d[i_max]
+> print(f"2D peak max at x={x0_guess:.2f}, y={y_2d[i_max]:.1f}")
+>
+> # Estimate parameters
+> offset_guess = (y_2d[0] + y_2d[-1]) / 2
+> peak_height = y_2d[i_max] - offset_guess
+> gamma_guess = 150.0
+> amp_guess = peak_height * gamma_guess**2
+>
+> popt_2d, _ = curve_fit(lorentzian, x_2d, y_2d,
+>                        p0=[x0_guess, gamma_guess, amp_guess, offset_guess],
+>                        maxfev=100000)
+> print(f"2D fit (abs wn): x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amp={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+>
+> # Convert to Raman shift
+> # Raman shift = laser_wn - x0
+> rs_2d_x0 = laser_wn - popt_2d[0]
+> print(f"2D Raman shift x0: {rs_2d_x0:.1f} cm-1")
+>
+> # ============ Fit G peak ============
+> # The G peak is around absolute wavenumber 17468 (Raman shift ~1570)
+> # Data is sparse in this region
+> # Use a wider window
+> mask_g = (x_raw > 16900) & (x_raw < 18500)
+> x_g = x_raw[mask_g]
+> y_g = y_raw[mask_g]
+>
+> print(f"\nG peak: {len(x_g)} points")
+> for i in range(len(x_g)):
+>     print(f"  x={x_g[i]:.2f}, y={y_g[i]:.1f}")
+>
+> # The data is monotonically increasing - the G peak is a small bump on a large background
+> # The Lorentzian model with just an offset won't work well here
+> # But the task requires it, so let's try
+>
+> # Actually, let's think about this differently.
+> # If we look at the FULL spectrum from 2D peak to laser, there's a broad background
+> # The G peak sits on this background
+> # With the simple Lorentzian model (constant offset), the fit will try to capture
+> # the overall shape, and the x0 will be near the laser (highest point)
+>
+> # Let's try fitting with bounds to constrain x0 near 17468
+> try:
+>     popt_g, _ = curve_fit(lorentzian, x_g, y_g,
+>                           p0=[17500.0, 200.0, 5e7, 17000.0],
+>                           bounds=([17000, 10, 1e4, 0], [18000, 2000, 1e12, 25000]),
+>                           maxfev=100000)
+>     print(f"G fit (abs wn): x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amp={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+>     rs_g_x0 = laser_wn - popt_g[0]
+>     print(f"G Raman shift x0: {rs_g_x0:.1f} cm-1")
+> except Exception as e:
+>     print(f"G fit failed: {e}")
+>
+> # Let me also try fitting in Raman shift space
+> print("\n=== Fitting in Raman shift space ===")
+>
+> # Convert all data to Raman shift
+> raman_shift = laser_wn - x_raw
+> # Reverse order (ascending Raman shift)
+> rs = raman_shift[::-1]
+> ys = y_raw[::-1]
+>
+> # 2D peak in Raman shift
+> mask_2d_rs = (rs > 2400) & (rs < 3500)
+> xr = rs[mask_2d_rs]
+> yr = ys[mask_2d_rs]
+>
+> print(f"\n2D peak (Raman shift): {len(xr)} points")
+> i_max = np.argmax(yr)
+> x0_rs_guess = xr[i_max]
+> offset_rs_guess = (yr[0] + yr[-1]) / 2
+> peak_h = yr[i_max] - offset_rs_guess
+> gamma_rs_guess = 150.0
+> amp_rs_guess = peak_h * gamma_rs_guess**2
+>
+> popt_2d_rs, _ = curve_fit(lorentzian, xr, yr,
+>                           p0=[x0_rs_guess, gamma_rs_guess, amp_rs_guess, offset_rs_guess],
+>                           maxfev=100000)
+> print(f"2D fit (RS): x0={popt_2d_rs[0]:.4f}, gamma={popt_2d_rs[1]:.4f}, amp={popt_2d_rs[2]:.4f}, offset={popt_2d_rs[3]:.4f}")
+>
+> # G peak in Raman shift
+> mask_g_rs = (rs > 1000) & (rs < 2200)
+> xr_g = rs[mask_g_rs]
+> yr_g = ys[mask_g_rs]
+>
+> print(f"\nG peak (Raman shift): {len(xr_g)} points")
+> for i in range(len(xr_g)):
+>     print(f"  rs={xr_g[i]:.1f}, y={yr_g[i]:.1f}")
+>
+> try:
+>     popt_g_rs, _ = curve_fit(lorentzian, xr_g, yr_g,
+>                              p0=[1580.0, 200.0, 5e7, 17000.0],
+>                              bounds=([1400, 10, 1e4, 0], [1700, 2000, 1e12, 25000]),
+>                              maxfev=100000)
+>     print(f"G fit (RS): x0={popt_g_rs[0]:.4f}, gamma={popt_g_rs[1]:.4f}, amp={popt_g_rs[2]:.4f}, offset={popt_g_rs[3]:.4f}")
+> except Exception as e:
+>     print(f"G fit (RS) failed: {e}")
+>
+> PYEOF
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app# python3 /app/fit_final3.py
+Laser: x=19139.54 cm-1, y=79400.1
+
+2D peak: 13 points
+2D peak max at x=16245.58, y=18159.9
+2D fit (abs wn): x0=16205.3042, gamma=198.8129, amp=90275628.9792, offset=15956.9759
+2D Raman shift x0: 2934.2 cm-1
+
+G peak: 20 points
+  x=16954.54, y=17175.1
+  x=17028.99, y=17167.6
+  x=17104.13, y=17686.8
+  x=17179.96, y=17693.5
+  x=17256.49, y=18199.4
+  x=17333.73, y=18560.4
+  x=17411.69, y=19004.1
+  x=17490.38, y=19327.4
+  x=17569.82, y=19755.7
+  x=17650.01, y=20340.8
+  x=17730.96, y=20815.0
+  x=17812.68, y=21422.0
+  x=17895.19, y=22176.0
+  x=17978.50, y=23027.7
+  x=18062.61, y=24222.5
+  x=18147.54, y=25202.9
+  x=18233.31, y=26464.2
+  x=18319.92, y=28061.6
+  x=18407.38, y=30376.5
+  x=18495.72, y=32580.5
+G fit (abs wn): x0=18000.0000, gamma=1478.5111, amp=53919920728.9812, offset=0.0000
+G Raman shift x0: 1139.5 cm-1
+
+=== Fitting in Raman shift space ===
+
+2D peak (Raman shift): 17 points
+2D fit (RS): x0=2932.4031, gamma=184.3369, amp=74625168.2382, offset=16066.3011
+
+G peak (Raman shift): 15 points
+  rs=1076.9, y=24222.5
+  rs=1161.0, y=23027.7
+  rs=1244.4, y=22176.0
+  rs=1326.9, y=21422.0
+  rs=1408.6, y=20815.0
+  rs=1489.5, y=20340.8
+  rs=1569.7, y=19755.7
+  rs=1649.2, y=19327.4
+  rs=1727.9, y=19004.1
+  rs=1805.8, y=18560.4
+  rs=1883.1, y=18199.4
+  rs=1959.6, y=17693.5
+  rs=2035.4, y=17686.8
+  rs=2110.5, y=17167.6
+  rs=2185.0, y=17175.1
+G fit (RS): x0=1400.0000, gamma=923.6847, amp=9696732667.2395, offset=10061.6842
+root@dd52c0df-f8a7-479c-ab62-67568eccc06d:/app#

@@ -1,0 +1,79 @@
+New Terminal Output:
+
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app# python3 << 'PYEOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+>
+> def read_floats(offset, count):
+>     f.seek(offset * 4)
+>     data = f.read(count * 4)
+>     return struct.unpack(f'<{count}f', data)
+>
+> def check(label, offset, count=10):
+>     vals = read_floats(offset, count)
+>     avg = sum(vals)/len(vals)
+>     print(f'{label} (offset={offset}): avg={avg:.4f} vals={[round(v,4) for v in vals[:5]]}')
+>
+> V, C, E, L = 50257, 1024, 768, 12
+> total = 124439808
+>
+> # Check end of file - last 2*E should be lnf_w and lnf_b
+> check('Last 2*E (lnf_b last E)', total - E, 5)
+> check('Last 2*E (lnf_w)', total - 2*E, 5)
+>
+> # Check various candidate layouts
+> # Layout A: wte, wpe, [per-layer: ln1w,ln1b,qkvw,qkvb,apw,apb,ln2w,ln2b,fcw,fcb,fpw,fpb], lnfw, lnfb
+> # Layout B (llm.c grouped): wte,wpe,ln1w[L*E],ln1b[L*E],qkvw[L*3E*E],...
+>
+> base = V*E + C*E
+>
+> # In layout A, layer 0 starts at base, ln1w should be first
+> check('Layout A: layer0 ln1w', base)
+>
+> # Maybe the order within a layer is different
+> # Try: qkvw first, then qkvb, then apw, apb, ln1w, ln1b, fcw, fcb, fpw, fpb, ln2w, ln2b
+> # Or: attn_w, attn_b, proj_w, proj_b, ln1_w, ln1_b, fc_w, fc_b, fcproj_w, fcproj_b, ln2_w, ln2_b
+>
+> # Let me just check where in a layer block the ~1.0 values would be
+> per_layer = 7087872
+> for name, off_in_layer in [
+>     ('pos 0', 0),
+>     ('after qkvw (3*E*E)', 3*E*E),
+>     ('after qkvw+b', 3*E*E + 3*E),
+>     ('after qkvw+b+apw', 3*E*E + 3*E + E*E),
+>     ('after qkvw+b+apw+b', 3*E*E + 3*E + E*E + E),
+>     ('after attn block', 3*E*E + 3*E + E*E + E),
+>     ('end-2E of layer', per_layer - 2*E),
+>     ('end-E of layer', per_layer - E),
+>     ('end-4E', per_layer - 4*E),
+>     ('end-3E', per_layer - 3*E),
+> ]:
+>     check(f'Layer0 {name}', base + off_in_layer)
+>
+> # Check if maybe the file has a different global ordering
+> # Try: all ln weights are near end before lnf
+> # total - E(lnfb) - E(lnfw) - L*E(ln2b) - L*E(ln2w)
+> off = total - 2*E - 2*L*E
+> check('Candidate ln2w start', off)
+> off2 = off - 2*L*E
+> check('Candidate ln1w before ln2', off2)
+>
+> f.close()
+> PYEOF
+Last 2*E (lnf_b last E) (offset=124439040): avg=-0.0061 vals=[0.0514, -0.0277, 0.0499, -0.0422, -0.0617]
+Last 2*E (lnf_w) (offset=124438272): avg=0.0330 vals=[0.186, 0.0167, 0.0461, -0.0111, -0.0726]
+Layout A: layer0 ln1w (offset=39383808): avg=-0.0043 vals=[0.0126, 0.1113, -0.019, -0.0797, -0.1945]
+Layer0 pos 0 (offset=39383808): avg=-0.0043 vals=[0.0126, 0.1113, -0.019, -0.0797, -0.1945]
+Layer0 after qkvw (3*E*E) (offset=41153280): avg=0.0355 vals=[0.0064, 0.1049, 0.1671, -0.0173, 0.037]
+Layer0 after qkvw+b (offset=41155584): avg=0.0111 vals=[0.0257, 0.0034, 0.0089, -0.1181, 0.0066]
+Layer0 after qkvw+b+apw (offset=41745408): avg=0.0526 vals=[0.0463, 0.0485, -0.074, 0.0023, 0.0742]
+Layer0 after qkvw+b+apw+b (offset=41746176): avg=-0.0122 vals=[0.0159, -0.0224, 0.0363, 0.0607, -0.0126]
+Layer0 after attn block (offset=41746176): avg=-0.0122 vals=[0.0159, -0.0224, 0.0363, 0.0607, -0.0126]
+Layer0 end-2E of layer (offset=46470144): avg=0.0437 vals=[0.064, -0.1832, -0.2109, 0.2364, 0.0586]
+Layer0 end-E of layer (offset=46470912): avg=0.0137 vals=[0.0031, 0.002, 0.269, -0.0701, -0.0394]
+Layer0 end-4E (offset=46468608): avg=-0.0807 vals=[-0.1028, 0.0222, 0.0562, -0.1719, 0.1216]
+Layer0 end-3E (offset=46469376): avg=-0.0897 vals=[-0.0852, -0.1017, -0.133, -0.166, 0.0358]
+Candidate ln2w start (offset=124419840): avg=-0.0498 vals=[0.0382, -0.1518, 0.0422, -0.085, 0.0092]
+Candidate ln1w before ln2 (offset=124401408): avg=0.0403 vals=[0.144, 0.0377, 0.0806, 0.0235, 0.0186]
+root@3022d70a-a3a8-45d9-b9a5-f186e17d5389:/app#

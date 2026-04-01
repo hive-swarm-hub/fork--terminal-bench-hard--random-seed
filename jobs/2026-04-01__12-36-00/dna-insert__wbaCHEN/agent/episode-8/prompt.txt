@@ -1,0 +1,169 @@
+New Terminal Output:
+
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app# python3 << 'EOF'
+> import subprocess
+>
+> def rev_comp(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g','A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def parse_fasta(filename):
+>     seqs = []
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs.append((name, ''.join(seq)))
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs.append((name, ''.join(seq)))
+>     return seqs
+>
+> # Read input sequences
+> seqs = dict(parse_fasta('sequences.fasta'))
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Read primers
+> primers = parse_fasta('primers.fasta')
+> print('Primers:')
+> for name, seq in primers:
+>     print(f'  {name}: {seq} ({len(seq)} bp)')
+>
+> fwd_full = primers[0][1]
+> rev_full = primers[1][1]
+>
+> # The insertion is 37 bp
+> inserted = 'tagattagaagaagaattaagaagaagattaacagaa'
+> fwd_tail = fwd_full[:37]  # insertion part
+> fwd_anneal = fwd_full[37:]  # annealing part
+> rev_anneal_rc = rev_full  # this is already rev comp
+> rev_anneal = rev_comp(rev_full)  # original orientation
+>
+> print(f'\nForward primer tail (insertion): {fwd_tail}')
+> print(f'Forward primer annealing: {fwd_anneal}')
+> print(f'Reverse primer (rev comp of annealing): {rev_anneal_rc}')
+> print(f'Reverse primer annealing region: {rev_anneal}')
+>
+> # Verify Tm
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_anneal)
+> print(f'\nForward annealing Tm: {fwd_tm:.1f}°C')
+> print(f'Reverse annealing Tm: {rev_tm:.1f}°C')
+> print(f'Tm difference: {abs(fwd_tm - rev_tm):.1f}°C')
+>
+> # Verify annealing lengths
+> print(f'\nForward annealing length: {len(fwd_anneal)}')
+> print(f'Reverse annealing length: {len(rev_anneal)}')
+>
+> # Simulate Q5 SDM
+> # The forward primer anneals at position 215 in the input
+> # The reverse primer anneals ending at position 215 (upstream)
+> # PCR amplifies the whole plasmid with the forward going one direction
+> # and reverse going the other direction
+> # The product is: fwd_tail + input[215:] + input[:215-len(rev_anneal)] ... wait
+> # Actually in Q5 SDM:
+> # Forward primer anneals at pos 215, extends downstream (toward end of linear representation)
+> # Reverse primer (rev comp) anneals at the upstream region, extends upstream
+> # The PCR product is the whole plasmid linearized at the junction
+> # After KLD (kinase-ligase-DpnI), it's circularized
+>
+> # The linear PCR product would be:
+> # fwd_full + input[215+len(fwd_anneal):] + input[:215-len(rev_anneal)] + rev_comp(rev_full)
+> # Wait, that's not right either. Let me think...
+>
+> # In Q5 SDM, both primers point outward from the mutation site
+> # Forward primer: 5'-[tail]-[anneals downstream of cut]->  (extends rightward)
+> # Reverse primer: 5'-[anneals upstream of cut, rev comp]->  (extends leftward)
+> #
+> # The PCR amplifies the entire plasmid. The product is:
+> # 5' end: fwd_full sequence (tail + annealing)
+> # Then the rest of the plasmid going downstream from fwd annealing end
+> # All the way around to just before the rev annealing start
+> # Then the rev_full reverse complement at the 3' end
+> #
+> # After circularization:
+> # ...rev_anneal...fwd_tail...fwd_anneal...(rest of plasmid)...
+>
+> junction = 215
+> fwd_anneal_len = len(fwd_anneal)
+> rev_anneal_len = len(rev_anneal)
+>
+> # The circular product after ligation:
+> # Starting from the reverse primer's annealing position:
+> # input[junction-rev_anneal_len:junction] + inserted + input[junction:junction+...]
+> # = rev_anneal + inserted + fwd_anneal + (rest of plasmid)
+> # This should equal the output sequence
+>
+> # Build the expected output from the SDM reaction
+> # The plasmid is circular, so we go:
+> # From the start of rev_anneal (junction - rev_anneal_len) around the plasmid
+> # back to junction, then insert, then continue
+>
+> # Actually simpler: the output plasmid = input plasmid with 37bp inserted at position 215
+> expected_output = input_seq[:junction] + inserted + input_seq[junction:]
+> # But wait, the suffix overlap means input[213:215] appears in both places
+> # Let me check if this matches
+>
+> # Hmm, but the suffix alignment says input[213:] = output[252:]
+> # And the prefix says input[:215] = output[:215]
+> # So output = input[:215] + inserted + input[213:]
+> # That means input[213:215] = 'ag' is duplicated!
+>
+> # Let me check both possibilities
+> version1 = input_seq[:215] + inserted + input_seq[215:]  # simple insertion at 215
+> version2 = input_seq[:215] + inserted + input_seq[213:]  # with duplication
+>
+> print(f'\nOutput seq length: {len(output_seq)}')
+> print(f'Version 1 length (insert at 215): {len(version1)}')
+> print(f'Version 2 length (insert at 215, resume at 213): {len(version2)}')
+>
+> if version1 == output_seq:
+>     print('Version 1 matches output! (simple insertion at 215)')
+> elif version2 == output_seq:
+>     print('Version 2 matches output! (insertion with overlap)')
+> else:
+>     print('Neither version matches!')
+>     # Find where they differ
+>     for v, name in [(version1, 'v1'), (version2, 'v2')]:
+>         for i in range(min(len(v), len(output_seq))):
+>             if v[i] != output_seq[i]:
+>                 print(f'{name} first diff at {i}: got {v[i]}, expected {output_seq[i]}')
+>                 print(f'{name}[{i-5}:{i+10}] = {v[i-5:i+10]}')
+>                 print(f'out[{i-5}:{i+10}] = {output_seq[i-5:i+10]}')
+>                 break
+> EOF
+Primers:
+  forward_primer: tagattagaagaagaattaagaagaagattaacagaacaagggcgaggagctg (53 bp)
+  reverse_primer: ctcatatgtatatctccttcttaaagttaaacaa (34 bp)
+
+Forward primer tail (insertion): tagattagaagaagaattaagaagaagattaacagaa
+Forward primer annealing: caagggcgaggagctg
+Reverse primer (rev comp of annealing): ctcatatgtatatctccttcttaaagttaaacaa
+Reverse primer annealing region: ttgtttaactttaagaaggagatatacatatgag
+
+Forward annealing Tm: 61.2°C
+Reverse annealing Tm: 61.3°C
+Tm difference: 0.1°C
+
+Forward annealing length: 16
+Reverse annealing length: 34
+
+Output seq length: 3630
+Version 1 length (insert at 215): 3628
+Version 2 length (insert at 215, resume at 213): 3630
+Version 2 matches output! (insertion with overlap)
+root@557c5091-d21a-4bb0-ba35-82bb3af53ff1:/app#

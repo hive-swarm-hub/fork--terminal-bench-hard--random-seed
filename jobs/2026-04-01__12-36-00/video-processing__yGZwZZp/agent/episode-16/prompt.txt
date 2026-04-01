@@ -1,0 +1,196 @@
+New Terminal Output:
+
+root@15e9ba57-5c48-4408-b1c6-a4bf29a46409:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+)>     # Read first frame as background
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+ >
+j>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     bg_gray = cv2.GaussianBlur(bg_gray, (11, 11), 0)
+so>
+a>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Process all frames
+i>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>
+>     frame_metrics = []  # (frame_idx, total_fg, avg_bottom, ground_fg)
+>
+>     # Ground strip region - where feet would be when running
+>     ground_strip_top = int(height * 0.52)  # ~280 for 540 height
+>     ground_strip_bot = int(height * 0.74)  # ~400 for 540 height
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+i>             break
+ >
+Va>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         gray_blur = cv2.GaussianBlur(gray, (11, 11), 0)
+>
+>         diff = cv2.absdiff(bg_gray, gray_blur)
+>         _, thresh = cv2.threshold(diff.astype(np.uint8), 25, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological operations to clean up
+>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+>         thresh = cv2.dilate(thresh, kernel, iterations=1)
+>
+>         # Total foreground pixels
+>         total_fg = int(np.sum(thresh > 0))
+>
+>         # Ground strip foreground
+>         ground_strip = thresh[ground_strip_top:ground_strip_bot, :]
+>         ground_fg = int(np.sum(ground_strip > 0))
+>
+>         # Average bottom position (bottom 10% of foreground pixels)
+>         fg_rows = np.where(thresh > 0)[0]
+>         if len(fg_rows) > 100:  # Significant foreground
+>             sorted_rows = np.sort(fg_rows)[::-1]  # descending (bottom first)
+>             bottom_10pct = sorted_rows[:max(1, len(sorted_rows) // 10)]
+>             avg_bottom = float(np.mean(bottom_10pct))
+>         else:
+>             avg_bottom = 0.0
+>
+>         frame_metrics.append((frame_idx, total_fg, avg_bottom, ground_fg))
+>         frame_idx += 1
+>
+>     cap.release()
+>
+e_>     # Find the runner's active period - frames with significant foreground
+>     # Use a threshold for "runner present"
+>     min_fg_for_runner = 5000
+>     active_frames = [(f, tfg, ab, gfg) for f, tfg, ab, gfg in frame_metrics if tfg > min_fg_for_runner]
+>
+>     if not active_frames:
+>         # Lower threshold
+>         min_fg_for_runner = 2000
+_>         active_frames = [(f, tfg, ab, gfg) for f, tfg, ab, gfg in frame_metrics if tfg > min_fg_for_runner]
+>
+>     if not active_frames:
+>         raise ValueError("No runner detected in video")
+>
+>     # Find the main activity period (the actual run, not noise at the end)
+>     # Group consecutive active frames
+>     active_frame_nums = [f for f, _, _, _ in active_frames]
+>
+>     # Find the first large contiguous group
+>     groups = []
+>     current_group = [active_frame_nums[0]]
+>     for i in range(1, len(active_frame_nums)):
+>         if active_frame_nums[i] - active_frame_nums[i-1] <= 3:  # Allow small gaps
+>             current_group.append(active_frame_nums[i])
+>         else:
+>             groups.append(current_group)
+>             current_group = [active_frame_nums[i]]
+>     groups.append(current_group)
+>
+>     # Use the largest group as the main run
+>     main_group = max(groups, key=len)
+>     run_start = main_group[0]
+>     run_end = main_group[-1]
+>
+>     # Get metrics for the main run period
+>     run_metrics = [(f, tfg, ab, gfg) for f, tfg, ab, gfg in frame_metrics
+>                    if run_start <= f <= run_end]
+>
+>     # Establish ground level baseline from running frames
+>     # Use frames at the beginning and end of the run (when runner is on ground)
+>     # The avg_bottom should be high (near ground) when running
+>     avg_bottoms = np.array([ab for _, _, ab, _ in run_metrics])
+>     frames_arr = np.array([f for f, _, _, _ in run_metrics])
+>     ground_fgs = np.array([gfg for _, _, _, gfg in run_metrics])
+>
+>     # Ground level = maximum avg_bottom during the run (when feet are on track)
+>     ground_level = np.max(avg_bottoms)
+>
+>     # The jump is characterized by avg_bottom dropping significantly
+>     # Find the threshold: when avg_bottom drops below ground_level - some margin
+>     # Use a percentage of the ground level
+>     jump_threshold = ground_level * 0.90  # 90% of ground level
+>
+>     # Find frames where avg_bottom is below the threshold (airborne)
+>     airborne_mask = avg_bottoms < jump_threshold
+>
+>     # Find the continuous airborne period
+>     airborne_indices = np.where(airborne_mask)[0]
+>
+>     if len(airborne_indices) == 0:
+>         # Try a less aggressive threshold
+>         jump_threshold = ground_level * 0.95
+>         airborne_mask = avg_bottoms < jump_threshold
+>         airborne_indices = np.where(airborne_mask)[0]
+>
+>     if len(airborne_indices) == 0:
+>         raise ValueError("Could not detect jump")
+>
+>     # Find the main airborne period (largest contiguous block)
+>     airborne_groups = []
+>     current = [airborne_indices[0]]
+>     for i in range(1, len(airborne_indices)):
+>         if airborne_indices[i] - airborne_indices[i-1] <= 2:
+>             current.append(airborne_indices[i])
+>         else:
+>             airborne_groups.append(current)
+>             current = [airborne_indices[i]]
+>     airborne_groups.append(current)
+>
+>     main_airborne = max(airborne_groups, key=len)
+>
+>     # The takeoff frame is the first frame of the airborne period
+>     # The landing frame is the first frame after the airborne period
+>     airborne_start_idx = main_airborne[0]
+>     airborne_end_idx = main_airborne[-1]
+>
+>     takeoff_frame = int(frames_arr[airborne_start_idx])
+>
+>     # Landing frame: the frame after the airborne period ends
+>     if airborne_end_idx + 1 < len(frames_arr):
+>         land_frame = int(frames_arr[airborne_end_idx + 1])
+>     else:
+>         land_frame = int(frames_arr[airborne_end_idx])
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@15e9ba57-5c48-4408-b1c6-a4bf29a46409:/app#
