@@ -9,7 +9,7 @@ harbor run \
   --agent-import-path agent:AgentHarness \
   -d terminal-bench@2.0 \
   -m anthropic/claude-opus-4-6 \
-  -e modal \
+  -e daytona \
   -n 20 \
   --n-attempts 1 \
   -o "$REPO_DIR/jobs" \

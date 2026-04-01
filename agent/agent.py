@@ -122,6 +122,14 @@ _DURATION_DESC = (
 
 _TASK_COMPLETE_DESC = "Call this when the task is complete."
 
+_RESET_TERMINAL_DESC = (
+    "Emergency recovery: kills ALL running processes and resets the terminal. "
+    "Use this ONLY when the terminal is completely stuck and unresponsive — "
+    "e.g., a process ignores Ctrl+C, a command hangs indefinitely, or you "
+    "cannot type new commands. After calling this, you will get a fresh bash "
+    "shell in the same working directory. Any background processes will be killed."
+)
+
 _IMAGE_READ_DESC = (
     "Read and analyze an image file. "
     "Use this ONLY for image files that you need to visually analyze. "
@@ -195,6 +203,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "reset_terminal",
+            "description": _RESET_TERMINAL_DESC,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "image_read",
             "description": _IMAGE_READ_DESC,
             "parameters": {
@@ -227,6 +247,81 @@ class AgentHarness(Terminus2):
         super().__init__(*args, **kwargs)
         self._marker_seq = 0
         self._total_time_saved = 0.0
+        self._consecutive_stalls = 0
+
+    async def _reset_terminal(self, session: TmuxSession) -> str:
+        """Kill all processes and respawn a fresh bash shell in the tmux session.
+
+        Uses environment.exec() which bypasses the stuck tmux pane entirely,
+        so this works even when the terminal is completely unresponsive.
+        """
+        env = session.environment
+        session_name = session._session_name
+
+        # Step 1: Kill all user processes via environment.exec (bypasses tmux)
+        try:
+            await env.exec(
+                command="pkill -9 -u $(whoami) || true",
+                user="root",
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # Step 2: Kill the old tmux session
+        try:
+            await env.exec(
+                command=f"tmux kill-session -t {session_name} 2>/dev/null || true",
+                user=session._user,
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # Step 3: Start a fresh tmux session with the same name
+        try:
+            start_cmd = (
+                f"export TERM=xterm-256color && export SHELL=/bin/bash && "
+                f'script -qc "'
+                f"tmux new-session -x {session._pane_width} -y {session._pane_height} "
+                f"-d -s {session_name} 'bash --login'"
+                f'" /dev/null'
+            )
+            result = await env.exec(command=start_cmd, user=session._user)
+            if result.return_code != 0:
+                self.logger.error(f"Failed to restart tmux session: {result.stderr}")
+        except Exception as e:
+            self.logger.error(f"Exception restarting tmux: {e}")
+        await asyncio.sleep(0.5)
+
+        # Step 4: Re-disable pagers in the fresh shell
+        try:
+            await session.send_keys(
+                "export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS='-F -X'\n",
+                block=False,
+                min_timeout_sec=0.3,
+            )
+        except Exception:
+            pass
+
+        # Step 5: cd back to /app (the standard working directory)
+        try:
+            await session.send_keys("cd /app\n", block=False, min_timeout_sec=0.3)
+        except Exception:
+            pass
+
+        # Reset stall counter and marker sequence
+        self._consecutive_stalls = 0
+        session._previous_buffer = None
+
+        # Capture the fresh terminal state
+        try:
+            output = await session.get_incremental_output()
+        except Exception:
+            output = "[Terminal reset complete. Fresh bash shell ready.]"
+
+        self.logger.info("Terminal reset completed successfully")
+        return f"[TERMINAL RESET] All processes killed. Fresh bash shell ready in /app.\n\n{output}"
 
     async def _with_block_timeout(self, coro, timeout_sec: int = BLOCK_TIMEOUT_SEC):
         """Wrap coroutine with block detection timeout."""
@@ -325,16 +420,28 @@ class AgentHarness(Terminus2):
         lines = [line for line in lines if not any(m in line for m in all_markers)]
         output = "\n".join(lines)
 
-        # If stall detected, append diagnostic info so the model knows
+        # Track consecutive stalls and suggest reset_terminal
         if not found_last:
+            self._consecutive_stalls += 1
             stall_cmds = [c.keystrokes.strip()[:80] for c in commands[completed:]]
-            output += (
-                f"\n\n[WARNING: {len(commands) - completed} command(s) may not have "
-                f"completed within {hard_timeout:.0f}s. Possibly stalled commands: "
-                f"{'; '.join(stall_cmds)}. "
-                f"If a process is stuck, try: kill the process, use Ctrl+C, "
-                f"or run your next command with a fresh approach.]"
-            )
+
+            if self._consecutive_stalls >= 3:
+                output += (
+                    f"\n\n[CRITICAL: Terminal has been stuck for {self._consecutive_stalls} "
+                    f"consecutive commands. Stalled on: {'; '.join(stall_cmds)}. "
+                    f"Call reset_terminal to kill all processes and get a fresh shell. "
+                    f"Ctrl+C and kill commands are unlikely to work at this point.]"
+                )
+            else:
+                output += (
+                    f"\n\n[WARNING: {len(commands) - completed} command(s) may not have "
+                    f"completed within {hard_timeout:.0f}s. Possibly stalled commands: "
+                    f"{'; '.join(stall_cmds)}. "
+                    f"If a process is stuck, try: kill the process, use Ctrl+C, "
+                    f"or call reset_terminal to get a fresh shell.]"
+                )
+        else:
+            self._consecutive_stalls = 0
 
         return False, self._limit_output_length(output)
 
@@ -427,11 +534,11 @@ class AgentHarness(Terminus2):
 
     def _parse_tool_calls(
         self, tool_calls: list[dict[str, Any]]
-    ) -> tuple[list[Command], bool, str, str, str, ImageReadRequest | None]:
+    ) -> tuple[list[Command], bool, str, str, str, ImageReadRequest | None, bool]:
         """Parse tool calls into commands.
 
         Returns:
-            Tuple of (commands, is_task_complete, feedback, analysis, plan, image_read)
+            Tuple of (commands, is_task_complete, feedback, analysis, plan, image_read, reset_terminal)
         """
         commands = []
         is_task_complete = False
@@ -439,13 +546,14 @@ class AgentHarness(Terminus2):
         analysis = ""
         plan = ""
         image_read = None
+        reset_terminal = False
 
         if not tool_calls:
             feedback = (
                 "WARNINGS: Your response contained no tool calls. "
                 "Please use execute_commands to run commands."
             )
-            return commands, is_task_complete, feedback, analysis, plan, image_read
+            return commands, is_task_complete, feedback, analysis, plan, image_read, reset_terminal
 
         for tool_call in tool_calls:
             function_name = tool_call.get("function", {}).get("name", "")
@@ -484,6 +592,8 @@ class AgentHarness(Terminus2):
             elif function_name == "task_complete":
                 # Mark task as complete
                 is_task_complete = True
+            elif function_name == "reset_terminal":
+                reset_terminal = True
             elif function_name == "image_read":
                 # Extract image read request
                 file_path = arguments.get("file_path", "")
@@ -502,11 +612,11 @@ class AgentHarness(Terminus2):
                 # Unknown function name - provide feedback
                 feedback = (
                     f"WARNINGS: Unknown function '{function_name}'. "
-                    "Please use execute_commands, task_complete, or image_read."
+                    "Please use execute_commands, task_complete, reset_terminal, or image_read."
                 )
                 self.logger.warning(f"Unknown function called: {function_name}")
 
-        return commands, is_task_complete, feedback, analysis, plan, image_read
+        return commands, is_task_complete, feedback, analysis, plan, image_read, reset_terminal
 
     @retry(
         stop=stop_after_attempt(5),
@@ -721,7 +831,7 @@ class AgentHarness(Terminus2):
         original_instruction: str = "",
         session: TmuxSession | None = None,
     ) -> tuple[
-        list[Command], bool, str, str, str, LLMResponse, ImageReadRequest | None
+        list[Command], bool, str, str, str, LLMResponse, ImageReadRequest | None, bool
     ]:
         """Handle LLM interaction using native tool calling.
 
@@ -899,7 +1009,7 @@ class AgentHarness(Terminus2):
             response_path.write_text(response_text)
 
         # Parse tool calls into commands
-        commands, is_task_complete, feedback, analysis, plan, image_read = (
+        commands, is_task_complete, feedback, analysis, plan, image_read, reset_terminal = (
             self._parse_tool_calls(tool_response.tool_calls)
         )
 
@@ -918,6 +1028,7 @@ class AgentHarness(Terminus2):
             plan,
             llm_response,
             image_read,
+            reset_terminal,
         )
 
     async def _gather_env_snapshot(self) -> str:
@@ -1107,6 +1218,7 @@ class AgentHarness(Terminus2):
                 plan,
                 llm_response,
                 image_read,
+                reset_terminal,
             ) = await self._handle_llm_interaction(
                 chat, prompt, logging_paths, original_instruction, self._session
             )
@@ -1202,7 +1314,53 @@ class AgentHarness(Terminus2):
                 )
                 continue
 
-            if image_read is not None:
+            if reset_terminal:
+                # Terminal reset path — kill everything and get a fresh shell
+                self.logger.info("Agent requested terminal reset")
+                reset_output = await self._with_block_timeout(
+                    self._reset_terminal(self._session)
+                )
+                observation = reset_output
+
+                cache_tokens_used = chat.total_cache_tokens - tokens_before_cache
+                step_cost = chat.total_cost - cost_before
+
+                tool_calls_list: list[ToolCall] = [
+                    ToolCall(
+                        tool_call_id=f"call_{episode}_reset",
+                        function_name="reset_terminal",
+                        arguments={},
+                    )
+                ]
+                self._trajectory_steps.append(
+                    Step(
+                        step_id=len(self._trajectory_steps) + 1,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        source="agent",
+                        model_name=self._model_name,
+                        message=message_content,
+                        reasoning_content=llm_response.reasoning_content,
+                        tool_calls=tool_calls_list,
+                        observation=Observation(
+                            results=[ObservationResult(content=observation)]
+                        ),
+                        metrics=Metrics(
+                            prompt_tokens=chat.total_input_tokens - tokens_before_input,
+                            completion_tokens=chat.total_output_tokens
+                            - tokens_before_output,
+                            cached_tokens=cache_tokens_used
+                            if cache_tokens_used > 0
+                            else None,
+                            cost_usd=step_cost if step_cost > 0 else None,
+                            prompt_token_ids=llm_response.prompt_token_ids,
+                            completion_token_ids=llm_response.completion_token_ids,
+                            logprobs=llm_response.logprobs,
+                        ),
+                    )
+                )
+                self._dump_trajectory()
+                prompt = observation
+            elif image_read is not None:
                 # File read path
                 image_read_result = await self._execute_image_read(
                     image_read, chat, original_instruction
