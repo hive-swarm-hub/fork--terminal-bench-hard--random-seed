@@ -948,7 +948,14 @@ class AgentHarness(Terminus2):
             "(pip3 --version 2>&1 || echo 'pip3: not found') && "
             "(pip --version 2>&1 || echo 'pip: not found') && "
             "(apt-get --version 2>&1 | head -1 || echo 'apt-get: not found') && "
-            "echo '@@MEM@@' && free -h 2>/dev/null | head -2 || true"
+            "echo '@@MEM@@' && free -h 2>/dev/null | head -2 && "
+            # Read key task files (README, instructions) to give agent context
+            "echo '@@DOCS@@' && "
+            "for f in /app/README* /app/readme* /app/TASK* /app/task* /app/INSTRUCTIONS* /app/instructions* /app/*.md /app/*.txt; do "
+            "  if [ -f \"$f\" ] && [ $(wc -c < \"$f\") -lt 5000 ]; then "
+            "    echo \"--- $f ---\"; cat \"$f\"; echo; "
+            "  fi; "
+            "done 2>/dev/null || true"
         )
 
         try:
@@ -1012,6 +1019,13 @@ class AgentHarness(Terminus2):
             mem = sections["MEM"].strip()
             if mem:
                 parts.append(f"Memory: {mem}")
+        if "DOCS" in sections:
+            docs = sections["DOCS"].strip()
+            if docs and len(docs) > 10:
+                # Limit to 4000 chars to avoid overwhelming the prompt
+                if len(docs) > 4000:
+                    docs = docs[:4000] + "\n... (truncated)"
+                parts.append(f"Task documentation found:\n{docs}")
 
         if not parts:
             return ""
