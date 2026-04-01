@@ -254,6 +254,14 @@ class AgentHarness(Terminus2):
             output = await session.get_incremental_output()
             return False, self._limit_output_length(output)
 
+        # Filter out empty-keystroke commands — these are just "wait" requests
+        # that waste time. The marker polling handles timing automatically.
+        commands = [c for c in commands if c.keystrokes.strip()]
+        if not commands:
+            # All commands were empty waits — just grab current output
+            output = await session.get_incremental_output()
+            return False, self._limit_output_length(output)
+
         total_duration = sum(c.duration_sec for c in commands)
         max_duration = max(c.duration_sec for c in commands)
 
