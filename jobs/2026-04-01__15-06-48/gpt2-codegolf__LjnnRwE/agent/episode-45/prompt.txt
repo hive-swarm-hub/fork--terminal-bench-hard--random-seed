@@ -1,0 +1,80 @@
+New Terminal Output:
+__
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; E=768; L=12; H=12; D=64
+> sz = [V*E, 1024*E, L*E, L*E, L*E*3*E, L*3*E, L*E*E, L*E, L*E, L*E, L*E*4*E, L*4*E, L*4*E*E, L*E, E, E]
+> wo = [0]*16
+> o = 0
+> for i in range(16): wo[i] = o; o += sz[i]
+>
+> def getf(off, n):
+>     return struct.unpack_from(f'<{n}f', m, off*4)
+>
+> def ln(a, w_off, b_off, plus1=True):
+>     mean = sum(a)/E
+>     var = sum((ai-mean)**2 for ai in a)/E
+>     rstd = 1.0/math.sqrt(var+1e-5)
+>     w = getf(w_off, E)
+>     b = getf(b_off, E)
+>     if plus1:
+>         return [(a[i]-mean)*rstd*(w[i]+1)+b[i] for i in range(E)]
+>     else:
+>         return [(a[i]-mean)*rstd*w[i]+b[i] for i in range(E)]
+>
+> # TRANSPOSED matmul: out[i] = sum_j(inp[j] * W[i*in_d + j]) -- llm.c convention
+> def matmul_t(inp, w_off, b_off, in_d, out_d):
+>     b = getf(b_off, out_d)
+>     out = [0.0]*out_d
+>     for i in range(out_d):
+>         s = b[i]
+>         for j in range(in_d):
+>             s += inp[j] * struct.unpack_from('<f', m, (w_off + i*in_d + j)*4)[0]
+>         out[i] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(0.7978845608*x*(1+0.044715*x*x)))
+>
+> tok = 15496; pos = 0
+> x = list(getf(wo[0]+tok*E, E))
+> wpe = getf(wo[1]+pos*E, E)
+> x = [x[i]+wpe[i] for i in range(E)]
+>
+> for l in range(L):
+>     h = ln(x, wo[2]+l*E, wo[3]+l*E, plus1=True)
+>     qkv = matmul_t(h, wo[4]+l*E*3*E, wo[5]+l*3*E, E, 3*E)
+>     attn_out = list(qkv[2*E:3*E])
+>     proj = matmul_t(attn_out, wo[6]+l*E*E, wo[7]+l*E, E, E)
+>     x = [x[i]+proj[i] for i in range(E)]
+>     h = ln(x, wo[8]+l*E, wo[9]+l*E, plus1=True)
+>     fc = matmul_t(h, wo[10]+l*E*4*E, wo[11]+l*4*E, E, 4*E)
+>     fc = [gelu(v) for v in fc]
+>     mlp = matmul_t(fc, wo[12]+l*4*E*E, wo[13]+l*E, 4*E, E)
+>     x = [x[i]+mlp[i] for i in range(E)]
+>     print(f'L{l}: mean={sum(x)/E:.2f} min={min(x):.2f} max={max(x):.2f}')
+>
+> x = ln(x, wo[14], wo[15], plus1=True)
+> print(f'FinalLN: mean={sum(x)/E:.4f} min={min(x):.4f} max={max(x):.4f}')
+>
+> # Get top 5 logits
+> best = []; bv = []
+> for i in range(V):
+>     s = sum(x[j]*struct.unpack_from('<f',m,(wo[0]+i*E+j)*4)[0] for j in range(E))
+>     if len(best)<5 or s>min(bv):
+>         best.append(i); bv.append(s)
+>         if len(best)>5:
+>             mi = bv.index(min(bv))
+>             best.pop(mi); bv.pop(mi)
+> for i,v in sorted(zip(best,bv),key=lambda x:-x[1]):
+>     print(f'  token {i}: logit={v:.4f}')
+>
+> m.close()
+> f.close()
+> PYEOF
+L0: mean=11.35 min=-73.72 max=82.04
+

@@ -1,0 +1,126 @@
+New Terminal Output:
+
+root@cd2f4310-b386-4bd7-b336-3ec7551e951d:/app# python3 << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def rev_comp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+_out> output_seq = seqs['output'].upper()
+>
+> # Primers
+> fwd_primer = 'AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG'
+> rev_primer = 'CATATGTATATCTCCTTCTTAAAGTTAAAC'
+>
+> # In Q5 SDM PCR:
+> # Forward primer anneals at position 213 on sense strand (annealing part: AGCAAGGGCGAGGAG)
+> # Reverse primer anneals at position 183-212 on antisense strand
+> #
+> # The PCR extends:
+> # - From forward primer: extends rightward from pos 213 to the end, wraps around to pos 183
+> #   (because the reverse primer binds at 183-212 on the other strand)
+> # - From reverse primer: extends leftward from pos 212 to the end, wraps around to pos 213+15
+> #   (because the forward primer binds at 213-227 on the other strand)
+> #
+> # The linear PCR product (sense strand, 5' to 3') is:
+> # fwd_primer_full + template[228:] + template[:183] + rev_comp(rev_primer)
+> # Wait, that's not quite right. Let me think again.
+> #
+> # Actually in inverse PCR (which is what Q5 SDM does):
+> # The forward primer binds at pos 213 (sense strand), extends through the plasmid
+> # The reverse primer binds at pos 212 (antisense strand), extends in the other direction
+> # They go around the plasmid and meet on the other side
+> #
+> # The PCR product is a linear molecule:
+> # 5' end: forward primer sequence (including tail)
+> # Then: template from pos 228 onward (after fwd annealing)
+> # Wraps around: ...template[:183] (before rev annealing)
+> # 3' end: determined by reverse primer
+> #
+> # Actually, the product on the sense strand is:
+> # [fwd_primer] + [template 228 -> end -> start -> 182]
+> # And on the antisense strand:
+> # [rev_primer] + [rc of template from 212 -> end -> start -> 228]
+> #
+> # The sense strand of the linear product:
+> # fwd_primer + input_seq[228:] + input_seq[:183]
+> # But wait, the reverse primer determines where the other end stops.
+> # The rev primer anneals at 183-212 on antisense. Extension from rev primer goes
+> # leftward on the sense strand, i.e., from pos 182 backward, wrapping around.
+> # So the sense strand product is:
+> # fwd_primer + input_seq[213+15:] + input_seq[:183]
+> # = fwd_primer + input_seq[228:] + input_seq[:183]
+> # Hmm, but that's the sense strand. The antisense strand product ends with rev_primer.
+>
+> # After KLD treatment, the linear product is phosphorylated and ligated into a circle.
+> # The circular product (reading from the ligation junction) is:
+> # fwd_primer + input_seq[228:] + input_seq[:183]
+> # which when circularized gives us:
+>
+> fwd_anneal_end = 213 + 15  # = 228
+> rev_anneal_start = 183
+>
+> # The linear PCR product (sense strand):
+> linear_product = fwd_primer + input_seq[fwd_anneal_end:] + input_seq[:rev_anneal_start]
+>
+> print(f'Linear product length: {len(linear_product)}')
+> print(f'Expected circular output length: {len(output_seq)}')
+>
+> # The circular product should equal the output plasmid
+> # We need to find a rotation of the output that matches
+> circular_product = fwd_primer + input_seq[fwd_anneal_end:] + input_seq[:rev_anneal_start]
+> print(f'Circular product length: {len(circular_product)}')
+>
+> # Check if circular_product is a rotation of output_seq
+> double_output = output_seq + output_seq
+> if circular_product in double_output:
+>     print('SUCCESS: PCR product (circularized) matches the output plasmid!')
+> else:
+>     print('CHECKING: Let me verify differently...')
+>     # The fwd primer contributes: insertion + annealing
+>     # insertion = AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+>     # annealing = AGCAAGGGCGAGGAG (= input[213:228])
+>     # So fwd_primer = insertion + input[213:228]
+>     # The product is: insertion + input[213:228] + input[228:] + input[:183]
+>     #               = insertion + input[213:] + input[:183]
+>     product = 'AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA' + input_seq[213:] + input_seq[:183]
+>     print(f'Product length: {len(product)}')
+>     if product in double_output:
+>         print('SUCCESS: Product is a rotation of output!')
+>     else:
+>         # Try another way: the output starting from the insertion
+>         # output = input[:213] + insertion + input[213:]
+>         # A rotation starting at position 213 in the output:
+>         rot_output = output_seq[213:] + output_seq[:213]
+>         print(f'Rotated output: {rot_output[:80]}...')
+>         print(f'Product:        {product[:80]}...')
+>         if rot_output == product:
+>             print('SUCCESS after rotation!')
+>         else:
+>             # Find where they differ
+>             for i in range(len(product)):
+>                 if i >= len(rot_output) or product[i] != rot_output[i]:
+>                     print(f'Differ at pos {i}: product={product[i] if i<len(product) else "END"}, rot_output={rot_output[i] if i<len(rot_output) else "END"}')
+>                     print(f'Context product:    ...{product[max(0,i-10):i+10]}')
+>                     print(f'Context rot_output: ...{rot_output[max(0,i-10):i+10]}')
+>                     break
+> PYEOF
+Linear product length: 3600
+Expected circular output length: 3630
+Circular product length: 3600
+SUCCESS: PCR product (circularized) matches the output plasmid!
+root@cd2f4310-b386-4bd7-b336-3ec7551e951d:/app#

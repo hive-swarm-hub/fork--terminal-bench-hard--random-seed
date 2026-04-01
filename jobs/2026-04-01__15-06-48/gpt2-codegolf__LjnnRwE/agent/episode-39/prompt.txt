@@ -1,0 +1,85 @@
+New Terminal Output:
+
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; E=768; L=12; H=12; D=64
+>
+> def getf(offset, n):
+>     return list(struct.unpack_from(f'<{n}f', m, offset*4))
+>
+> # Try per-layer layout
+> # wte: V*E, wpe: C*E
+> # then per layer: ln1_g(E), ln1_b(E), qkv_w(E*3E), qkv_b(3E), proj_w(E*E), proj_b(E), ln2_g(E), ln2_b(E), fc_w(E*4E), fc_b(4E), fcproj_w(4E*E), fcproj_b(E)
+> # then lnf_g(E), lnf_b(E)
+>
+> off = 0
+> wte_off = off; off += V*E
+> wpe_off = off; off += 1024*E
+>
+> layer_offsets = []
+> for l in range(L):
+>     lo = {}
+>     lo['ln1w'] = off; off += E
+>     lo['ln1b'] = off; off += E
+>     lo['qkvw'] = off; off += E*3*E
+>     lo['qkvb'] = off; off += 3*E
+>     lo['projw'] = off; off += E*E
+>     lo['projb'] = off; off += E
+>     lo['ln2w'] = off; off += E
+>     lo['ln2b'] = off; off += E
+>     lo['fcw'] = off; off += E*4*E
+>     lo['fcb'] = off; off += 4*E
+>     lo['fcprojw'] = off; off += 4*E*E
+>     lo['fcprojb'] = off; off += E
+>     layer_offsets.append(lo)
+>
+> lnf_w = off; off += E
+> lnf_b = off; off += E
+> print(f'Total: {off} (expected {len(m)//4})')
+>
+> # Check layer 0 ln1w values
+> ln1w = getf(layer_offsets[0]['ln1w'], E)
+> print(f'Layer 0 ln1w[:5] = {ln1w[:5]}')
+> print(f'Layer 0 ln1w mean={sum(ln1w)/E:.6f}')
+>
+> # This is the same as the grouped layout for layer 0!
+> # The grouped layout puts all ln1w together: [ln1w_layer0, ln1w_layer1, ...]
+> # The per-layer layout puts ln1w_layer0 right after wpe
+> # Both start at the same offset for layer 0!
+> # So the difference only matters for layer 1+
+>
+> # Let me check layer 1 ln1w in per-layer vs grouped layout
+> print(f'\nPer-layer: layer1 ln1w at offset {layer_offsets[1]["ln1w"]}')
+> ln1w_perlayer = getf(layer_offsets[1]['ln1w'], 5)
+> print(f'  values: {ln1w_perlayer}')
+>
+> # Grouped: layer1 ln1w at offset wo[2]+E = 39383808+768
+> grouped_off = V*E + 1024*E + E  # after wte, wpe, first layer's ln1w
+> ln1w_grouped = getf(grouped_off, 5)
+> print(f'Grouped: layer1 ln1w at offset {grouped_off}')
+> print(f'  values: {ln1w_grouped}')
+>
+> # They should differ if the layouts are different
+> # Let me also check: what if the layer norm values that we see (mean~0) are actually correct,
+> # and the model was trained with a different convention?
+> # In some frameworks, LayerNorm stores weight and bias where weight multiplies the normalized input
+> # and weight is initialized to 1. After training, it could drift.
+> # But mean=0.01 with range [-0.44, 0.50] means it drifted A LOT from 1.0.
+> # This is more consistent with storing (weight - 1.0).
+>
+> m.close()
+> f.close()
+> PYEOF
+Total: 124439808 (expected 124439808)
+Layer 0 ln1w[:5] = [0.012613765895366669, 0.1112576425075531, -0.018961146473884583, -0.07971286028623581, -0.1944773644208908]
+Layer 0 ln1w mean=0.014674
+
+Per-layer: layer1 ln1w at offset 46471680
+  values: [-0.042594846338033676, -0.18852366507053375, -0.17203332483768463, 0.13673414289951324, 0.009066935628652573]
+Grouped: layer1 ln1w at offset 39384576
+  values: [0.2511617839336395, -0.02361348643898964, -0.1021089032292366, -0.03539951518177986, 0.17621077597141266]
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app#

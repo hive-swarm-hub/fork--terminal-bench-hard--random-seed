@@ -1,0 +1,160 @@
+New Terminal Output:
+
+root@f86bc64f-424a-4654-90e3-5d6ef2a0bef0:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+range(min_y_idx, -1, -1):
+        if max_y_values[idx> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         print(f"Error: Cannot open video {video_path}")
+>         sys.exit(1)
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         print("Error: Cannot read first frame")
+>         sys.exit(1)
+>
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Process all frames to get motion data
+>     frame_data = []  # list of (frame_idx, max_y_bottom, white_pixel_count, center_x)
+>
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     for i in range(total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(bg_blur, gray_blur)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>         thresh = cv2.dilate(thresh, None, iterations=2)
+>
+>         white_coords = np.where(thresh > 0)
+>         white_count = len(white_coords[0])
+>
+>         if white_count > 500:  # Significant motion detected (athlete present)
+>             max_y_bottom = int(np.max(white_coords[0]))  # feet position
+>             min_y_top = int(np.min(white_coords[0]))  # head position
+>             cx = int(np.mean(white_coords[1]))  # center x
+>             bbox_height = max_y_bottom - min_y_top
+>             frame_data.append({
+>                 'frame': i,
+>                 'max_y': max_y_bottom,
+>                 'min_y': min_y_top,
+>                 'white_count': white_count,
+>                 'cx': cx,
+>                 'bbox_height': bbox_height
+>             })
+>
+>     cap.release()
+>
+>     if len(frame_data) < 5:
+>         print("Error: Not enough frames with athlete detected")
+>         sys.exit(1)
+>
+>     # Extract the athlete's active frames (when they're clearly visible)
+>     # Filter for frames where the athlete has substantial presence
+>     active_frames = [d for d in frame_data if d['white_count'] > 2000 and d['bbox_height'] > 150]
+>
+>     if len(active_frames) < 5:
+>         # Relax threshold
+>         active_frames = [d for d in frame_data if d['white_count'] > 1000]
+>
+>     if len(active_frames) < 5:
+>         active_frames = [d for d in frame_data if d['white_count'] > 500]
+>
+>     # Get the max_y values (feet position) for active frames
+>     frame_nums = np.array([d['frame'] for d in active_frames])
+>     max_y_values = np.array([d['max_y'] for d in active_frames])
+>
+>     # Establish ground level: the typical max_y when athlete is on the ground
+>     # Use the median of the higher max_y values (when feet are on ground)
+>     # Sort max_y values and take the upper quartile median as ground level
+>     sorted_max_y = np.sort(max_y_values)
+>     ground_level = np.median(sorted_max_y[len(sorted_max_y)//2:])  # upper half median
+>
+>     # Find the jump: significant dip below ground level
+>     # The jump is characterized by max_y dropping well below ground level
+>     threshold = ground_level - 30  # at least 30 pixels above ground
+>
+>     # Find frames where athlete is above threshold (in the air)
+>     in_air = max_y_values < threshold
+>
+>     if not np.any(in_air):
+>         # Try a smaller threshold
+>         threshold = ground_level - 20
+>         in_air = max_y_values < threshold
+>
+>     if not np.any(in_air):
+>         threshold = ground_level - 15
+>         in_air = max_y_values < threshold
+>
+>     # Find the main jump region (the largest continuous block of in-air frames)
+>     # Or find the deepest dip
+>     min_y_idx = np.argmin(max_y_values)
+>     peak_frame = frame_nums[min_y_idx]
+>     peak_y = max_y_values[min_y_idx]
+>
+>     # Now find takeoff: scan backward from peak to find where max_y starts dropping
+>     # Takeoff is the last frame at ground level before the jump
+>     takeoff_frame = None
+>     for idx in range(min_y_idx, -1, -1):
+>         if max_y_values[idx] >= ground_level - 15:  # close to ground level
+>             takeoff_frame = frame_nums[idx]
+>             break
+>
+>     if takeoff_frame is None:
+>         takeoff_frame = frame_nums[0]
+>
+>     # Find landing: scan forward from peak to find where max_y returns to ground level
+>     land_frame = None
+>     for idx in range(min_y_idx, len(max_y_values)):
+>         if max_y_values[idx] >= ground_level - 15:  # close to ground level
+>             land_frame = frame_nums[idx]
+>             break
+>
+>     if land_frame is None:
+>         land_frame = frame_nums[-1]
+>
+>     return int(takeoff_frame), int(land_frame)
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@f86bc64f-424a-4654-90e3-5d6ef2a0bef0:/app#

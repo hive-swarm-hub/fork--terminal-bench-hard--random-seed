@@ -1,0 +1,196 @@
+New Terminal Output:
+
+root@f86bc64f-424a-4654-90e3-5d6ef2a0bef0:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         print(f"Error: Cannot open video {video_path}")
+>         sys.exit(1)
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         print("Error: Cannot read first frame")
+>         sys.exit(1)
+>
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     frame_height = bg_frame.shape[0]
+>     frame_width = bg_frame.shape[1]
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Process all frames: background subtraction to detect motion
+>     all_frame_data = []
+>
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     for i in range(total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(bg_blur, gray_blur)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>         thresh = cv2.dilate(thresh, None, iterations=2)
+>
+>         white_coords = np.where(thresh > 0)
+>         white_count = len(white_coords[0])
+>
+>         if white_count > 200:
+>             max_y = int(np.max(white_coords[0]))
+>             min_y = int(np.min(white_coords[0]))
+nge(>             min_x = int(np.min(white_coords[1]))
+>             max_x = int(np.max(white_coords[1]))
+>             cx = int(np.mean(white_coords[1]))
+>             bbox_height = max_y - min_y
+>             bbox_width = max_x - min_x
+>             all_frame_data.append({
+>                 'frame': i,
+>                 'max_y': max_y,
+>                 'min_y': min_y,
+>                 'min_x': min_x,
+>                 'max_x': max_x,
+>                 'white_count': white_count,
+>                 'cx': cx,
+>                 'bbox_height': bbox_height,
+>                 'bbox_width': bbox_width
+>             })
+>
+>     cap.release()
+>
+>     if len(all_frame_data) < 3:
+>         print("Error: Not enough frames with motion detected")
+>         sys.exit(1)
+>
+>     # Step 1: Filter for frames likely containing the athlete
+>     # Athlete characteristics: substantial localized motion, tall bbox, feet in lower frame
+>     candidate_frames = []
+>     for d in all_frame_data:
+>         is_substantial = d['white_count'] > 2000
+>         is_tall = d['bbox_height'] > 100
+>         has_feet_visible = d['max_y'] > frame_height * 0.35
+>         is_localized = d['bbox_width'] < frame_width * 0.6
+>         if is_substantial and is_tall and has_feet_visible and is_localized:
+>             candidate_frames.append(d)
+>
+>     # Fallback with relaxed criteria
+>     if len(candidate_frames) < 5:
+>         candidate_frames = [d for d in all_frame_data
+>                            if d['white_count'] > 1000 and d['bbox_height'] > 80]
+>     if len(candidate_frames) < 3:
+>         candidate_frames = [d for d in all_frame_data if d['white_count'] > 500]
+>     if len(candidate_frames) == 0:
+>         print("Error: No athlete frames detected")
+>         sys.exit(1)
+>
+>     # Step 2: Find continuous blocks and select main athlete pass
+>     blocks = []
+>     current_block = [candidate_frames[0]]
+>     for j in range(1, len(candidate_frames)):
+>         gap = candidate_frames[j]['frame'] - candidate_frames[j-1]['frame']
+>         if gap <= 3:
+>             current_block.append(candidate_frames[j])
+>         else:
+>             blocks.append(current_block)
+>             current_block = [candidate_frames[j]]
+>     blocks.append(current_block)
+>     main_block = max(blocks, key=len)
+>
+>     if len(main_block) < 3:
+>         print("Error: Main block too small")
+>         sys.exit(1)
+>
+>     # Step 3: Filter out frames where athlete is entering/leaving the frame
+>     # When entering/leaving, the athlete is at the edge and only partially visible
+>     # This can cause artificially low max_y values
+>     # Keep only frames where the athlete's bounding box is not touching frame edges
+>     # or where the athlete has substantial presence
+>     edge_margin = 20  # pixels from edge
+>     core_frames = []
+>     for d in main_block:
+>         # Check if athlete is not clipped at left/right edges
+>         not_at_left_edge = d['min_x'] > edge_margin
+>         not_at_right_edge = d['max_x'] < frame_width - edge_margin
+>         # If fully within frame, definitely include
+>         if not_at_left_edge and not_at_right_edge:
+>             core_frames.append(d)
+>         # If at edge but has large white count, still include
+>         # (athlete might be near edge during jump but still mostly visible)
+>         elif d['white_count'] > 8000:
+>             core_frames.append(d)
+>
+>     # If edge filtering removed too many frames, use all main_block frames
+>     if len(core_frames) < 5:
+>         core_frames = main_block
+>
+>     # Step 4: Extract feet position time series
+>     block_frames = np.array([d['frame'] for d in core_frames])
+>     block_max_y = np.array([d['max_y'] for d in core_frames], dtype=float)
+>
+>     # Step 5: Establish ground level (80th percentile of max_y)
+>     ground_level = np.percentile(block_max_y, 80)
+>
+>     # Step 6: Find the jump - deepest dip in max_y
+>     min_idx = int(np.argmin(block_max_y))
+>     jump_peak_y = block_max_y[min_idx]
+>     jump_depth = ground_level - jump_peak_y
+>
+>     # Step 7: Find takeoff and landing using adaptive threshold
+>     margin = min(max(jump_depth * 0.15, 10), 30)
+>     threshold = ground_level - margin
+>
+>     # Scan backward from peak to find takeoff
+>     takeoff_idx = 0
+>     for idx in range(min_idx - 1, -1, -1):
+>         if block_max_y[idx] >= threshold:
+>             takeoff_idx = idx
+>             break
+>
+>     # Scan forward from peak to find landing
+>     land_idx = len(block_max_y) - 1
+>     for idx in range(min_idx + 1, len(block_max_y)):
+>         if block_max_y[idx] >= threshold:
+>             land_idx = idx
+>             break
+>
+>     takeoff_frame = int(block_frames[takeoff_idx])
+>     land_frame = int(block_frames[land_idx])
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@f86bc64f-424a-4654-90e3-5d6ef2a0bef0:/app#

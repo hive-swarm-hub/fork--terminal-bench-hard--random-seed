@@ -1,0 +1,115 @@
+New Terminal Output:
+
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> V=50257; E=768; L=12; H=12; D=64
+> sz = [V*E, 1024*E, L*E, L*E, L*E*3*E, L*3*E, L*E*E, L*E, L*E, L*E, L*E*4*E, L*4*E, L*4*E*E, L*E, E, E]
+> wo = [0]*16
+> o = 0
+> for i in range(16):
+>     wo[i] = o; o += sz[i]
+>
+> def getf(offset, n):
+>     return list(struct.unpack_from(f'<{n}f', m, offset*4))
+>
+> tok = 15496; pos = 0
+>
+> # Embedding
+> wte = getf(wo[0] + tok*E, E)
+> wpe = getf(wo[1] + pos*E, E)
+> x = [wte[i] + wpe[i] for i in range(E)]
+>
+> # Layer 0
+> # LN1
+> ln1w = getf(wo[2], E)
+> ln1b = getf(wo[3], E)
+> mean = sum(x)/E
+> var = sum((xi-mean)**2 for xi in x)/E
+> rstd = 1.0/math.sqrt(var + 1e-5)
+> h1 = [(x[i]-mean)*rstd*(ln1w[i]+1)+ln1b[i] for i in range(E)]
+>
+> # QKV: h1 @ qkvw + qkvb
+> # qkvw shape: [E, 3*E] at wo[4] + 0*E*3*E
+> # qkvb shape: [3*E] at wo[5] + 0*3*E
+> qkvw_off = wo[4]  # layer 0
+> qkvb = getf(wo[5], 3*E)  # layer 0
+>
+> qkv = list(qkvb)  # start with bias
+> for i in range(3*E):
+>     s = qkvb[i]
+>     for j in range(E):
+>         s += h1[j] * struct.unpack_from('<f', m, (qkvw_off + j*3*E + i)*4)[0]
+>     qkv[i] = s
+>
+> print(f'QKV[:5] = {qkv[:5]}')
+> print(f'Q[:5] = {qkv[:5]}')
+> print(f'K[:5] = {qkv[E:E+5]}')
+> print(f'V[:5] = {qkv[2*E:2*E+5]}')
+>
+> # For single token, attention is trivial: softmax of single value = 1.0
+> # So attention output = V values
+> attn_out = qkv[2*E:3*E]  # just the V part for head 0..H-1
+>
+> # Attention projection
+> attprojw_off = wo[6]  # layer 0
+> attprojb = getf(wo[7], E)
+> proj = list(attprojb)
+> for i in range(E):
+>     s = attprojb[i]
+>     for j in range(E):
+>         s += attn_out[j] * struct.unpack_from('<f', m, (attprojw_off + j*E + i)*4)[0]
+>     proj[i] = s
+>
+> # Residual
+> x2 = [x[i] + proj[i] for i in range(E)]
+> print(f'After attn residual x2[:5] = {x2[:5]}')
+>
+> # LN2
+> ln2w = getf(wo[8], E)
+> ln2b = getf(wo[9], E)
+> mean2 = sum(x2)/E
+> var2 = sum((xi-mean2)**2 for xi in x2)/E
+> rstd2 = 1.0/math.sqrt(var2 + 1e-5)
+> h2 = [(x2[i]-mean2)*rstd2*(ln2w[i]+1)+ln2b[i] for i in range(E)]
+>
+> # MLP fc
+> fcw_off = wo[10]  # layer 0
+> fcb = getf(wo[11], 4*E)
+> fc = [0.0]*(4*E)
+> for i in range(4*E):
+>     s = fcb[i]
+>     for j in range(E):
+>         s += h2[j] * struct.unpack_from('<f', m, (fcw_off + j*4*E + i)*4)[0]
+>     # GELU
+>     fc[i] = 0.5*s*(1+math.tanh(0.7978845608*s*(1+0.044715*s*s)))
+>
+> print(f'FC GELU[:5] = {fc[:5]}')
+>
+> # MLP proj
+> fcprojw_off = wo[12]  # layer 0
+> fcprojb = getf(wo[13], E)
+> mlp_out = [0.0]*E
+> for i in range(E):
+>     s = fcprojb[i]
+>     for j in range(4*E):
+>         s += fc[j] * struct.unpack_from('<f', m, (fcprojw_off + j*E + i)*4)[0]
+>     mlp_out[i] = s
+>
+> x3 = [x2[i] + mlp_out[i] for i in range(E)]
+> print(f'After layer 0: x3[:5] = {x3[:5]}')
+>
+> m.close()
+> f.close()
+> PYEOF
+QKV[:5] = [0.6538568185875575, -0.4973909989648061, -1.193894850166385, 3.0148972884172895, -1.8143347377410814]
+Q[:5] = [0.6538568185875575, -0.4973909989648061, -1.193894850166385, 3.0148972884172895, -1.8143347377410814]
+K[:5] = [2.9312389259269724, -3.258844649746725, 1.8036406103000093, 1.357689451899113, 1.0560145638419136]
+V[:5] = [0.9623841438603136, 2.3718468832439465, 3.991971755226853, -2.348707569815766, 0.6816573311886537]
+After attn residual x2[:5] = [-0.4603778928594371, 3.876840326580335, 0.2564363064736637, 6.902961942623202, 5.232118984029822]
+FC GELU[:5] = [-8.868142635555773e-09, 1.8207991583837513, 0.020371729514288475, -0.0, -0.12322458105077737]
+After layer 0: x3[:5] = [16.48248625893534, -214.87225403352886, 489.9082330085456, -73.80459072460589, 26.734359525910182]
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app#

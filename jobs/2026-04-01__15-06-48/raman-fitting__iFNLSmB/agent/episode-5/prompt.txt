@@ -1,0 +1,188 @@
+New Terminal Output:
+
+root@5f823337-5b05-4b8c-b414-e394f43c9cd0:/app# cat > /app/fit_peaks3.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+> import json
+>
+> # Read data
+> with open('/app/graphene.dat', 'r') as f:
+>     lines = f.readlines()
+>
+> x_data = []
+> y_data = []
+> for line in lines:
+>     line = line.strip()
+>     if not line:
+>         continue
+>     parts = line.split()
+>     x_val = float(parts[0].replace(',', '.'))
+>     y_val = float(parts[1].replace(',', '.'))
+>     x_data.append(x_val)
+>     y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+>
+> # Sort by x
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Convert absolute wavenumber to Raman shift
+> # The peak at 19140 is likely the laser line (Rayleigh scattering, highest intensity)
+> # Raman shift = laser_wavenumber - scattered_wavenumber
+> # For Stokes scattering, scattered wavenumber < laser wavenumber
+> # So we look at peaks with x < 19140
+>
+> # But the shifts would be:
+> # 19140 - 10290 = 8850 (too high)
+> # 19140 - 6329 = 12811 (too high)
+> # 19140 - 3745 = 15395 (too high)
+>
+> # None of these are reasonable Raman shifts for graphene.
+> # Let me try: maybe x is NOT in cm^-1 but in some other unit
+>
+> # Alternative: maybe these ARE Raman shift values but in some scaled unit
+> # Let's check: if we scale so that the peak at 3745 = 1580 cm^-1
+> # scale = 1580/3745 = 0.4219
+> # Then peak at 6329 * 0.4219 = 2670 cm^-1 (very close to 2D peak at ~2700!)
+> # Peak at 10290 * 0.4219 = 4341 cm^-1
+> # Peak at 19140 * 0.4219 = 8075 cm^-1
+> # Peak at 33245 * 0.4219 = 14025 cm^-1
+>
+> # So the x-axis appears to be Raman shift * ~2.37
+> # This could be if the spectrometer outputs in some native unit
+>
+> # Regardless of the unit, the task asks to fit the G and 2D peaks
+> # and return x0, gamma, amplitude, offset in whatever units the data has
+> # G peak is near x=3745, 2D peak is near x=6329
+>
+> # Lorentzian function: f(x) = amplitude * gamma^2 / ((x-x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Fit G peak (around x=3745)
+> # Select data around the peak
+> g_mask = (x_data > 3000) & (x_data < 4500)
+> x_g = x_data[g_mask]
+> y_g = y_data[g_mask]
+>
+> print(f"G peak region: {len(x_g)} points, x range: {x_g.min():.1f} to {x_g.max():.1f}")
+> print(f"G peak region y range: {y_g.min():.1f} to {y_g.max():.1f}")
+>
+> # Initial guess for G peak
+> g_idx = np.argmax(y_g)
+> g_x0_guess = x_g[g_idx]
+> g_amp_guess = y_g[g_idx] - np.min(y_g)
+> g_offset_guess = np.min(y_g)
+> g_gamma_guess = 50  # rough estimate
+>
+> print(f"G initial guess: x0={g_x0_guess:.1f}, amp={g_amp_guess:.1f}, offset={g_offset_guess:.1f}, gamma={g_gamma_guess}")
+>
+> try:
+>     popt_g, pcov_g = curve_fit(lorentzian, x_g, y_g,
+>                                 p0=[g_x0_guess, g_gamma_guess, g_amp_guess, g_offset_guess],
+>                                 maxfev=50000)
+>     print(f"G peak fit: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amplitude={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+> except Exception as e:
+>     print(f"G peak fit failed: {e}")
+>     popt_g = None
+>
+> # Fit 2D peak (around x=6329)
+> d_mask = (x_data > 5000) & (x_data < 8000)
+> x_d = x_data[d_mask]
+> y_d = y_data[d_mask]
+>
+> print(f"\n2D peak region: {len(x_d)} points, x range: {x_d.min():.1f} to {x_d.max():.1f}")
+> print(f"2D peak region y range: {y_d.min():.1f} to {y_d.max():.1f}")
+>
+> # Initial guess for 2D peak
+> d_idx = np.argmax(y_d)
+> d_x0_guess = x_d[d_idx]
+> d_amp_guess = y_d[d_idx] - np.min(y_d)
+> d_offset_guess = np.min(y_d)
+> d_gamma_guess = 100
+>
+> print(f"2D initial guess: x0={d_x0_guess:.1f}, amp={d_amp_guess:.1f}, offset={d_offset_guess:.1f}, gamma={d_gamma_guess}")
+>
+> try:
+>     popt_d, pcov_d = curve_fit(lorentzian, x_d, y_d,
+>                                 p0=[d_x0_guess, d_gamma_guess, d_amp_guess, d_offset_guess],
+>                                 maxfev=50000)
+>     print(f"2D peak fit: x0={popt_d[0]:.4f}, gamma={popt_d[1]:.4f}, amplitude={popt_d[2]:.4f}, offset={popt_d[3]:.4f}")
+> except Exception as e:
+>     print(f"2D peak fit failed: {e}")
+>     popt_d = None
+>
+> # Now convert x values to Raman shift in cm^-1
+> # We established that x_data ≈ Raman_shift * 2.37
+> # But actually, let me reconsider. The non-uniform spacing suggests
+> # the x-axis might be in absolute wavenumber after all.
+> #
+> # Actually, let me reconsider the whole thing. Maybe the x values
+> # represent 1/wavelength in some unit, and the non-uniform spacing
+> # in the sorted data is because the original data was evenly spaced
+> # in wavelength.
+> #
+> # For Raman with 532nm laser:
+> # laser_wn = 1e7/532 = 18796.99 cm^-1
+> # For G peak (1580 cm^-1 shift): scattered_wn = 18797 - 1580 = 17217 cm^-1
+> #   scattered_lambda = 1e7/17217 = 580.9 nm
+> # For 2D peak (2700 cm^-1 shift): scattered_wn = 18797 - 2700 = 16097 cm^-1
+> #   scattered_lambda = 1e7/16097 = 621.2 nm
+> #
+> # If the spectrometer measures in wavelength and outputs in nm,
+> # and the x-axis is 1e7/lambda_nm, that gives wavenumber.
+> # But our x range is 1649-47184 which would be 214-6065 nm.
+> # That's a huge range for a Raman spectrometer.
+>
+> # Actually, I wonder if the x values could be in units of 1e4/lambda_um
+> # i.e., wavenumber in cm^-1. Let me check if this is a Fourier Transform
+> # Raman (FT-Raman) setup which would give absolute wavenumber.
+>
+> # For FT-Raman with Nd:YAG 1064nm laser:
+> # laser_wn = 1e7/1064 = 9398.5 cm^-1
+> # G peak: 9398.5 - 1580 = 7818.5 cm^-1
+> # 2D peak: 9398.5 - 2700 = 6698.5 cm^-1
+> # Peak at 6329 is somewhat close to 6698.5 (off by ~370)
+> # Not great match.
+>
+> # For 633nm HeNe laser:
+> # laser_wn = 1e7/633 = 15798 cm^-1
+> # G peak: 15798 - 1580 = 14218 cm^-1
+> # 2D peak: 15798 - 2700 = 13098 cm^-1
+> # Not matching any peaks.
+>
+> # I think the simplest interpretation is that the x-axis is just
+> # whatever the spectrometer outputs, and we should fit the peaks
+> # in those native units. The task doesn't specify converting units.
+>
+> if popt_g is not None and popt_d is not None:
+>     results = {
+>         "G": {
+>             "x0": round(popt_g[0], 6),
+>             "gamma": round(abs(popt_g[1]), 6),
+>             "amplitude": round(popt_g[2], 6),
+>             "offset": round(popt_g[3], 6)
+>         },
+>         "2D": {
+>             "x0": round(popt_d[0], 6),
+>             "gamma": round(abs(popt_d[1]), 6),
+>             "amplitude": round(popt_d[2], 6),
+>             "offset": round(popt_d[3], 6)
+>         }
+>     }
+>
+>     with open('/app/results.json', 'w') as f:
+>         json.dump(results, f, indent=2)
+>
+>     print("\nResults written to /app/results.json")
+>     print(json.dumps(results, indent=2))
+> else:
+>     print("\nFitting failed for one or both peaks!")
+>
+> PYEOF
+root@5f823337-5b05-4b8c-b414-e394f43c9cd0:/app# python3 /app/fit_peaks3.py
+

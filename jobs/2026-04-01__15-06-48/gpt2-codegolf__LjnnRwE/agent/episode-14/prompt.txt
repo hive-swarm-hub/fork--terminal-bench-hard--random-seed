@@ -1,0 +1,201 @@
+New Terminal Output:
+
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<sys/stat.h>
+> #include<fcntl.h>
+> #define V 50257
+> #define E 768
+> #define L 12
+> #define NH 12
+> #define D 64
+> float*W;
+> int wo[16];
+> char*tk[V];int tl[V];
+> int b2u[256],u2b[512];
+> // KV cache: [layer][pos][dim]
+> float kc[L][1024][E],vc[L][1024][E];
+> float x[E],hb[E],qkv[3*E],hb2[4*E],logits[V];
+> void io(){
+>     int o=0,i;
+>     wo[0]=o;o+=V*E;wo[1]=o;o+=1024*E;
+>     wo[2]=o;o+=L*E;wo[3]=o;o+=L*E;
+>     wo[4]=o;o+=L*E*3*E;wo[5]=o;o+=L*3*E;
+>     wo[6]=o;o+=L*E*E;wo[7]=o;o+=L*E;
+>     wo[8]=o;o+=L*E;wo[9]=o;o+=L*E;
+>     wo[10]=o;o+=L*E*4*E;wo[11]=o;o+=L*4*E;
+>     wo[12]=o;o+=L*4*E*E;wo[13]=o;o+=L*E;
+>     wo[14]=o;o+=E;wo[15]=o;
+>     int n=0;
+>     for(i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))b2u[i]=i;
+>         else b2u[i]=256+n++;
+>     }
+>     for(i=0;i<256;i++)u2b[b2u[i]]=i;
+> }
+> void lv(char*p){
+>     int i;
+>     for(i=0;i<256;i++){
+>         tk[i]=malloc(8);int u=b2u[i];
+>         if(u<128){tk[i][0]=u;tl[i]=1;}
+>         else{tk[i][0]=0xC0|(u>>6);tk[i][1]=0x80|(u&63);tl[i]=2;}
+>         tk[i][tl[i]]=0;
+>     }
+>     FILE*f=fopen(p,"r");char buf[512];
+>     fgets(buf,512,f);
+>     for(i=0;i<50000;i++){
+>         fgets(buf,512,f);
+>         char*sp=strchr(buf,' ');*sp=0;char*b=sp+1;
+>         int bl=strlen(b);if(b[bl-1]=='\n')b[--bl]=0;
+>         int li=-1,ri=-1;
+>         for(int j=0;j<256+i&&(li<0||ri<0);j++){
+>             if(li<0&&tl[j]==(int)strlen(buf)&&!memcmp(tk[j],buf,tl[j]))li=j;
+>             if(ri<0&&tl[j]==bl&&!memcmp(tk[j],b,tl[j]))ri=j;
+>         }
+>         int id=256+i;
+>         tl[id]=tl[li]+tl[ri];
+>         tk[id]=malloc(tl[id]+1);
+>         memcpy(tk[id],tk[li],tl[li]);
+>         memcpy(tk[id]+tl[li],tk[ri],tl[ri]);
+>         tk[id][tl[id]]=0;
+>     }
+>     fclose(f);
+> }
+> int enc(char*text,int*ids){
+>     int n=0,len=strlen(text);
+>     // Convert bytes to unicode-encoded UTF-8 string
+>     char ut[8192];int ul=0;
+>     for(int i=0;i<len;i++){
+>         int u=b2u[(unsigned char)text[i]];
+>         if(u<128)ut[ul++]=u;
+>         else{ut[ul++]=0xC0|(u>>6);ut[ul++]=0x80|(u&63);}
+>     }
+>     // Greedy match each position to longest token
+>     for(int i=0;i<ul;){
+>         int best=0,bl=0;
+>         for(int j=0;j<V-1;j++)
+>             if(tl[j]>bl&&tl[j]<=ul-i&&!memcmp(tk[j],ut+i,tl[j])){best=j;bl=tl[j];}
+>         if(bl==0){i++;continue;}
+>         ids[n++]=best;i+=bl;
+>     }
+>     // Apply BPE merges
+>     for(int m=256;m<V-1;m++){
+>         for(int i=0;i<n-1;i++){
+>             if(tl[ids[i]]+tl[ids[i+1]]==tl[m]&&
+>                !memcmp(tk[ids[i]],tk[m],tl[ids[i]])&&
+>                !memcmp(tk[ids[i+1]],tk[m]+tl[ids[i]],tl[ids[i+1]])){
+>                 ids[i]=m;memmove(ids+i+1,ids+i+2,(n-i-2)*4);n--;i--;
+>             }
+>         }
+>     }
+>     return n;
+> }
+> void dec(int id){
+>     char*s=tk[id];int l=tl[id];
+>     for(int i=0;i<l;){
+>         int u;
+>         if(!(s[i]&0x80)){u=s[i];i++;}
+>         else{u=((s[i]&0x1F)<<6)|(s[i+1]&0x3F);i+=2;}
+>         putchar(u2b[u]);
+>     }
+> }
+> void ln(float*o,float*a,float*w,float*b){
+>     float m=0,v=0;
+>     for(int i=0;i<E;i++)m+=a[i];
+>     m/=E;
+>     for(int i=0;i<E;i++)v+=(a[i]-m)*(a[i]-m);
+>     v=1.f/sqrtf(v/E+1e-5f);
+>     for(int i=0;i<E;i++)o[i]=(a[i]-m)*v*(w[i]+1.f)+b[i];
+> }
+> float gelu(float x){return 0.5f*x*(1.f+tanhf(0.7978845608f*x*(1.f+0.044715f*x*x)));}
+> void fwd(int pos,int tok){
+>     // Embedding
+>     for(int i=0;i<E;i++)x[i]=W[wo[0]+tok*E+i]+W[wo[1]+pos*E+i];
+>     for(int l=0;l<L;l++){
+>         // LN1
+>         ln(hb,x,W+wo[2]+l*E,W+wo[3]+l*E);
+>         // QKV projection
+>         for(int i=0;i<3*E;i++){
+>             float s=W[wo[5]+l*3*E+i];
+>             for(int j=0;j<E;j++)s+=hb[j]*W[wo[4]+l*E*3*E+j*3*E+i];
+>             qkv[i]=s;
+>         }
+>         // Store K,V in cache
+>         memcpy(kc[l][pos],qkv+E,E*4);
+>         memcpy(vc[l][pos],qkv+2*E,E*4);
+>         // Multi-head attention
+>         float*q=qkv;
+>         for(int h=0;h<NH;h++){
+>             float sc=1.f/sqrtf(D);
+>             float mx=-1e9;
+>             for(int t=0;t<=pos;t++){
+>                 float dot=0;
+>                 for(int d=0;d<D;d++)dot+=q[h*D+d]*kc[l][t][h*D+d];
+>                 dot*=sc;
+>                 if(dot>mx)mx=dot;
+>                 hb2[t]=dot;
+>             }
+>             float sm=0;
+>             for(int t=0;t<=pos;t++){hb2[t]=expf(hb2[t]-mx);sm+=hb2[t];}
+>             for(int t=0;t<=pos;t++)hb2[t]/=sm;
+>             // Weighted sum of V
+>             for(int d=0;d<D;d++){
+>                 float s=0;
+>                 for(int t=0;t<=pos;t++)s+=hb2[t]*vc[l][t][h*D+d];
+>                 hb[h*D+d]=s;
+>             }
+>         }
+>         // Attention projection
+>         for(int i=0;i<E;i++){
+>             float s=W[wo[7]+l*E+i];
+>             for(int j=0;j<E;j++)s+=hb[j]*W[wo[6]+l*E*E+j*E+i];
+>             x[i]+=s; // residual
+>         }
+>         // LN2
+>         ln(hb,x,W+wo[8]+l*E,W+wo[9]+l*E);
+>         // MLP fc
+>         for(int i=0;i<4*E;i++){
+>             float s=W[wo[11]+l*4*E+i];
+>             for(int j=0;j<E;j++)s+=hb[j]*W[wo[10]+l*E*4*E+j*4*E+i];
+>             hb2[i]=gelu(s);
+>         }
+>         // MLP proj
+>         for(int i=0;i<E;i++){
+>             float s=W[wo[13]+l*E+i];
+>             for(int j=0;j<4*E;j++)s+=hb2[j]*W[wo[12]+l*4*E*E+j*E+i];
+>             x[i]+=s; // residual
+>         }
+>     }
+>     // Final LN
+>     ln(x,x,W+wo[14],W+wo[15]);
+> }
+> int main(int c,char**v){
+>     io();
+>     int fd=open(v[1],0);struct stat st;fstat(fd,&st);
+>     W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     lv(v[2]);
+>     int ids[1024],T=enc(v[3],ids);
+>     // Process prompt
+>     for(int t=0;t<T;t++)fwd(t,ids[t]);
+>     // Generate 20 tokens
+>     for(int g=0;g<20;g++){
+>         // Compute logits = x @ wte^T
+>         int best=0;float bv=-1e30;
+>         for(int i=0;i<V;i++){
+>             float s=0;
+>             for(int j=0;j<E;j++)s+=x[j]*W[wo[0]+i*E+j];
+>             if(s>bv){bv=s;best=i;}
+>         }
+>         dec(best);fflush(stdout);
+>         ids[T]=best;
+>         fwd(T,best);
+>         T++;
+>     }
+>     printf("\n");
+> }
+> CEOF
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app#

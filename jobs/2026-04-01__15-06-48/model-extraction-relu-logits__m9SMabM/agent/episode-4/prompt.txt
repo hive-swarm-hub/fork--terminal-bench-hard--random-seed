@@ -1,0 +1,142 @@
+New Terminal Output:
+
+root@68e090e6-8d6b-4597-84c0-87cd36544087:/app# cat > /app/steal.py << 'PYEOF'
+ic, axis=1, keepdims=True)
+    normed = atomic / norms
+
+    used = np.zeros(len(normed), dtype=bool)
+    clusters = []
+
+    for i in range(len(normed)):
+        if used[i]:
+            continue
+        members = [atomic[i]]
+        used[i] = True
+        for j in range(i+1, len(normed)):
+            if used[j]:
+                continue
+            cs = abs(np.dot(normed[i], normed[j]))
+            if cs > 0.98:
+                sign = np.sign(np.dot(normed[i], normed[j]))
+                members.append(sign * atomic[j])
+                used[j] = True
+        clusters.append(members)
+
+    print(f"Found {len(clusters)} clusters (expect 20)")
+
+    # Average each cluster to get A2[0,i]*A1[i,:]
+    A1_est = np.array([np.mean(c, axis=0) for c in clusters])
+
+    # Normalize each row to unit norm (since we want A1 up to scaling)
+    row_norms = np.linalg.norm(A1_est, axis=1, keepdims=True)
+    A1_est = A1_est / row_norms
+
+    print(f"Result shape: {A1_est.shape}")
+    return A1_est
+
+if __name__ == "__main__":
+    A1 = steal_A1()
+    np.save('/app/stolen_A1.npy', A1)
+    print(f"Saved to /app/stolen_A1.npy, shape={A1.shape}")
+    print(A1)
+PYEOF
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient via finite differences - 11 forward calls."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         xp = x.copy()
+>         xp[i] += eps
+>         grad[i] = (forward(xp) - f0) / eps
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>     atomic = []  # list of (scaled) A1 rows found
+>
+>     # Line search approach: walk along random lines, detect gradient changes,
+>     # binary search to isolate single-neuron boundaries
+>     n_lines = 80
+>     for li in range(n_lines):
+>         x0 = np.random.randn(10) * 1.5
+>         d = np.random.randn(10)
+>         d /= np.linalg.norm(d)
+>
+>         ts = np.linspace(-4, 4, 40)
+>         prev_g = compute_gradient(x0 + ts[0] * d)
+>
+>         for k in range(1, len(ts)):
+>             cur_g = compute_gradient(x0 + ts[k] * d)
+>             diff = cur_g - prev_g
+>             if np.linalg.norm(diff) > 1e-5:
+>                 # Binary search to narrow down
+>                 lo, hi = ts[k-1], ts[k]
+>                 g_lo = prev_g.copy()
+>                 for _ in range(25):
+>                     mid = (lo + hi) / 2
+>                     g_mid = compute_gradient(x0 + mid * d)
+>                     if np.linalg.norm(g_mid - g_lo) > 1e-7:
+>                         hi = mid
+>                     else:
+>                         lo = mid
+>                         g_lo = g_mid
+>                 # Get the gradient jump
+>                 gb = compute_gradient(x0 + lo * d)
+>                 ga = compute_gradient(x0 + hi * d)
+>                 delta = ga - gb
+>                 if np.linalg.norm(delta) > 1e-5:
+>                     atomic.append(delta)
+>             prev_g = cur_g
+>
+>         if (li + 1) % 20 == 0:
+>             print(f"Line {li+1}/{n_lines}, found {len(atomic)} directions")
+>
+>     print(f"Total directions: {len(atomic)}")
+>     atomic = np.array(atomic)
+>
+>     # Cluster by cosine similarity
+>     norms = np.linalg.norm(atomic, axis=1, keepdims=True)
+>     normed = atomic / norms
+>
+>     used = np.zeros(len(normed), dtype=bool)
+>     clusters = []
+>
+>     for i in range(len(normed)):
+>         if used[i]:
+>             continue
+>         members = [atomic[i]]
+>         used[i] = True
+>         for j in range(i+1, len(normed)):
+>             if used[j]:
+>                 continue
+>             cs = abs(np.dot(normed[i], normed[j]))
+>             if cs > 0.98:
+>                 sign = np.sign(np.dot(normed[i], normed[j]))
+>                 members.append(sign * atomic[j])
+>                 used[j] = True
+>         clusters.append(members)
+>
+>     print(f"Found {len(clusters)} clusters (expect 20)")
+>
+>     # Average each cluster to get A2[0,i]*A1[i,:]
+>     A1_est = np.array([np.mean(c, axis=0) for c in clusters])
+>
+>     # Normalize each row to unit norm (since we want A1 up to scaling)
+>     row_norms = np.linalg.norm(A1_est, axis=1, keepdims=True)
+>     A1_est = A1_est / row_norms
+>
+>     print(f"Result shape: {A1_est.shape}")
+>     return A1_est
+>
+> if __name__ == "__main__":
+>     A1 = steal_A1()
+>     np.save('/app/stolen_A1.npy', A1)
+>     print(f"Saved to /app/stolen_A1.npy, shape={A1.shape}")
+>     print(A1)
+> PYEOF
+root@68e090e6-8d6b-4597-84c0-87cd36544087:/app#

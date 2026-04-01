@@ -1,0 +1,184 @@
+New Terminal Output:
+
+root@32cbc3e8-323b-49b5-b279-ccdccf9ba603:/app# cat > /app/convert_masks.py << 'SCRIPT_EOF'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> from PIL import Image
+> import torch
+> from mobile_sam import sam_model_registry, SamPredictor
+> from tqdm import tqdm
+>
+>
+> def main():
+>     parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+>     parser.add_argument('output_path', type=str, help='Path to output CSV file')
+>     parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+>     parser.add_argument('csv_path', type=str, help='Path to metadata CSV')
+>     args = parser.parse_args()
+>
+>     # Load the image
+>     image = cv2.imread(args.rgb_path)
+>     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+>     h, w = image.shape[:2]
+>
+>     # Load MobileSAM
+>     model_type = "vit_t"
+>     device = "cpu"
+>     sam = sam_model_registry[model_type](checkpoint=args.weights_path)
+>     sam.to(device=device)
+>     sam.eval()
+>     predictor = SamPredictor(sam)
+>     predictor.set_image(image_rgb)
+>
+>     # Read CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     # First pass: get all masks and their scores
+>     all_masks = []
+>     all_scores = []
+>
+>     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Generating masks"):
+>         xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>
+>         # Use bounding box as prompt
+>         input_box = np.array([xmin, ymin, xmax, ymax])
+>
+>         masks, scores, logits = predictor.predict(
+>             point_coords=None,
+>             point_labels=None,
+>             box=input_box[None, :],
+>             multimask_output=True,
+>         )
+>
+>         # Select the mask with the highest score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]
+>         best_score = scores[best_idx]
+>
+>         all_masks.append(best_mask)
+>         all_scores.append(best_score)
+>
+>     # Resolve overlaps: for each pixel, assign to the mask with highest score
+>     # Create a label map where each pixel is assigned to at most one mask
+>     all_masks = np.array(all_masks)  # (N, H, W)
+>     all_scores = np.array(all_scores)  # (N,)
+>
+>     # Find pixels where multiple masks overlap
+>     mask_sum = all_masks.astype(np.int32).sum(axis=0)  # (H, W)
+>     overlap_pixels = mask_sum > 1
+>
+>     if overlap_pixels.any():
+>         # For overlapping pixels, keep only the mask with highest score
+>         # Create score map: for each pixel, the score of each mask
+>         overlap_y, overlap_x = np.where(overlap_pixels)
+>
+>         for py, px in zip(overlap_y, overlap_x):
+>             # Find which masks claim this pixel
+>             claiming_masks = np.where(all_masks[:, py, px])[0]
+>             if len(claiming_masks) > 1:
+>                 # Keep only the one with highest score
+>                 best = claiming_masks[np.argmax(all_scores[claiming_masks])]
+>                 for m in claiming_masks:
+>                     if m != best:
+>                         all_masks[m, py, px] = False
+>
+>     # Now ensure each mask is contiguous (keep only the largest connected component)
+>     # and convert to polylines
+>     new_xmins = []
+>     new_ymins = []
+>     new_xmaxs = []
+>     new_ymaxs = []
+>     new_coords_x = []
+>     new_coords_y = []
+>
+>     for idx in tqdm(range(len(df)), desc="Processing contours"):
+>         mask = all_masks[idx].astype(np.uint8)
+>
+>         # Keep only the largest connected component
+>         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+>
+>         if num_labels > 1:
+>             # Find the largest component (excluding background label 0)
+>             largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>             mask = (labels == largest_label).astype(np.uint8)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         if len(contours) == 0:
+>             # Fallback: use original bounding box as a simple contour
+>             row = df.iloc[idx]
+>             xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>             cx = f"{xmin},{xmax},{xmax},{xmin},{xmin}"
+>             cy = f"{ymin},{ymin},{ymax},{ymax},{ymin}"
+>             new_xmins.append(xmin)
+>             new_ymins.append(ymin)
+>             new_xmaxs.append(xmax)
+>             new_ymaxs.append(ymax)
+>             new_coords_x.append(cx)
+>             new_coords_y.append(cy)
+>             continue
+>
+>         # Take the largest contour
+>         contour = max(contours, key=cv2.contourArea)
+>         contour = contour.squeeze()  # (N, 2)
+>
+>         if contour.ndim == 1:
+>             # Degenerate contour (single point)
+>             row = df.iloc[idx]
+>             xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>             cx = f"{xmin},{xmax},{xmax},{xmin},{xmin}"
+>             cy = f"{ymin},{ymin},{ymax},{ymax},{ymin}"
+>             new_xmins.append(xmin)
+>             new_ymins.append(ymin)
+>             new_xmaxs.append(xmax)
+>             new_ymaxs.append(ymax)
+>             new_coords_x.append(cx)
+>             new_coords_y.append(cy)
+>             continue
+>
+>         xs = contour[:, 0]
+>         ys = contour[:, 1]
+>
+>         xmin_new = int(xs.min())
+>         xmax_new = int(xs.max())
+>         ymin_new = int(ys.min())
+>         ymax_new = int(ys.max())
+>
+>         # Format coords as comma-separated strings
+>         cx = ','.join(map(str, xs.tolist()))
+>         cy = ','.join(map(str, ys.tolist()))
+>
+>         new_xmins.append(xmin_new)
+>         new_ymins.append(ymin_new)
+>         new_xmaxs.append(xmax_new)
+>         new_ymaxs.append(ymax_new)
+>         new_coords_x.append(cx)
+>         new_coords_y.append(cy)
+>
+>     # Update dataframe
+>     df['xmin'] = new_xmins
+>     df['ymin'] = new_ymins
+>     df['xmax'] = new_xmaxs
+>     df['ymax'] = new_ymaxs
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = 'polyline'
+>
+>     # Save output
+>     os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True) if os.path.dirname(args.output_path) else None
+>     df.to_csv(args.output_path, index=False)
+>     print(f"Saved output to {args.output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT_EOF
+[1]-  Done                    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu > /tmp/torch_install.log 2>&1
+[2]+  Done                    wget -q https://raw.githubusercontent.com/ChaoningZhang/MobileSAM/master/weights/mobile_sam.pt -O /app/mobile_sam.pt > /tmp/wget.l
+og 2>&1
+root@32cbc3e8-323b-49b5-b279-ccdccf9ba603:/app#

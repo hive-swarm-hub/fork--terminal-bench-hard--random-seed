@@ -1,0 +1,194 @@
+New Terminal Output:
+
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define L 12
+> #define H 12
+> #define D (E/H)
+> float *W; // mmap'd weights
+> char *tok[V]; // token strings
+> int tl[V]; // token string lengths
+> // Weight offsets (in floats)
+> int wo[16];
+> void init_offsets(){
+>     int o=0;
+>     wo[0]=o; o+=V*E; // wte
+>     wo[1]=o; o+=C*E; // wpe
+>     wo[2]=o; o+=L*E; // ln1w
+>     wo[3]=o; o+=L*E; // ln1b
+>     wo[4]=o; o+=L*E*3*E; // qkvw
+>     wo[5]=o; o+=L*3*E; // qkvb
+>     wo[6]=o; o+=L*E*E; // attprojw
+>     wo[7]=o; o+=L*E; // attprojb
+>     wo[8]=o; o+=L*E; // ln2w
+>     wo[9]=o; o+=L*E; // ln2b
+>     wo[10]=o; o+=L*E*4*E; // fcw
+>     wo[11]=o; o+=L*4*E; // fcb
+>     wo[12]=o; o+=L*4*E*E; // fcprojw
+>     wo[13]=o; o+=L*E; // fcprojb
+>     wo[14]=o; o+=E; // lnfw
+>     wo[15]=o; o+=E; // lnfb
+> }
+> // byte encoder: GPT-2 maps bytes to unicode chars
+> static int b2u[256], u2b[65536];
+> void init_bpe(){
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))
+>             b2u[i]=i;
+>         else
+>             b2u[i]=256+n++;
+>     }
+>     for(int i=0;i<256;i++) u2b[b2u[i]]=i;
+> }
+> void load_vocab(char *path){
+>     // First 256 tokens are single bytes
+>     for(int i=0;i<256;i++){
+>         tok[i]=malloc(8);
+>         int u=b2u[i];
+>         // encode unicode codepoint as UTF-8
+>         if(u<128){tok[i][0]=u;tl[i]=1;}
+>         else if(u<2048){tok[i][0]=0xC0|(u>>6);tok[i][1]=0x80|(u&63);tl[i]=2;}
+>         tok[i][tl[i]]=0;
+>     }
+>     FILE*f=fopen(path,"r");
+>     char buf[256];
+>     fgets(buf,256,f); // skip header
+>     for(int i=0;i<50000;i++){
+>         fgets(buf,256,f);
+>         // find space separator
+>         char*sp=strchr(buf,' ');
+>         *sp=0;
+>         char*b=sp+1;
+>         int bl=strlen(b);
+>         if(b[bl-1]=='\n')b[--bl]=0;
+>         // find token ids for left and right parts
+>         int li=-1,ri=-1;
+>         for(int j=0;j<256+i;j++){
+>             if(li<0&&tl[j]==strlen(buf)&&!memcmp(tok[j],buf,tl[j]))li=j;
+>             if(ri<0&&tl[j]==bl&&!memcmp(tok[j],b,tl[j]))ri=j;
+>             if(li>=0&&ri>=0)break;
+>         }
+>         int id=256+i;
+>         tl[id]=tl[li]+tl[ri];
+>         tok[id]=malloc(tl[id]+1);
+>         memcpy(tok[id],tok[li],tl[li]);
+>         memcpy(tok[id]+tl[li],tok[ri],tl[ri]);
+>         tok[id][tl[id]]=0;
+>     }
+>     fclose(f);
+>     tok[50256]=strdup("<|endoftext|>");
+>     tl[50256]=strlen(tok[50256]);
+> }
+> int encode(char *text, int *tokens){
+>     // convert text bytes to BPE token sequence
+>     int n=0;
+>     // First, each byte becomes its byte-level token
+>     int ids[4096],len=strlen(text);
+>     for(int i=0;i<len;){
+>         // Match longest token
+>         int best=-1,bl=0;
+>         for(int j=0;j<V;j++){
+>             if(tl[j]>bl&&tl[j]<=len-i&&!memcmp(tok[j],text+i,tl[j])){
+>                 best=j;bl=tl[j];
+>             }
+>         }
+>         if(best<0){i++;continue;}
+>         ids[n++]=best;
+>         i+=bl;
+>     }
+>     // Now iteratively apply BPE merges
+>     for(int m=256;m<V-1;m++){
+>         for(int i=0;i<n-1;i++){
+>             // check if ids[i],ids[i+1] form merge m
+>             if(tl[ids[i]]+tl[ids[i+1]]==tl[m]&&
+>                !memcmp(tok[ids[i]],tok[m],tl[ids[i]])&&
+>                !memcmp(tok[ids[i+1]],tok[m]+tl[ids[i]],tl[ids[i+1]])){
+>                 ids[i]=m;
+>                 memmove(ids+i+1,ids+i+2,(n-i-2)*sizeof(int));
+>                 n--;i--;
+>             }
+>         }
+>     }
+>     memcpy(tokens,ids,n*sizeof(int));
+>     return n;
+> }
+> void decode_token(int id){
+>     // Convert token string back to bytes
+>     char*s=tok[id];
+>     int l=tl[id];
+>     for(int i=0;i<l;){
+>         int u;
+>         if((s[i]&0x80)==0){u=s[i];i++;}
+>         else if((s[i]&0xE0)==0xC0){u=((s[i]&0x1F)<<6)|(s[i+1]&0x3F);i+=2;}
+>         else if((s[i]&0xF0)==0xE0){u=((s[i]&0x0F)<<12)|((s[i+1]&0x3F)<<6)|(s[i+2]&0x3F);i+=3;}
+>         else{i++;continue;}
+>         putchar(u2b[u]);
+>     }
+> }
+> float x[C][E], qkv[3*E], att[H][C];
+> float hb[E], hb2[4*E];
+> void layernorm(float*o,float*i,float*w,float*b,int n){
+>     float m=0,v=0;
+>     for(int j=0;j<n;j++)m+=i[j];
+>     m/=n;
+>     for(int j=0;j<n;j++)v+=(i[j]-m)*(i[j]-m);
+>     v=1.0f/sqrtf(v/n+1e-5f);
+>     for(int j=0;j<n;j++)o[j]=(i[j]-m)*v*(w[j]+1.0f)+b[j];
+> }
+> void forward(int*tokens,int T){
+>     // Embedding
+>     for(int t=0;t<T;t++)
+>         for(int i=0;i<E;i++)
+>             x[t][i]=W[wo[0]+tokens[t]*E+i]+W[wo[1]+t*E+i];
+>     // Transformer layers
+>     for(int l=0;l<L;l++){
+>         for(int t=0;t<T;t++){
+>             // LN1
+>             layernorm(hb,x[t],W+wo[2]+l*E,W+wo[3]+l*E,E);
+>             // QKV
+>             for(int i=0;i<3*E;i++){
+>                 float s=W[wo[5]+l*3*E+i];
+>                 for(int j=0;j<E;j++)
+>                     s+=hb[j]*W[wo[4]+l*E*3*E+j*3*E+i];
+>                 qkv[i]=s;
+>             }
+>             // Attention
+>             for(int h=0;h<H;h++){
+>                 float*q=qkv+h*D;
+>                 for(int t2=0;t2<=t;t2++){
+>                     // We need K for t2 - but we only have current t's qkv
+>                     // Need to cache K,V
+>                 }
+>             }
+>         }
+>     }
+> }
+> int main(int argc,char**argv){
+>     init_offsets();
+>     init_bpe();
+>     // mmap weights
+>     int fd=open(argv[1],0);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(0,st.st_size,1,1,fd,0);
+>     load_vocab(argv[2]);
+>     int tokens[C],T=encode(argv[3],tokens);
+>     // Generate 20 tokens
+>     for(int g=0;g<20;g++){
+>         forward(tokens,T);
+>         // argmax over logits
+>         // ...
+>         T++;
+>     }
+> }
+> CEOF
+root@d52fe6f2-d790-4bb9-aac3-e1d7fa966c21:/app#

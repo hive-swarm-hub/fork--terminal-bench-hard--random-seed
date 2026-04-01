@@ -1,0 +1,158 @@
+New Terminal Output:
+
+root@12eed87e-e48e-4d74-8d7f-d63b9399b535:/app# cat -n /app/filter.py
+     1  import sys
+     2  import re
+     3  import html as html_module
+     4
+     5
+     6  def decode_html_entities(s):
+     7      """Decode HTML entities to check for hidden javascript."""
+     8      s = re.sub(r'&#(\d+);?', lambda m: chr(int(m.group(1))) if int(m.group(1)) < 0x110000 else m.group(0), s)
+     9      s = re.sub(r'&#[xX]([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)) if int(m.group(1), 16) < 0x110000 else m.group(0), s)
+    10      s = html_module.unescape(s)
+    11      return s
+    12
+    13
+    14  def is_javascript_url(value):
+    15      """Check if an attribute value is a javascript: URL (with various obfuscation)."""
+    16      decoded = decode_html_entities(value)
+    17      # Remove whitespace, tabs, newlines, null bytes, and control characters
+    18      cleaned = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower()
+    19      return bool(re.match(r'(javascript|vbscript|livescript):', cleaned))
+    20
+    21
+    22  def has_javascript_url(value):
+    23      """Check if a style or other attribute value contains javascript: URL."""
+    24      decoded = decode_html_entities(value)
+    25      cleaned = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower()
+    26      return bool(re.search(r'(javascript|vbscript|livescript):', cleaned))
+    27
+    28
+    29  def remove_javascript(html_content):
+    30      # Remove <script> tags and their contents (including variations)
+    31      html_content = re.sub(
+    32          r'<\s*script[^>]*>.*?<\s*/\s*script\s*>',
+    33          '', html_content, flags=re.IGNORECASE | re.DOTALL
+    34      )
+    35      # Remove self-closing script tags
+    36      html_content = re.sub(
+    37          r'<\s*script[^>]*/\s*>',
+    38          '', html_content, flags=re.IGNORECASE | re.DOTALL
+    39      )
+    40      # Remove orphan opening script tags (no closing tag)
+    41      html_content = re.sub(
+    42          r'<\s*script[^>]*>',
+    43          '', html_content, flags=re.IGNORECASE | re.DOTALL
+    44      )
+    45
+    46      def process_tag(match):
+    47          tag = match.group(0)
+    48
+    49          # Remove event handler attributes (on*)
+    50          tag = re.sub(r'\s+on[a-zA-Z]+\s*=\s*"[^"]*"', '', tag, flags=re.IGNORECASE)
+    51          tag = re.sub(r"\s+on[a-zA-Z]+\s*=\s*'[^']*'", '', tag, flags=re.IGNORECASE)
+    52          tag = re.sub(r'\s+on[a-zA-Z]+\s*=\s*[^\s\'">/][^\s>]*', '', tag, flags=re.IGNORECASE)
+    53
+    54          # Handle javascript: URLs in url-type attributes
+    55          url_attrs = r'(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)'
+    56
+    57          # Double-quoted url attributes
+    58          def check_dq_url(m):
+    59              attr_prefix = m.group(1)
+    60              value = m.group(2)
+    61              if is_javascript_url(value):
+    62                  return attr_prefix + '""'
+    63              return m.group(0)
+    64          tag = re.sub(
+    65              r'(\s+' + url_attrs + r'\s*=\s*)"([^"]*)"',
+    66              check_dq_url, tag, flags=re.IGNORECASE
+    67          )
+    68
+    69          # Single-quoted url attributes
+    70          def check_sq_url(m):
+    71              attr_prefix = m.group(1)
+    72              value = m.group(2)
+    73              if is_javascript_url(value):
+    74                  return attr_prefix + "''"
+    75              return m.group(0)
+    76          tag = re.sub(
+    77              r"(\s+" + url_attrs + r"\s*=\s*)'([^']*)'",
+    78              check_sq_url, tag, flags=re.IGNORECASE
+    79          )
+    80
+    81          # Unquoted url attributes
+    82          def check_uq_url(m):
+    83              attr_prefix = m.group(1)
+    84              value = m.group(2)
+    85              if is_javascript_url(value):
+    86                  return attr_prefix + '""'
+    87              return m.group(0)
+    88          tag = re.sub(
+    89              r'(\s+' + url_attrs + r'\s*=\s*)([^\s\'">/][^\s>]*)',
+    90              check_uq_url, tag, flags=re.IGNORECASE
+    91          )
+    92
+    93          # Handle style attributes containing javascript/expression
+    94          def check_style_dq(m):
+    95              prefix = m.group(1)
+    96              value = m.group(2)
+    97              if has_javascript_url(value) or re.search(r'expression\s*\(', decode_html_entities(value), re.IGNORECASE):
+    98                  cleaned_val = re.sub(r'[^;]*(?:javascript|vbscript|expression)\s*[:(][^;]*;?', '', value, flags=re.IGNORECASE)
+    99                  return prefix + '"' + cleaned_val + '"'
+   100              return m.group(0)
+   101          tag = re.sub(
+   102              r'(\s+style\s*=\s*)"([^"]*)"',
+   103              check_style_dq, tag, flags=re.IGNORECASE
+   104          )
+   105
+   106          def check_style_sq(m):
+   107              prefix = m.group(1)
+   108              value = m.group(2)
+   109              if has_javascript_url(value) or re.search(r'expression\s*\(', decode_html_entities(value), re.IGNORECASE):
+   110                  cleaned_val = re.sub(r'[^;]*(?:javascript|vbscript|expression)\s*[:(][^;]*;?', '', value, flags=re.IGNORECASE)
+   111                  return prefix + "'" + cleaned_val + "'"
+   112              return m.group(0)
+   113          tag = re.sub(
+   114              r"(\s+style\s*=\s*)'([^']*)'",
+   115              check_style_sq, tag, flags=re.IGNORECASE
+   116          )
+   117
+   118          return tag
+   119
+   120      # Process all opening HTML tags
+   121      html_content = re.sub(r'<[a-zA-Z][^>]*>', process_tag, html_content)
+   122
+   123      # Remove meta refresh with javascript URL
+   124      def clean_meta_tags(match):
+   125          tag = match.group(0)
+   126          if re.search(r'http-equiv\s*=\s*["\']?refresh["\']?', tag, re.IGNORECASE):
+   127              decoded_tag = decode_html_entities(tag)
+   128              if re.search(r'(?:javascript|vbscript)\s*:', decoded_tag, re.IGNORECASE):
+   129                  return ''
+   130          return tag
+   131
+   132      html_content = re.sub(r'<\s*meta[^>]*>', clean_meta_tags, html_content, flags=re.IGNORECASE)
+   133
+   134      return html_content
+   135
+   136
+   137  def main():
+   138      if len(sys.argv) < 2:
+   139          print("Usage: python filter.py <html_file>", file=sys.stderr)
+   140          sys.exit(1)
+   141
+   142      filepath = sys.argv[1]
+   143
+   144      with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+   145          content = f.read()
+   146
+   147      cleaned = remove_javascript(content)
+   148
+   149      with open(filepath, 'w', encoding='utf-8') as f:
+   150          f.write(cleaned)
+   151
+   152
+   153  if __name__ == '__main__':
+   154      main()
+root@12eed87e-e48e-4d74-8d7f-d63b9399b535:/app#
