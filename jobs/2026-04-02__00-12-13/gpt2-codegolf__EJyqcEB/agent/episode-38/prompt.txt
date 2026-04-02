@@ -1,0 +1,90 @@
+New Terminal Output:
+
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app# python3 << 'PYEOF'
+> import struct
+>
+> # Verify tokenization of "Hello" matches expected GPT-2 tokenization
+> # GPT-2 tokenizes "Hello" as [15496]
+> # Let's check: H=72, e=101, l=108, l=108, o=111
+> # In GPT-2 byte-level BPE:
+> # H -> token for byte 72 (which is 'H', printable, so token index = 72-33 = 39)
+> # e -> token for byte 101 (printable, 101-33 = 68)
+> # l -> token for byte 108 (printable, 108-33 = 75)
+> # o -> token for byte 111 (printable, 111-33 = 78)
+>
+> # Actually, let me build the b2t mapping
+> b2t = [0]*256
+> idx = 0
+> for i in range(33, 127): b2t[i] = idx; idx += 1
+> for i in range(161, 173): b2t[i] = idx; idx += 1
+> for i in range(174, 256): b2t[i] = idx; idx += 1
+> for i in range(0, 33): b2t[i] = idx; idx += 1
+> for i in range(127, 161): b2t[i] = idx; idx += 1
+> b2t[173] = idx; idx += 1
+>
+> print(f'H(72) -> token {b2t[72]}')
+> print(f'e(101) -> token {b2t[101]}')
+> print(f'l(108) -> token {b2t[108]}')
+> print(f'o(111) -> token {b2t[111]}')
+>
+> # Expected: "Hello" should tokenize to token 15496 in GPT-2
+> # The BPE merges would combine H+e -> He, l+l -> ll, He+ll -> Hell, Hell+o -> Hello
+> # Token 15496 should be "Hello"
+>
+> # Let's verify by reading vocab.bpe and building the vocab
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> b2u = bytes_to_unicode()
+> u2b_map = {v: k for k, v in b2u.items()}
+>
+> vocab = {}
+> for b in range(256):
+>     vocab[chr(b2u[b]) if b2u[b] < 128 else chr(b2u[b])] = b2t[b]
+>
+> # Actually let me just count: after applying all merges, "Hello" should become 1 token
+> # The key question is whether our C code produces the right tokenization
+>
+> # Let's read the first few merge rules and trace
+> with open('vocab.bpe', 'r') as f:
+>     lines = f.readlines()
+>
+> # Find merges that would apply to H, e, l, l, o
+> # Starting tokens: H(39), e(68), l(75), l(75), o(78)
+> print('\nLooking for relevant merges...')
+> for i, line in enumerate(lines[1:], 256):  # merges start at token 256
+>     line = line.strip()
+>     if not line: continue
+>     parts = line.split(' ', 1)
+>     if len(parts) != 2: continue
+>     a, b = parts
+>     # Convert to bytes
+>     ab = ''
+>     bb = ''
+>     for ch in a:
+>         if ch in u2b_map:
+>             ab += chr(u2b_map[ch])
+>     for ch in b:
+>         if ch in u2b_map:
+>             bb += chr(u2b_map[ch])
+>     merged = ab + bb
+>     if merged in ['He', 'll', 'lo', 'Hel', 'Hell', 'Hello', 'Helo', 'llo', 'ello', 'Hell']:
+>         print(f'  Merge {i}: "{a}" + "{b}" = "{merged}" (token {i})')
+>     if i > 50256: break
+> PYEOF
+H(72) -> token 39
+e(101) -> token 68
+l(108) -> token 75
+o(111) -> token 78
+Traceback (most recent call last):
+  File "<stdin>", line 48, in <module>
+TypeError: '<' not supported between instances of 'str' and 'int'
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app#

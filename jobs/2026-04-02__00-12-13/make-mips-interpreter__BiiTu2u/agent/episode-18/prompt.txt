@@ -1,0 +1,122 @@
+New Terminal Output:
+8:        case SYS_rename: {
+root@940047d9-049c-4248-9a42-56d45b6ee417:/app# grep -n 'basic_malloc\|fixed_malloc\|heap\|HEAP' doomgeneric/doomgeneric/my_stdlib.c | head -20
+949:#define HEAP_SIZE (1024 * 1024 * 1024)  // 1 GB static heap
+950:static unsigned char heap[HEAP_SIZE] __attribute__((aligned(64)));  // Cache line aligned
+951:static size_t heap_pos = 0;  // Current position in the heap
+996:void* basic_malloc(size_t size) {
+1044:    // No free block found, allocate from the heap
+1045:    if (heap_pos + total_size > HEAP_SIZE)
+1048:    // Create a new block at the current heap position
+1049:    block_header_t* new_block = (block_header_t*)(heap + heap_pos);
+1051:    heap_pos += total_size;
+1065:    if ((void*)block < (void*)heap || (void*)block >= (void*)(heap + heap_pos))
+1097:        // Allocate pool from the heap
+1098:        fixed_pools[i].memory = heap + heap_pos;
+1110:        heap_pos += pool_size;
+1117:static void* fixed_malloc(size_t size) {
+1169:        void* ptr = fixed_malloc(size);
+1174:    return basic_malloc(size);
+root@940047d9-049c-4248-9a42-56d45b6ee417:/app# sed -n '1100,1200p' doomgeneric/doomgeneric/my_stdlib.c
+        fixed_pools[i].used_count = 0;
+        fixed_pools[i].free_chunks = NULL;
+
+        // Initialize all chunks as free
+        for (size_t j = 0; j < POOL_CHUNK_COUNT; j++) {
+            void* chunk = fixed_pools[i].memory + (j * chunk_size);
+            *((void**)chunk) = fixed_pools[i].free_chunks;
+            fixed_pools[i].free_chunks = chunk;
+        }
+
+        heap_pos += pool_size;
+    }
+
+    initialized = 1;
+}
+
+// Fast fixed-size allocation
+static void* fixed_malloc(size_t size) {
+    init_fixed_pools();
+
+    const size_t sizes[NUM_POOLS] = POOL_SIZES;
+
+    // Find appropriate pool
+    for (int i = 0; i < NUM_POOLS; i++) {
+        if (sizes[i] >= size && fixed_pools[i].free_chunks) {
+            // Get a chunk from the free list
+            void* chunk = fixed_pools[i].free_chunks;
+            fixed_pools[i].free_chunks = *((void**)chunk);
+            fixed_pools[i].used_count++;
+            return chunk;
+        }
+    }
+
+    return NULL;  // No suitable pool or no free chunks
+}
+
+// Fast fixed-size free
+static size_t get_block_size(void* ptr) {
+    block_header_t* block = (block_header_t*)((char*)ptr - HEADER_SIZE);
+    return block->size;
+}
+    static int fixed_free(void* ptr) {
+    for (int i = 0; i < NUM_POOLS; i++) {
+        unsigned char* pool_start = fixed_pools[i].memory;
+        unsigned char* pool_end = pool_start + (POOL_CHUNK_COUNT * fixed_pools[i].chunk_size);
+
+        if ((unsigned char*)ptr >= pool_start && (unsigned char*)ptr < pool_end) {
+            // Check alignment
+            size_t offset = (unsigned char*)ptr - pool_start;
+            if (offset % fixed_pools[i].chunk_size != 0)
+                return 0;  // Not properly aligned
+
+            // Add back to free list
+            *((void**)ptr) = fixed_pools[i].free_chunks;
+            fixed_pools[i].free_chunks = ptr;
+            fixed_pools[i].used_count--;
+            return 1;  // Successfully freed
+        }
+    }
+
+    return 0;  // Not in our pools
+}
+
+// Main malloc with fast path for common sizes
+void* malloc(size_t size) {
+    if (size == 0) return NULL;
+
+    // Try fixed-size allocation for small sizes
+    if (size <= 128) {
+        void* ptr = fixed_malloc(size);
+        if (ptr) return ptr;
+    }
+
+    // Fall back to basic malloc
+    return basic_malloc(size);
+}
+
+// realloc implementation
+// Minimal realloc implementation - just malloc/copy/free
+void* realloc(void* ptr, size_t size) {
+    // Handle special cases
+    if (ptr == NULL) {
+        return malloc(size);  // If ptr is NULL, behave like malloc
+    }
+
+    if (size == 0) {
+        free(ptr);  // If size is 0, behave like free
+        return NULL;
+    }
+
+    // Get old size from block header
+    block_header_t* block = (block_header_t*)((char*)ptr - HEADER_SIZE);
+    size_t old_data_size = block->size - HEADER_SIZE;
+
+    // Allocate new block
+    void* new_ptr = malloc(size);
+    if (new_ptr == NULL) {
+        return NULL;  // Out of memory
+    }
+
+    // Copy data (use the smaller of old and new size)
+root@940047d9-049c-4248-9a42-56d45b6ee417:/app#

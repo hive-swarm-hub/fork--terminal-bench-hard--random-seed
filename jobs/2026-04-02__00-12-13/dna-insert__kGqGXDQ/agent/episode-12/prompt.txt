@@ -1,0 +1,164 @@
+New Terminal Output:
+
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app# python3 << 'EOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.upper()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> primer_seqs = parse_fasta('primers.fasta')
+> fwd_primer = primer_seqs['forward_primer']
+> rev_primer = primer_seqs['reverse_primer']
+>
+> print(f"Forward primer: {fwd_primer}")
+> print(f"Reverse primer: {rev_primer}")
+> print()
+>
+> # For the forward primer, find where its 3' end anneals to the input template
+> # The annealing part is the 3' portion that matches the template
+> # Try different annealing lengths from the 3' end
+> fwd_anneal = None
+> fwd_tail = None
+> for anneal_len in range(15, 46):
+>     candidate = fwd_primer[-anneal_len:]
+>     # Check if this sequence appears in the input (or its double for circular)
+>     doubled = input_seq + input_seq
+>     pos = doubled.find(candidate)
+>     if pos >= 0:
+>         if fwd_anneal is None or anneal_len > len(fwd_anneal):
+>             fwd_anneal = candidate
+>             fwd_tail = fwd_primer[:-anneal_len]
+>             fwd_pos = pos % len(input_seq)
+>
+> print(f"Forward annealing region: {fwd_anneal} ({len(fwd_anneal)}bp)")
+> print(f"Forward 5' tail (insertion): {fwd_tail} ({len(fwd_tail)}bp)")
+> print(f"Forward annealing position on input: {fwd_pos}")
+>
+> # For the reverse primer, find where it anneals to the input template
+> # The reverse primer sequence is the same as the reverse complement of the template region
+> rev_anneal = None
+> for anneal_len in range(15, 46):
+>     candidate = rev_primer[:anneal_len]  # Try from 3' end perspective
+>     # The reverse primer anneals to the opposite strand
+>     # So we look for the reverse complement of the primer in the template
+>     rc_candidate = reverse_complement(rev_primer)
+>
+> rc_rev = reverse_complement(rev_primer)
+> doubled = input_seq + input_seq
+> pos = doubled.find(rc_rev)
+> if pos >= 0:
+>     rev_anneal = rev_primer
+>     rev_pos = pos % len(input_seq)
+>     print(f"\nReverse primer anneals at input position: {rev_pos} to {(rev_pos + len(rev_primer)) % len(input_seq)}")
+>     print(f"Reverse complement of rev primer: {rc_rev}")
+>     print(f"Template at that position: {doubled[pos:pos+len(rev_primer)]}")
+> else:
+>     # Try finding partial matches
+>     print(f"\nReverse complement of full rev primer: {rc_rev}")
+>     # Check where it matches
+>     for start in range(len(doubled) - len(rc_rev)):
+>         if doubled[start:start+20] == rc_rev[:20]:
+>             print(f"Partial match at position {start % len(input_seq)}")
+>             break
+>
+> # Verify Tm
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_primer)  # entire rev primer is annealing region
+> print(f"\nForward annealing Tm: {fwd_tm:.2f}")
+> print(f"Reverse annealing Tm: {rev_tm:.2f}")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}")
+>
+> # Simulate Q5 SDM product
+> # The plasmid is circular. The primers amplify the entire plasmid linearly.
+> # Forward primer starts at position fwd_pos on the template, going forward
+> # Reverse primer starts at some position, going backward (on opposite strand)
+> # The product is: fwd_tail + template from fwd_pos to rev_primer_end + ligation
+>
+> # For insertion:
+> # Forward primer anneals starting at position 215 (CAAGGGCGAGGAG...)
+> # Reverse primer anneals ending at position 215 (going backward from 214)
+> # Product after KLD (kinase-ligase-DpnI):
+> #   fwd_tail + input[215:] + input[:215] (circularized with the insertion)
+> # Which gives: input[:215] + fwd_tail + input[215:]
+>
+> product = input_seq[:215] + fwd_tail + input_seq[215:]
+> print(f"\nSimulated product length: {len(product)}")
+> print(f"Output sequence length: {len(output_seq)}")
+>
+> if product == output_seq:
+>     print("\n✅ VERIFIED: Simulated product matches output sequence exactly!")
+> else:
+>     print("\n❌ ERROR: Product does not match output!")
+>     for i in range(min(len(product), len(output_seq))):
+>         if product[i] != output_seq[i]:
+>             print(f"First diff at pos {i}")
+>             print(f"Product: ...{product[i-10:i+20]}...")
+>             print(f"Output:  ...{output_seq[i-10:i+20]}...")
+>             break
+>
+> # Final constraint check
+> print("\n=== Constraint Verification ===")
+> print(f"Fwd annealing length: {len(fwd_anneal)} (15-45: {'✅' if 15 <= len(fwd_anneal) <= 45 else '❌'})")
+> print(f"Rev annealing length: {len(rev_primer)} (15-45: {'✅' if 15 <= len(rev_primer) <= 45 else '❌'})")
+> print(f"Fwd Tm: {fwd_tm:.2f} (58-72: {'✅' if 58 <= fwd_tm <= 72 else '❌'})")
+> print(f"Rev Tm: {rev_tm:.2f} (58-72: {'✅' if 58 <= rev_tm <= 72 else '❌'})")
+> print(f"Tm diff: {abs(fwd_tm - rev_tm):.2f} (<=5: {'✅' if abs(fwd_tm - rev_tm) <= 5 else '❌'})")
+> print(f"Number of primer pairs: 1 (minimum needed: ✅)")
+> EOF
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+
+Forward annealing region: AGCAAGGGCGAGGAGCTGTT (20bp)
+Forward 5' tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (37bp)
+Forward annealing position on input: 213
+
+Reverse primer anneals at input position: 170 to 215
+Reverse complement of rev primer: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Template at that position: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+
+Forward annealing Tm: 68.19
+Reverse annealing Tm: 63.81
+Tm difference: 4.39
+
+Simulated product length: 3628
+Output sequence length: 3630
+
+❌ ERROR: Product does not match output!
+First diff at pos 252
+Product: ...ATTAACAGAACAAGGGCGAGGAGCTGTTCA...
+Output:  ...ATTAACAGAAAGCAAGGGCGAGGAGCTGTT...
+
+=== Constraint Verification ===
+Fwd annealing length: 20 (15-45: ✅)
+Rev annealing length: 45 (15-45: ✅)
+Fwd Tm: 68.19 (58-72: ✅)
+Rev Tm: 63.81 (58-72: ✅)
+Tm diff: 4.39 (<=5: ✅)
+Number of primer pairs: 1 (minimum needed: ✅)
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app#

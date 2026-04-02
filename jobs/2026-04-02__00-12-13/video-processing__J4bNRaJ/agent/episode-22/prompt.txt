@@ -1,0 +1,220 @@
+New Terminal Output:
+
+root@d59e3ff1-740c-4afa-984e-19c6fc1c2ffa:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+
+> import sys
+>
+=>
+ > def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         print(f"Error: Cannot open video {video_path}")
+>         sys.exit(1)
+>
+ >     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+c>     # Read first frame as background
+>     ret, bg = cap.read()
+>     if not ret:
+>         print("Error: Cannot read first frame")
+>         sys.exit(1)
+>     bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+d>     # Collect per-frame metrics
+>     frame_data = []
+>
+o>     for i in range(1, total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+m>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = cv2.absdiff(gray, bg_gray)
+>         _, mask = cv2.threshold(diff.astype(np.uint8), 25, 255, cv2.THRESH_BINARY)
+>
+ >         kernel = np.ones((5, 5), np.uint8)
+p>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>
+:>         fg_pixels = np.sum(mask > 0)
+>
+
+>         if fg_pixels > 1000:
+>             ys, xs = np.where(mask > 0)
+>             # Filter to focus on the main athlete blob
+>             # Use the largest connected component
+>             num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+>             if num_labels > 1:
+>                 # Get all components sorted by area (descending), skip background
+>                 areas = stats[1:, cv2.CC_STAT_AREA]
+f >                 sorted_indices = np.argsort(areas)[::-1] + 1  # +1 to skip bg label
+>
+>                 # Use the largest component that's big enough
+>                 best_label = sorted_indices[0]
+>                 athlete_mask = (labels == best_label).astype(np.uint8)
+>
+c>                 # Also merge nearby components that might be part of the athlete
+>                 for idx in sorted_indices[1:]:
+>                     comp_area = stats[idx, cv2.CC_STAT_AREA]
+>                     if comp_area < 200:
+>                         continue
+>                     # Check if this component overlaps in x-range with the main component
+>                     main_x = stats[best_label, cv2.CC_STAT_LEFT]
+>                     main_w = stats[best_label, cv2.CC_STAT_WIDTH]
+>                     comp_x = stats[idx, cv2.CC_STAT_LEFT]
+>                     comp_w = stats[idx, cv2.CC_STAT_WIDTH]
+>                     # Check x overlap
+e>                     if comp_x < main_x + main_w + 50 and comp_x + comp_w > main_x - 50:
+>                         athlete_mask = athlete_mask | (labels == idx).astype(np.uint8)
+>
+>                 ays, axs = np.where(athlete_mask > 0)
+>                 if len(ays) > 500:
+>                     bottom_y = np.max(ays)
+>                     top_y = np.min(ays)
+>                     cx = np.mean(axs)
+>                     cy = np.mean(ays)
+>                     p95_y = np.percentile(ays, 95)
+>                     frame_data.append({
+>                         'frame': i,
+>                         'pixels': len(ays),
+>                         'bottom_y': bottom_y,
+>                         'top_y': top_y,
+>                         'p95_y': p95_y,
+>                         'centroid_x': cx,
+>                         'centroid_y': cy
+>                     })
+>                     continue
+>
+>         frame_data.append({
+>             'frame': i,
+>             'pixels': 0,
+>             'bottom_y': -1,
+>             'top_y': -1,
+>             'p95_y': -1,
+>             'centroid_x': -1,
+>             'centroid_y': -1
+>         })
+>
+>     cap.release()
+>
+>     # Filter to frames with significant athlete presence
+>     athlete_frames = [d for d in frame_data if d['pixels'] > 2000]
+>
+>     if not athlete_frames:
+>         # Try lower threshold
+>         athlete_frames = [d for d in frame_data if d['pixels'] > 1000]
+>
+>     if not athlete_frames:
+>         print("Error: No athlete detected in video")
+>         sys.exit(1)
+>
+>     # Sort by frame number
+>     athlete_frames.sort(key=lambda x: x['frame'])
+>
+>     # Find contiguous blocks
+>     blocks = []
+>     current_block = [athlete_frames[0]]
+>     for i in range(1, len(athlete_frames)):
+>         if athlete_frames[i]['frame'] - athlete_frames[i-1]['frame'] <= 3:
+>             current_block.append(athlete_frames[i])
+>         else:
+>             blocks.append(current_block)
+>             current_block = [athlete_frames[i]]
+>     blocks.append(current_block)
+>
+>     # Use the longest block as the main athlete sequence
+>     main_block = max(blocks, key=len)
+>
+>     frames_nums = np.array([d['frame'] for d in main_block])
+>     bottom_ys = np.array([d['bottom_y'] for d in main_block])
+>     p95_ys = np.array([d['p95_y'] for d in main_block])
+>     centroid_ys = np.array([d['centroid_y'] for d in main_block])
+>
+>     # Use bottom_y (max_y) for detection
+>     # During running, bottom_y is high (feet on ground ~350-360)
+>     # During jump, bottom_y drops significantly
+>
+>     # Smooth the bottom_y signal
+>     if len(bottom_ys) >= 5:
+>         smoothed = np.convolve(bottom_ys, np.ones(3)/3, mode='same')
+>         # Fix edges
+>         smoothed[0] = bottom_ys[0]
+>         smoothed[-1] = bottom_ys[-1]
+>     else:
+>         smoothed = bottom_ys.copy()
+>
+>     # Find the minimum (peak of jump)
+>     peak_idx = np.argmin(smoothed)
+>     peak_val = smoothed[peak_idx]
+>
+>     # Baseline: use the maximum of bottom_y in the first and last quarter
+>     n = len(smoothed)
+>     q = max(2, n // 4)
+>     baseline_start = np.max(smoothed[:q])
+>     baseline_end = np.max(smoothed[max(0, n-q):])
+>     baseline = max(baseline_start, baseline_end)
+>
+>     # Jump height (in pixels)
+>     jump_height = baseline - peak_val
+>
+>     if jump_height < 20:
+>         # No significant jump detected, use centroid_y instead
+>         peak_idx = np.argmin(centroid_ys)
+>         peak_val = centroid_ys[peak_idx]
+>         baseline = np.max(centroid_ys)
+>         jump_height = baseline - peak_val
+>
+>     # Threshold for takeoff/landing: when bottom_y crosses a threshold
+>     # Use 80% of the way from peak to baseline (so close to the ground level)
+>     threshold = peak_val + jump_height * 0.80
+>
+>     # Find takeoff: scanning backward from peak, find where bottom_y first exceeds threshold
+>     takeoff_idx = 0
+>     for i in range(peak_idx, -1, -1):
+>         if smoothed[i] >= threshold:
+>             takeoff_idx = i
+>             break
+>
+>     # Find landing: scanning forward from peak, find where bottom_y first exceeds threshold
+>     land_idx = len(smoothed) - 1
+>     for i in range(peak_idx, len(smoothed)):
+>         if smoothed[i] >= threshold:
+>             land_idx = i
+>             break
+>
+>     takeoff_frame = int(frames_nums[takeoff_idx])
+>     land_frame = int(frames_nums[land_idx])
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@d59e3ff1-740c-4afa-984e-19c6fc1c2ffa:/app#

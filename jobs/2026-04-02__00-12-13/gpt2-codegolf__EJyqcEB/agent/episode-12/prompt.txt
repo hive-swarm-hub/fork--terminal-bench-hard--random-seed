@@ -1,0 +1,95 @@
+New Terminal Output:
+
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define E 768
+> #define H 12
+> #define V 50257
+> #define ML 1024
+> float *W;  // mmap'd weights
+> char *tok[V]; // token strings
+> int ntok=256;
+> // alphabetical layer order: 0,1,10,11,2,3,4,5,6,7,8,9
+> int lo[]={0,1,10,11,2,3,4,5,6,7,8,9};
+> float x[ML][E], buf[E], buf2[E], qkv[3*E], att[H][ML];
+> float fc[4*E], fc2[4*E];
+>
+> float *lw(int li, int off) {
+>     // each layer has: c_attn/b(2304), c_attn/w(1769472), c_proj/b(768), c_proj/w(589824),
+>     // ln_1/b(768), ln_1/g(768), ln_2/b(768), ln_2/g(768),
+>     // mlp/c_fc/b(3072), mlp/c_fc/w(2359296), mlp/c_proj/b(768), mlp/c_proj/w(2359296)
+>     // total per layer = 7087872
+>     int base = 0;
+>     for(int i=0;i<12;i++) if(lo[i]==li) { base=i*7087872; break; }
+>     int offsets[]={0,2304,2304+1769472,2304+1769472+768,2304+1769472+768+589824,
+>         2304+1769472+768+589824+768,2304+1769472+768+589824+768+768,
+>         2304+1769472+768+589824+768+768+768,2304+1769472+768+589824+768+768+768+768,
+>         2304+1769472+768+589824+768+768+768+768+3072,
+>         2304+1769472+768+589824+768+768+768+768+3072+2359296,
+>         2304+1769472+768+589824+768+768+768+768+3072+2359296+768};
+>     return W+base+offsets[off];
+> }
+>
+> void layernorm(float *o, float *inp, float *g, float *b) {
+>     float m=0,v=0;
+>     for(int i=0;i<E;i++) m+=inp[i];
+>     m/=E;
+>     for(int i=0;i<E;i++) v+=(inp[i]-m)*(inp[i]-m);
+>     v=v/E+1e-5;
+>     for(int i=0;i<E;i++) o[i]=g[i]*(inp[i]-m)/sqrtf(v)+b[i];
+> }
+>
+> float gelu(float x){return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+>
+> void forward(int T, int *tokens) {
+>     // wpe at offset 12*7087872 + 2*768 = 85056000
+>     // wte at offset 85056000 + 1024*768 = 85842432
+>     float *wpe = W + 85056000;
+>     float *wte = W + 85842432;
+>     float *lnfg = W + 85054464 + 768; // ln_f/g
+>     float *lnfb = W + 85054464;       // ln_f/b
+>     for(int t=0;t<T;t++)
+>         for(int i=0;i<E;i++)
+>             x[t][i] = wte[tokens[t]*E+i] + wpe[t*E+i];
+>     for(int L=0;L<12;L++) {
+>         float *ab=lw(L,0),*aw=lw(L,1),*pb=lw(L,2),*pw=lw(L,3);
+>         float *l1b=lw(L,4),*l1g=lw(L,5),*l2b=lw(L,6),*l2g=lw(L,7);
+>         float *fb=lw(L,8),*fw=lw(L,9),*fpb=lw(L,10),*fpw=lw(L,11);
+>         for(int t=0;t<T;t++) {
+>             layernorm(buf,x[t],l1g,l1b);
+>             // QKV = buf @ aw + ab  (aw is [768, 2304])
+>             for(int i=0;i<3*E;i++) {
+>                 float s=ab[i];
+>                 for(int j=0;j<E;j++) s+=buf[j]*aw[j*3*E+i];
+>                 qkv[i]=s;
+>             }
+>             // multi-head attention
+>             int hs=E/H;
+>             for(int h=0;h<H;h++) {
+>                 float *q=qkv+h*hs;
+>                 for(int t2=0;t2<=t;t2++) {
+>                     // need K for t2 - recompute from x[t2]
+>                     // Actually we need cached KV. Let me store them.
+>                     // This is too expensive to recompute. Let me restructure.
+>                     // For now, compute attention score
+>                     att[h][t2]=0;
+>                 }
+>             }
+>             // This approach won't work for <5000 bytes with full KV cache
+>             // Let me use a simpler approach
+>         }
+>     }
+> }
+>
+> int main(int argc, char **argv) {
+>     printf("Hello GPT-2\n");
+>     return 0;
+> }
+> CEOF
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app#

@@ -1,0 +1,244 @@
+New Terminal Output:
+
+root@48752eef-d652-4664-babe-a8dcbb4fce7c:/app# cat > /app/filter.py << 'PYTHON_EOF'
+ript> tags and their contents
+    ht> import sys
+> import re
+> import html
+>
+>
+> def decode_html_entities(s):
+>     """Decode HTML entities for comparison purposes."""
+>     return html.unescape(s)
+>
+>
+> def has_js_protocol(value):
+>     """Check if an attribute value contains javascript: protocol, accounting for obfuscation."""
+>     decoded = decode_html_entities(value)
+>     # Remove whitespace characters (tabs, newlines, carriage returns, null bytes, zero-width chars)
+>     cleaned = re.sub(r'[\s\x00\x0B\x0C]+', '', decoded).lower()
+>     if cleaned.startswith('javascript:'):
+>         return True
+>     if cleaned.startswith('vbscript:'):
+>         return True
+>     return False
+>
+>
+> def has_dangerous_data_uri(value):
+>     """Check if a data: URI contains script content."""
+>     decoded = decode_html_entities(value)
+>     cleaned = re.sub(r'[\s\x00]+', '', decoded).lower()
+>     if cleaned.startswith('data:') and ('text/html' in cleaned or 'application/xhtml' in cleaned):
+>         return True
+>     return False
+>
+>
+> def process_tag(tag_str):
+>     """Process an HTML tag, removing dangerous attributes."""
+>     # Don't process comments, doctypes, or closing tags
+>     if tag_str.startswith('<!--') or tag_str.startswith('<!') or tag_str.startswith('</'):
+>         return tag_str
+>
+>     # Extract tag name
+>     tag_name_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', tag_str)
+>     if not tag_name_match:
+>         return tag_str
+>
+>     # Get everything after the tag name
+>     rest = tag_str[tag_name_match.end():]
+>
+>     result_parts = ['<' + tag_name_match.group(1)]  # preserve original case
+>
+>     pos = 0
+>     while pos < len(rest):
+>         # Match leading whitespace or / separator
+>         ws_match = re.match(r'([\s/]+)', rest[pos:])
+>         if ws_match:
+>             separator = ws_match.group(1)
+>             pos += ws_match.end()
+>         else:
+>             separator = ''
+>
+>         if pos >= len(rest):
+>             result_parts.append(separator)
+>             break
+>
+>         if rest[pos] == '>':
+>             result_parts.append(separator + '>')
+>             pos += 1
+>             break
+>
+>         # Try to match an attribute
+>         attr_match = re.match(
+>             r'([a-zA-Z_][a-zA-Z0-9_\-:]*)'
+>             r'(?:\s*=\s*'
+>             r'(?:"([^"]*)"'
+>             r"|'([^']*)'"
+>             r'|([^\s>]*))'
+>             r')?',
+>             rest[pos:]
+>         )
+>
+>         if attr_match and attr_match.group(0):
+>             attr_name = attr_match.group(1)
+>             attr_name_lower = attr_name.lower()
+>             full_attr = attr_match.group(0)
+>
+>             # Determine attribute value
+>             attr_value = attr_match.group(2)  # double-quoted
+>             if attr_value is None:
+>                 attr_value = attr_match.group(3)  # single-quoted
+>             if attr_value is None:
+>                 attr_value = attr_match.group(4)  # unquoted
+>             if attr_value is None:
+>                 attr_value = ''  # boolean attribute
+>
+>             is_dangerous = False
+>
+>             # Check for event handler attributes (on*)
+>             if re.match(r'^on', attr_name_lower):
+>                 is_dangerous = True
+>
+>             # Check for javascript: or vbscript: in any attribute value
+>             if attr_value and has_js_protocol(attr_value):
+>                 is_dangerous = True
+>
+>             # Check for dangerous data: URIs
+>             if attr_value and has_dangerous_data_uri(attr_value):
+>                 is_dangerous = True
+>
+>             # Check for javascript: in style attribute
+>             if attr_name_lower == 'style' and attr_value:
+>                 decoded_style = decode_html_entities(attr_value)
+>                 cleaned_style = re.sub(r'[\s\x00]+', '', decoded_style).lower()
+>                 if 'javascript:' in cleaned_style or 'expression(' in cleaned_style or 'vbscript:' in cleaned_style:
+>                     is_dangerous = True
+>
+>             if not is_dangerous:
+>                 result_parts.append(separator + full_attr)
+>
+>             pos += attr_match.end()
+>         else:
+>             result_parts.append(separator + rest[pos])
+>             pos += 1
+>
+>     return ''.join(result_parts)
+>
+>
+> def filter_js(html_content):
+>     # Step 1: Remove <script> tags and their contents
+>     html_content = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html_content,
+>         flags=re.DOTALL | re.IGNORECASE
+>     )
+>     # Handle self-closing script tags
+>     html_content = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle unclosed script tags
+>     html_content = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove orphan closing script tags
+>     html_content = re.sub(
+>         r'</script\s*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 2: Process all HTML tags to remove dangerous attributes
+>     # Use a regex that properly handles > inside quoted attribute values
+>     tag_pattern = re.compile(
+>         r'<[a-zA-Z][a-zA-Z0-9]*'  # tag name
+>         r'(?:'                      # non-capturing group for attributes
+>         r'\s[^>]*?'                # start with whitespace, then anything
+>         r'(?:"[^"]*"|'           # double-quoted strings
+>         r"'[^']*'"                 # single-quoted strings
+>         r'|[^>])*'                  # or non-> chars
+>         r')?'
+>         r'\s*/?>',                 # closing
+>         re.DOTALL
+>     )
+>
+>     # Actually, let's use a simpler but correct approach:
+>     # Find tags by scanning character by character
+>     result = []
+>     i = 0
+>     while i < len(html_content):
+>         if html_content[i] == '<' and i + 1 < len(html_content) and (
+>             html_content[i+1].isalpha() or html_content[i+1] == '/' or html_content[i+1] == '!'):
+>             # Potential HTML tag - find its end, respecting quoted attributes
+>             tag_start = i
+>             j = i + 1
+>             in_double_quote = False
+>             in_single_quote = False
+>
+>             # Check if it's a comment
+>             if html_content[j:j+3] == '!--':
+>                 # Find end of comment
+>                 end = html_content.find('-->', j + 3)
+>                 if end != -1:
+>                     result.append(html_content[tag_start:end+3])
+>                     i = end + 3
+>                     continue
+>                 else:
+>                     result.append(html_content[i])
+>                     i += 1
+>                     continue
+>
+>             while j < len(html_content):
+>                 c = html_content[j]
+>                 if c == '"' and not in_single_quote:
+>                     in_double_quote = not in_double_quote
+>                 elif c == "'" and not in_double_quote:
+>                     in_single_quote = not in_single_quote
+>                 elif c == '>' and not in_double_quote and not in_single_quote:
+>                     # End of tag
+>                     tag = html_content[tag_start:j+1]
+>                     # Check if it's an opening tag (not closing, not comment, not doctype)
+>                     if re.match(r'<[a-zA-Z]', tag) and not tag.startswith('</'):
+>                         tag = process_tag(tag)
+>                     result.append(tag)
+>                     i = j + 1
+>                     break
+>                 j += 1
+>             else:
+>                 # No closing > found, just append the character
+>                 result.append(html_content[i])
+>                 i += 1
+>         else:
+>             result.append(html_content[i])
+>             i += 1
+>
+>     return ''.join(result)
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_js(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@48752eef-d652-4664-babe-a8dcbb4fce7c:/app#

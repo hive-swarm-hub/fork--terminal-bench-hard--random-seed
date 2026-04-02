@@ -1,0 +1,119 @@
+New Terminal Output:
+
+root@57234cee-6130-4e9a-9e62-54476507f2fa:/app# cat > /tmp/find_best_async.py << 'PYEOF'
+> import json
+> import asyncio
+> import aiohttp
+> import sys
+>
+r> # Scandinavian benchmark tasks
+> scan_tasks = set([
+>     'BornholmBitextMining', 'NorwegianCourtsBitextMining',
+>     'AngryTweetsClassification', 'DanishPoliticalCommentsClassification',
+>     'DalajClassification', 'DKHateClassification', 'LccSentimentClassification',
+>     'MassiveIntentClassification', 'MassiveScenarioClassification',
+>     'NordicLangClassification', 'NoRecClassification',
+>     'NorwegianParliamentClassification', 'ScalaClassification',
+>     'SwedishSentimentClassification', 'SweRecClassification',
+>     'DanFeverRetrieval', 'NorQuadRetrieval', 'SNLRetrieval',
+>     'SwednRetrieval', 'SweFaqRetrieval', 'TV2Nordretrieval', 'TwitterHjerneRetrieval',
+>     'SNLHierarchicalClusteringS2S', 'SNLHierarchicalClusteringP2P',
+>     'SwednClusteringP2P', 'SwednClusteringS2S', 'SwednClusteringFastS2S',
+>     'VGHierarchicalClusteringS2S', 'VGHierarchicalClusteringP2P'
+> ])
+>
+> base_url = 'https://huggingface.co/datasets/mteb/results/resolve/main/'
+>
+> async def download_one(session, sem, model_name, task_name, filepath):
+>     async with sem:
+>         try:
+>             async with session.get(base_url + filepath, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+>                 if resp.status == 200:
+>                     text = await resp.text()
+>                     data = json.loads(text)
+>                     for split_name in ['test', 'validation']:
+>                         if split_name in data.get('scores', {}):
+>                             split_data = data['scores'][split_name]
+>                             if isinstance(split_data, list) and len(split_data) > 0:
+>                                 for entry in split_data:
+>                                     if 'main_score' in entry:
+>                                         return (model_name, task_name, entry['main_score'])
+>         except Exception:
+>             pass
+>     return (model_name, task_name, None)
+>
+> async def main():
+>     print(f'Looking for {len(scan_tasks)} Scandinavian tasks')
+>     sys.stdout.flush()
+>
+>     with open('/tmp/paths.json') as f:
+>         paths = json.load(f)
+>     print(f'Total models: {len(paths)}')
+>
+>     model_task_files = {}
+>     for model_name, file_list in paths.items():
+>         scan_files = {}
+>         for filepath in file_list:
+>             filename = filepath.split('/')[-1].replace('.json', '')
+>             if filename in scan_tasks:
+>                 scan_files[filename] = filepath
+>         if len(scan_files) >= 20:
+>             model_task_files[model_name] = scan_files
+>
+>     print(f'Models with >= 20 Scandinavian tasks: {len(model_task_files)}')
+>     sys.stdout.flush()
+>
+>     download_list = []
+>     for model_name, files in model_task_files.items():
+>         for task_name, filepath in files.items():
+>             download_list.append((model_name, task_name, filepath))
+>
+>     print(f'Downloading {len(download_list)} result files with async...')
+>     sys.stdout.flush()
+>
+>     sem = asyncio.Semaphore(100)
+>     connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
+>     async with aiohttp.ClientSession(connector=connector) as session:
+>         tasks = [download_one(session, sem, m, t, f) for m, t, f in download_list]
+>
+>         results = {}
+>         done = 0
+>         for coro in asyncio.as_completed(tasks):
+>             model_name, task_name, score = await coro
+>             if model_name not in results:
+>                 results[model_name] = {}
+>             if score is not None:
+>                 results[model_name][task_name] = score
+>             done += 1
+>             if done % 200 == 0:
+>                 print(f'  Downloaded {done}/{len(download_list)}')
+>                 sys.stdout.flush()
+>
+>     print(f'Downloaded all {len(download_list)} results')
+>     sys.stdout.flush()
+>
+>     model_scores = {}
+>     for model_name, task_scores in results.items():
+>         if task_scores:
+>             mean_score = sum(task_scores.values()) / len(task_scores)
+>             model_scores[model_name] = (mean_score, len(task_scores))
+>
+>     print('\n=== TOP 30 MODELS BY MEAN SCORE ===')
+>     sorted_by_score = sorted(model_scores.items(), key=lambda x: x[1][0], reverse=True)
+>     for i, (model_name, (mean, count)) in enumerate(sorted_by_score[:30]):
+>         print(f'{i+1}. {model_name.replace("__", "/")}: {mean:.4f} ({count} tasks)')
+>     sys.stdout.flush()
+>
+>     if sorted_by_score:
+>         best_model = sorted_by_score[0][0].replace('__', '/')
+>         print(f'\nBest model: {best_model}')
+>         with open('/app/result.txt', 'w') as f:
+>             f.write(best_model)
+>         print('Written to /app/result.txt')
+>     sys.stdout.flush()
+>
+> asyncio.run(main())
+> PYEOF
+root@57234cee-6130-4e9a-9e62-54476507f2fa:/app# python3 /tmp/find_best_async.py > /tmp/find_best_async.log 2>&1 &
+[1] 4832
+root@57234cee-6130-4e9a-9e62-54476507f2fa:/app#

@@ -1,0 +1,158 @@
+New Terminal Output:
+
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+=0;> #include<stdlib.h>
+> #include<string.h>
+L;> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+}
+> #include<sys/stat.h>
+> #define E 768
++ > #define NH 12
+> #define HS 64
+> #define V 50257
+> #define MX 1100
+> float*W,*KV,x[MX][E],ln[E];
+t> char*tok[V];
+> int nt=256;
+> // layer file order: alphabetical h0,h1,h10,h11,h2..h9 -> map to logical
+> int ford[]={0,1,10,11,2,3,4,5,6,7,8,9};
+> // per-layer size = 7087872 floats
+> // offsets within layer: ab,aw,pb,pw,l1b,l1g,l2b,l2g,fb,fw,fpb,fpw
+O> int loff[]={0,2304,1771776,1772544,2362368,2363136,2363904,2364672,2365440,2368512,4727808,4728576};
+> float*lp(int l,int p){int fi=0;for(int i=0;i<12;i++)if(ford[i]==l)fi=i;
+> return W+fi*7087872+loff[p];}
+> void lnorm(float*o,float*a,float*g,float*b){
+> float m=0,v=0;for(int i=0;i<E;i++)m+=a[i];m/=E;
+> for(int i=0;i<E;i++)v+=(a[i]-m)*(a[i]-m);v=v/E+1e-5f;
+> for(int i=0;i<E;i++)o[i]=g[i]*(a[i]-m)/sqrtf(v)+b[i];}
+5> float gelu(float x){return .5f*x*(1+tanhf(.7978845608f*(x+.044715f*x*x*x)));}
+> void fwd(int T,int*toks){
+> float*wpe=W+85056000,*wte=W+85842432;
+> for(int t=0;t<T;t++)for(int i=0;i<E;i++)x[t][i]=wte[toks[t]*E+i]+wpe[t*E+i];
+> for(int L=0;L<12;L++){
+> float*ab=lp(L,0),*aw=lp(L,1),*pb=lp(L,2),*pw=lp(L,3);
+f> float*l1b=lp(L,4),*l1g=lp(L,5),*l2b=lp(L,6),*l2g=lp(L,7);
+> float*fb=lp(L,8),*fw=lp(L,9),*fpb=lp(L,10),*fpw=lp(L,11);
+> // compute QKV for all positions and cache K,V
+> float*kc=KV+L*2*MX*E,*vc=KV+(L*2+1)*MX*E;
+> for(int t=0;t<T;t++){
+> lnorm(ln,x[t],l1g,l1b);
+> float qkv[3*E];
+> for(int i=0;i<3*E;i++){float s=ab[i];for(int j=0;j<E;j++)s+=ln[j]*aw[j*3*E+i];qkv[i]=s;}
+> for(int i=0;i<E;i++){kc[t*E+i]=qkv[E+i];vc[t*E+i]=qkv[2*E+i];}
+> // attention per head
+> float res[E];
+> memset(res,0,sizeof(res));
+> for(int h=0;h<NH;h++){
+> float*q=qkv+h*HS;
+> float sc[MX],mx=-1e9;
+> for(int t2=0;t2<=t;t2++){float s=0;for(int i=0;i<HS;i++)s+=q[i]*kc[t2*E+h*HS+i];s/=8.0f;if(s>mx)mx=s;sc[t2]=s;}
+> float sum=0;for(int t2=0;t2<=t;t2++){sc[t2]=expf(sc[t2]-mx);sum+=sc[t2];}
+> for(int t2=0;t2<=t;t2++)sc[t2]/=sum;
+> for(int t2=0;t2<=t;t2++)for(int i=0;i<HS;i++)res[h*HS+i]+=sc[t2]*vc[t2*E+h*HS+i];
+> }
+> // proj: res @ pw + pb
+> float proj[E];
+> for(int i=0;i<E;i++){float s=pb[i];for(int j=0;j<E;j++)s+=res[j]*pw[j*E+i];proj[i]=s;}
+> for(int i=0;i<E;i++)x[t][i]+=proj[i];
+> // MLP
+> lnorm(ln,x[t],l2g,l2b);
+> float h1[3072];
+> for(int i=0;i<4*E;i++){float s=fb[i];for(int j=0;j<E;j++)s+=ln[j]*fw[j*4*E+i];h1[i]=gelu(s);}
+> for(int i=0;i<E;i++){float s=fpb[i];for(int j=0;j<4*E;j++)s+=h1[j]*fpw[j*E+i];x[t][i]+=s;}
+> }}
+> // final layernorm + logits for last position
+> lnorm(ln,x[T-1],W+85055232,W+85054464);
+> }
+> int argmax(){
+> float*wte=W+85842432,mx=-1e30f;int mi=0;
+> for(int i=0;i<V;i++){float s=0;for(int j=0;j<E;j++)s+=ln[j]*wte[i*E+j];if(s>mx){mx=s;mi=i;}}
+> return mi;}
+> // BPE tokenizer
+> int u2b(char*s,int*b){
+> // convert utf8 string to GPT2 byte tokens
+> int n=0;
+> unsigned char*p=(unsigned char*)s;
+> while(*p){
+> int c=*p++;
+> if(c<0x80){// ascii
+> // GPT2 maps: !-~ (33-126) -> themselves, space(32)->Ġ
+> // For byte-level: need to find which token index
+> // Tokens 0-255: byte values mapped through the b2u table
+> // The ordering is: printable first (33-126, 161-172, 174-255), then 0-32, 127-160, 173
+> // So byte b -> token index in that order
+> }else if(c<0xE0){c=((c&0x1F)<<6)|(*p++&0x3F);}
+> else if(c<0xF0){c=((c&0xF)<<6)|(*p++&0x3F);c=(c<<6)|(*p++&0x3F);}
+> else{c=((c&7)<<6)|(*p++&0x3F);c=(c<<6)|(*p++&0x3F);c=(c<<6)|(*p++&0x3F);}
+> b[n++]=c; // this isn't right yet
+> }
+> return n;}
+> int main(int ac,char**av){
+> int fd=open(av[1],0);struct stat st;fstat(fd,&st);
+> W=mmap(0,st.st_size,1,1,fd,0);
+> KV=calloc(24*MX*E,4);
+> // load vocab
+> FILE*fp=fopen(av[2],"r");
+> char line[1024];
+> // first 256 tokens are byte values
+> // build byte-to-token-index mapping
+> int b2t[256];
+> int idx=0;
+> for(int i=33;i<=126;i++)b2t[i]=idx++;
+> for(int i=161;i<=172;i++)b2t[i]=idx++;
+> for(int i=174;i<=255;i++)b2t[i]=idx++;
+> for(int i=0;i<=32;i++)b2t[i]=idx++;
+> for(int i=127;i<=160;i++)b2t[i]=idx++;
+> b2t[173]=idx++;
+> // token strings for first 256
+> for(int b=0;b<256;b++){tok[b2t[b]]=malloc(2);tok[b2t[b]][0]=b;tok[b2t[b]][1]=0;}
+> fgets(line,sizeof(line),fp); // skip header
+> while(fgets(line,sizeof(line),fp)&&nt<V){
+> int l=strlen(line);if(line[l-1]=='\n')line[--l]=0;
+> // find space separator
+> char*sp=NULL;
+> for(int i=0;i<l;i++)if(line[i]==' '){sp=line+i;break;}
+> if(!sp)continue;
+> // merge: tok_a + tok_b -> new token
+> // We need to find tok_a and tok_b strings
+> // But the BPE file uses the unicode representation
+> // For now, store the merged string
+> *sp=0;
+> char*a=line,*b2=sp+1;
+> int ml2=strlen(a)+strlen(b2)+1;
+> tok[nt]=malloc(ml2);
+> // Convert from unicode representation to bytes
+> // Ġ (U+0120, utf8: C4 A0) -> space (0x20)
+> // Other chars in range U+0100-U+0143 -> bytes 0-67
+> // Actually we need to convert each unicode char to the byte it represents
+> strcpy(tok[nt],a);strcat(tok[nt],b2);
+> nt++;
+> }
+> // tokenize input - simplified: split into chars and apply BPE
+> char*input=av[3];
+> int tokens[MX],T=0;
+> // encode each byte as its token
+> for(unsigned char*p=(unsigned char*)input;*p;p++)tokens[T++]=b2t[*p];
+> // apply BPE merges
+> for(int m=256;m<nt;m++){
+> int tl=strlen(tok[m]);
+> for(int i=0;i<T-1;i++){
+> // check if tok[tokens[i]]+tok[tokens[i+1]] == tok[m]
+> // This is getting complex for unicode...
+> }}
+> // generate 20 tokens
+> for(int g=0;g<20;g++){
+> fwd(T,tokens);
+> int next=argmax();
+> tokens[T++]=next;
+> // decode and print
+> char*s=tok[next];
+> if(s)printf("%s",s);
+> }
+> printf("\n");
+> }
+> CEOF
+root@45ee39ad-e503-461c-9edc-1b13e8bb13f1:/app#

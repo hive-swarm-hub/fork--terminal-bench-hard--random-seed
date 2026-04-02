@@ -1,0 +1,268 @@
+New Terminal Output:
+
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app# python3 << 'EOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.upper()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Q5 SDM simulation for circular template
+> # Forward primer: 5'-[tail][annealing_fwd]-3'
+> # Reverse primer: 5'-[annealing_rev]-3' (no tail for insertion)
+> #
+> # The forward primer anneals to the top strand at some position.
+> # The reverse primer anneals to the bottom strand at some position.
+> # They are back-to-back, pointing away from each other.
+> #
+> # PCR amplifies the entire plasmid.
+> # After PCR, the linear product (top strand, 5' to 3') is:
+> #   [fwd_primer_full] + [template from end of fwd_anneal to start of rev_anneal on top strand]
+> #   ... and the other end is the rev_primer.
+> #
+> # More precisely:
+> # Let the template be circular: positions 0..N-1
+> # Forward primer anneals to top strand at positions [fwd_start, fwd_end)
+> #   where fwd_start < fwd_end, and the primer's 3' end is at fwd_end-1
+> # Reverse primer anneals to bottom strand at positions [rev_start, rev_end)
+> #   where the primer's 3' end is at rev_start (on the bottom strand, extending toward lower positions)
+> #   Actually, the reverse primer's sequence is RC of template[rev_start:rev_end]
+> #   The primer's 3' end corresponds to template position rev_start
+> #   The primer's 5' end corresponds to template position rev_end-1
+> #
+> # For back-to-back primers: rev_end = fwd_start (on the circular template)
+> #
+> # The PCR product (linear, top strand 5'->3'):
+> #   fwd_primer_full_seq + template[fwd_end : rev_start] (going clockwise)
+> #   But template[fwd_end:rev_start] wraps around if rev_start < fwd_end
+> #
+> # Wait, I need to think about this differently.
+> # The forward primer extends from fwd_end going clockwise.
+> # The reverse primer extends from rev_start going counterclockwise.
+> # They meet somewhere in between, amplifying the whole plasmid.
+> #
+> # The linear PCR product:
+> #   Top strand 5'->3': fwd_full_seq + template[fwd_end : ... wrapping ... : rev_start]
+> #   But since it's a full plasmid amplification:
+> #   template[fwd_end:] + template[:rev_start] if we go clockwise from fwd_end to rev_start
+> #   (assuming rev_start < fwd_end for back-to-back)
+> #
+> # Hmm, for back-to-back: fwd_start = rev_end (adjacent on template)
+> # So fwd_start = rev_end, meaning the forward primer starts right where the reverse primer ends.
+> #
+> # Example: rev anneals to template[170:215], fwd anneals to template[215:233]
+> # rev_start=170, rev_end=215, fwd_start=215, fwd_end=233
+> #
+> # PCR product top strand 5'->3':
+> #   fwd_full_seq + template[233:] + template[:170]
+> #   = [tail + template[215:233]] + template[233:] + template[:170]
+> #   = tail + template[215:233] + template[233:] + template[:170]
+> #   = tail + template[215:3591] + template[0:170]
+> #
+> # After KLD circularization, the circular product is:
+> #   template[0:170] + tail + template[215:3591]
+> #   = template[0:170] + insertion(39bp) + template[215:3591]
+> #
+> # But we want: template[0:215] + insertion(39bp) + template[215:3591]
+> #
+> # These are different! template[0:170] vs template[0:215]
+> # The difference is template[170:215] which is 45bp - exactly the reverse primer annealing region!
+> #
+> # Wait, I think I'm wrong about the PCR product.
+> # Let me reconsider.
+>
+> # Actually, in PCR:
+> # 1. Forward primer binds top strand, extends 5'->3' (clockwise)
+> # 2. Reverse primer binds bottom strand, extends 5'->3' (counterclockwise on bottom = clockwise on diagram but actually counterclockwise)
+> #
+> # The forward primer extends from its 3' end going clockwise through the template.
+> # The reverse primer extends from its 3' end going counterclockwise through the template.
+> #
+> # The linear PCR product includes:
+> # - The full forward primer sequence at one end
+> # - The full reverse primer sequence (RC) at the other end
+> # - Everything in between from the template
+> #
+> # Top strand 5'->3':
+> #   fwd_full_seq + template[fwd_end:] + template[:rev_start] + RC(rev_primer)
+> #   No wait, that's wrong too.
+> #
+> # Let me think step by step:
+> # Template is circular: ...template[rev_start-1] template[rev_start] ... template[rev_end-1] template[fwd_start] ... template[fwd_end-1] template[fwd_end] ...
+> #
+> # Forward primer binds top strand at [fwd_start, fwd_end), extends clockwise from fwd_end
+> # Extension goes: template[fwd_end], template[fwd_end+1], ... wrapping around ... template[rev_end-1], template[rev_end], ...
+> # But it stops when it reaches the end of the linear molecule (which is where the reverse primer started)
+> #
+> # Actually for the first cycle of PCR on a circular template:
+> # The forward primer extends all the way around. But in practice with Q5 SDM,
+> # the exponential amplification only produces the linear product between the two primers.
+> #
+> # The final PCR product (after many cycles) is a linear molecule:
+> # 5' end: forward primer (full sequence including tail)
+> # 3' end: reverse complement of reverse primer
+> # In between: template sequence from fwd_end going clockwise to rev_start
+> #
+> # Wait no. The reverse primer's 3' end is at the bottom strand position corresponding
+> # to template top strand position rev_start. The reverse primer extends counterclockwise
+> # (on the top strand reference), so it copies template[:rev_start] going backwards.
+> # Actually it copies the bottom strand from rev_start going in the 5'->3' direction on
+> # the bottom strand, which corresponds to going counterclockwise on the top strand.
+>
+> # OK let me just be very concrete.
+> # Template positions: 0, 1, 2, ..., N-1 (circular)
+> # Forward primer anneals to top strand positions 215..232 (18bp)
+> #   fwd_primer = tail(39bp) + template[215:233]
+> #   After binding and extension, it copies: template[233], template[234], ..., wrapping around
+> #   ..., template[0], template[1], ...
+> #   In the final PCR product, the top strand from fwd primer extension goes all the way to
+> #   where it meets the reverse primer extension.
+> #
+> # Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+> #   This is RC of template[170:215]
+> #   It anneals to bottom strand at positions corresponding to top strand 170..214
+> #   The 3' end of the reverse primer corresponds to top strand position 170
+> #   (because RC: primer 3' = template 5' end of the region = position 170)
+> #   Wait no: RC of template[170:215] means:
+> #   template[170:215] on top strand is: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+> #   RC of that is: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+> #   The primer's 5' end (C) corresponds to template position 214 (G on top, C on bottom)
+> #   The primer's 3' end (A) corresponds to template position 170 (T on top, A on bottom)
+> #
+> #   The reverse primer binds the bottom strand and extends in the 5'->3' direction on the
+> #   bottom strand, which goes from position 170 toward 169, 168, ..., wrapping around.
+> #
+> # So the linear PCR product top strand 5'->3':
+> #   fwd_primer_full + template[233:N] + template[0:170]
+> #   No wait, the reverse primer extension goes counterclockwise from 170.
+> #   But the PCR product is defined by the two primers.
+> #
+> #   After many PCR cycles, the product is:
+> #   Top strand: fwd_primer_full + template[233:N] + template[0:170]
+> #   Bottom strand: RC(rev_primer) + RC(template[233:N] + template[0:170])
+> #   Wait, that's not right either.
+> #
+> # Let me just think of it as: the PCR product is a linear double-stranded DNA.
+> # One end has the forward primer sequence.
+> # The other end has the reverse primer sequence (as the bottom strand).
+> #
+> # Top strand 5'->3':
+> #   fwd_tail + template[215:233] + template[233:N] + template[0:170]
+> #   = fwd_tail + template[215:N] + template[0:170]
+> #
+> # Bottom strand 5'->3' (which is 3'->5' of top strand):
+> #   rev_primer + RC(template[215:N] + template[0:170])
+> #   Hmm, this doesn't work because rev_primer should be at position 170-215.
+> #
+> # I think the correct model is:
+> # Top strand 5'->3': fwd_tail + template[215:N] + template[0:215]
+> #   No, that's the whole plasmid plus the tail.
+> #
+> # Actually wait. Let me reconsider.
+> # The reverse primer anneals to bottom strand at positions 170-214.
+> # Its 3' end is at position 170 on the bottom strand.
+> # It extends counterclockwise: copying positions 169, 168, ..., 0, N-1, N-2, ...
+> # Until it reaches the other end of the linear product.
+> #
+> # The forward primer anneals at positions 215-232 on top strand.
+> # Its 3' end is at position 232.
+> # It extends clockwise: copying positions 233, 234, ..., N-1, 0, 1, ...
+> # Until it reaches the other end.
+> #
+> # The two extensions meet somewhere. In the final product:
+> # Top strand 5'->3': fwd_full + template[233:N] + template[0:170]
+> # Bottom strand 3'->5': (complement of above)
+> # Bottom strand 5'->3' (reading the other direction):
+> #   RC(template[0:170]) + RC(template[233:N]) + RC(fwd_full)
+> #   = complement going from 170 back to 0, then from N back to 233, then RC of fwd
+> #
+> # But the bottom strand also has the reverse primer at its 5' end:
+> # Bottom strand 5'->3': rev_primer + extension from position 214 going clockwise on bottom strand
+> #   = rev_primer + RC(template[215:N]) + RC(template[0:170])
+> #   Hmm wait, that gives the same length.
+> #
+> # Actually I realize the issue: the reverse primer's 5' end corresponds to position 214,
+> # and the forward primer starts at position 215. They are adjacent (back-to-back).
+> # So the template region NOT covered by either primer is: template[233:N] + template[0:170]
+> # (going clockwise from fwd_end to rev_start)
+> #
+> # The linear PCR product top strand:
+> #   5'-[fwd_tail]-[template 215..232]-[template 233..N-1]-[template 0..169]-3'
+> #   = 5'-[fwd_tail]-[template 215..N-1]-[template 0..169]-3'
+> #
+> # Wait, but the bottom strand at the 3' end should be the reverse primer.
+> # Bottom strand at 3' end (which is 5' of bottom strand):
+> #   5'-[rev_primer]-...-3'
+> #   rev_primer = RC(template[170:215])
+> #   So the bottom strand starts with RC(template[170:215]) at its 5' end
+> #   Which means the top strand ends with template[170:215] at its 3' end
+> #   But I wrote template[0:169] above, not template[0:214].
+> #
+> # I think I see my error. The reverse primer ITSELF covers positions 170-214.
+> # So the top strand 3' end should include up to position 214.
+> #
+> # Top strand: 5'-[fwd_tail]-[template 215..N-1]-[template 0..214]-3'
+> # Bottom strand: 3'-[RC(fwd_tail)]-[RC(template 215..N-1)]-[RC(template 0..214)]-5'
+> #             = 5'-[template 0..214 bottom]-[template 215..N-1 bottom]-[RC(fwd_tail)]-3'
+> #             Hmm no.
+> #
+> # OK I think the simplest way: the linear product contains ALL the sequence between
+> # the two primer binding sites, PLUS both primer sequences themselves.
+> #
+> # Top strand 5'->3':
+> #   fwd_primer_full_seq + template[fwd_end:N] + template[0:rev_start]
+> #   where the reverse primer covers template[rev_start:rev_end] on the bottom strand
+> #   and rev_end = fwd_start
+> #
+> # But wait, the top strand also needs to include the region covered by the reverse primer,
+> # because the reverse primer IS part of the product.
+> # The reverse primer covers bottom strand at template[170:215].
+> # On the top strand, this corresponds to positions 170..214.
+> # So the top strand should include these positions.
+> #
+> # I think the correct answer is:
+> # Top strand: fwd_primer_full + template[fwd_end:N] + template[0:rev_end]
+> #   where rev_end = 215 (= fwd_start)
+> #   = fwd_tail + template[215:233] + template[233:N] + template[0:215]
+> #   = fwd_tail + template[215:N] + template[0:215]
+> #
+> # After KLD circularization:
+> #   circular: template[0:215] + fwd_tail + template[215:N]
+> #   = template[0:215] + insertion(39bp) + template[215:N]
+>
+> # YES! This is correct! The product includes the reverse primer region as part of the template.
+> # Let me verify:
+>
+> fwd_tail = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+> product = input_seq[0:215] + fwd_tail + input_seq[215:]
+> print(f"Product length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> print(f"Match: {product == output_seq}")
+>
+> if product != output_seq:
+>     for i in range(min(len(product), len(output_seq))):
+>         if product[i] != output_seq[i]:
+>             print(f"First diff at {i}: product={product[i]}, output={output_seq[i]}")
+>             print(f"Product context: {product[i-10:i+10]}")
+>             print(f"Output context:  {output_seq[i-10:i+10]}")
+>             break
+> EOF
+Product length: 3630
+Output length: 3630
+Match: True
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app#

@@ -1,0 +1,146 @@
+New Terminal Output:
+
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app# cat > /app/steal.py << 'PYEOF'
+p.linalg.norm(A1_stolen[i])
+  > import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) w.r.t. x using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def is_new_direction(direction, existing_rows, threshold=0.999):
+>     """Check if direction is not parallel to any existing row."""
+>     d_norm = direction / np.linalg.norm(direction)
+>     for row in existing_rows:
+>         r_norm = row / np.linalg.norm(row)
+>         if abs(np.dot(d_norm, r_norm)) > threshold:
+>             return False
+>     return True
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     rows_found = []  # Will contain scaled rows of A1
+>
+>     # Strategy: sample random points and compute gradients.
+>     # For nearby points, if gradient changes, the difference is
+>     # sum of a2_i * A1[i,:] for each neuron i that flipped.
+>     # For very close points, typically only 1 neuron flips.
+>
+>     # We'll use a line search approach: pick a random direction,
+>     # walk along it with small steps, detect gradient changes.
+>
+>     attempts = 0
+>     max_attempts = 500
+>
+>     while len(rows_found) < 20 and attempts < max_attempts:
+>         attempts += 1
+>
+>         # Random starting point and direction
+>         x0 = np.random.randn(10) * 2.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>
+>         # Compute gradient at starting point
+>         g0 = compute_gradient(x0)
+>
+>         # Walk along the direction with steps, looking for gradient changes
+>         step_size = 0.1
+>         n_steps = 20
+>
+>         prev_g = g0
+>         prev_x = x0.copy()
+>
+>         for s in range(1, n_steps + 1):
+>             x_new = x0 + s * step_size * direction
+>             g_new = compute_gradient(x_new)
+>
+>             diff = g_new - prev_g
+>             diff_norm = np.linalg.norm(diff)
+>
+>             if diff_norm > 1e-8:
+>                 # Gradient changed - binary search for exact boundary
+>                 t_lo, t_hi = 0.0, 1.0
+>                 x_lo = prev_x
+>                 x_hi = x_new
+>                 g_lo = prev_g
+>
+>                 for _ in range(40):
+>                     t_mid = (t_lo + t_hi) / 2
+>                     x_mid = x_lo + t_mid * (x_hi - x_lo)
+>                     g_mid = compute_gradient(x_mid)
+>                     if np.linalg.norm(g_mid - g_lo) > 1e-8:
+>                         t_hi = t_mid
+>                     else:
+>                         t_lo = t_mid
+>
+>                 # Now the boundary is between t_lo and t_hi
+>                 # Compute gradient just before and after
+>                 eps_t = 1e-8
+>                 x_before = x_lo + (t_lo) * (x_hi - x_lo)
+>                 x_after = x_lo + (t_hi) * (x_hi - x_lo)
+>                 g_before = compute_gradient(x_before)
+>                 g_after = compute_gradient(x_after)
+>
+>                 boundary_diff = g_after - g_before
+>                 bd_norm = np.linalg.norm(boundary_diff)
+>
+>                 if bd_norm > 1e-8 and is_new_direction(boundary_diff, rows_found):
+>                     rows_found.append(boundary_diff.copy())
+>                     print(f"Found row {len(rows_found)}/20 (attempt {attempts})")
+>                     if len(rows_found) >= 20:
+>                         break
+>
+>                 # After finding a boundary, there might be more on this segment
+>                 # Continue from after the boundary
+>
+>             prev_g = g_new
+>             prev_x = x_new.copy()
+>
+>     print(f"\nTotal rows found: {len(rows_found)}")
+>
+>     # Each row is a2_i * A1[i,:]. We want A1 up to permutation and scaling.
+>     # Since "up to scaling" means each row can have an arbitrary nonzero scalar,
+>     # we normalize each row.
+>     A1_stolen = np.array(rows_found[:20])
+>     for i in range(len(A1_stolen)):
+>         A1_stolen[i] = A1_stolen[i] / np.linalg.norm(A1_stolen[i])
+>
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = steal_A1()
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     # Verify by comparing with actual A1
+>     from forward import A1 as true_A1
+>     true_A1_norm = true_A1.copy()
+>     for i in range(true_A1.shape[0]):
+>         true_A1_norm[i] = true_A1_norm[i] / np.linalg.norm(true_A1_norm[i])
+>
+>     print("\nVerification (max cosine similarity for each stolen row):")
+>     matched = set()
+>     for i in range(A1_stolen.shape[0]):
+>         best_sim = 0
+>         best_j = -1
+>         for j in range(true_A1_norm.shape[0]):
+>             sim = abs(np.dot(A1_stolen[i], true_A1_norm[j]))
+>             if sim > best_sim:
+>                 best_sim = sim
+>                 best_j = j
+>         matched.add(best_j)
+>         print(f"  Stolen row {i} -> True row {best_j}, cosine sim: {best_sim:.6f}")
+>     print(f"\nMatched {len(matched)} unique true rows out of {true_A1.shape[0]}")
+> PYEOF
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app#

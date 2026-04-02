@@ -1,0 +1,151 @@
+New Terminal Output:
+
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient using central differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def grads_same(g1, g2, tol=1e-5):
+>     """Check if two gradients are the same (same activation pattern)."""
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def isolate_single_boundary(x_a, g_a, x_b, g_b, max_iter=30):
+>     """Given x_a, x_b on a line with different gradients,
+>     binary search to isolate a single ReLU boundary.
+>     Returns (g_left, g_right) on either side of a single boundary,
+>     or None if it can't isolate one."""
+>     for _ in range(max_iter):
+>         x_mid = (x_a + x_b) / 2.0
+>         g_mid = compute_gradient(x_mid)
+>
+>         same_as_a = grads_same(g_mid, g_a)
+>         same_as_b = grads_same(g_mid, g_b)
+>
+>         if same_as_a and same_as_b:
+>             # Both sides look the same - numerical issues
+>             return None
+>         elif same_as_a:
+>             # Boundary is in [mid, b]
+>             x_a = x_mid
+>             g_a = g_mid
+>         elif same_as_b:
+>             # Boundary is in [a, mid]
+>             x_b = x_mid
+>             g_b = g_mid
+>         else:
+>             # g_mid differs from both - multiple boundaries
+>             # Pick the half closer to a (arbitrary choice)
+>             x_b = x_mid
+>             g_b = g_mid
+>
+>     # After binary search, g_a and g_b should be on either side of a single boundary
+>     return g_b - g_a
+>
+> def is_new_direction(direction, existing_rows, threshold=0.995):
+>     """Check if direction is not parallel to any existing row."""
+>     d_norm = np.linalg.norm(direction)
+>     if d_norm < 1e-10:
+>         return False
+>     d = direction / d_norm
+>     for row in existing_rows:
+>         r_norm = np.linalg.norm(row)
+>         if r_norm < 1e-10:
+>             continue
+>         r = row / r_norm
+>         if abs(np.dot(d, r)) > threshold:
+>             return False
+>     return True
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     rows_found = []
+>
+>     # Strategy: walk along random lines with small steps.
+>     # When gradient changes, binary search to isolate single boundary.
+>     # The gradient difference across a single boundary = a2_k * A1[k,:]
+>
+>     attempt = 0
+>     max_attempts = 300
+>
+>     while len(rows_found) < 20 and attempt < max_attempts:
+>         attempt += 1
+>
+>         x0 = np.random.randn(10) * 3.0
+>         direction = np.random.randn(10)
+>         direction /= np.linalg.norm(direction)
+>
+>         # Walk along line with small steps
+>         step = 0.03
+>         n_steps = 60
+>
+>         prev_x = x0.copy()
+>         prev_g = compute_gradient(x0)
+>
+>         for s in range(1, n_steps + 1):
+>             curr_x = x0 + s * step * direction
+>             curr_g = compute_gradient(curr_x)
+>
+>             if not grads_same(prev_g, curr_g):
+>                 # Found a gradient change - isolate single boundary
+>                 diff = isolate_single_boundary(prev_x, prev_g, curr_x, curr_g)
+>
+>                 if diff is not None and np.linalg.norm(diff) > 1e-6:
+>                     if is_new_direction(diff, rows_found):
+>                         rows_found.append(diff.copy())
+>                         print(f"Found row {len(rows_found)}/20 (attempt {attempt})")
+>                         if len(rows_found) >= 20:
+>                             break
+>
+>             prev_x = curr_x.copy()
+>             prev_g = curr_g.copy()
+>
+>         if len(rows_found) >= 20:
+>             break
+>
+>     print(f"\nTotal rows found: {len(rows_found)}")
+>
+>     # Normalize each row
+>     A1_stolen = np.array(rows_found[:20])
+>     for i in range(len(A1_stolen)):
+>         A1_stolen[i] /= np.linalg.norm(A1_stolen[i])
+>
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = steal_A1()
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     # Verify
+>     from forward import A1 as true_A1
+>     true_A1_norm = true_A1.copy()
+>     for i in range(true_A1.shape[0]):
+>         true_A1_norm[i] /= np.linalg.norm(true_A1_norm[i])
+>
+>     print("\nVerification:")
+>     matched = set()
+>     for i in range(A1_stolen.shape[0]):
+>         best_sim = 0
+>         best_j = -1
+>         for j in range(true_A1_norm.shape[0]):
+>             sim = abs(np.dot(A1_stolen[i], true_A1_norm[j]))
+>             if sim > best_sim:
+>                 best_sim = sim
+>                 best_j = j
+>         matched.add(best_j)
+>         print(f"  Row {i} -> True row {best_j}, cos_sim: {best_sim:.6f}")
+>     print(f"\nMatched {len(matched)} unique rows out of {true_A1.shape[0]}")
+> PYEOF
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app#

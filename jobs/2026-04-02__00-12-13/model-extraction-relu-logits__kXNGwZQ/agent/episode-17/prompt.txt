@@ -1,0 +1,149 @@
+New Terminal Output:
+
+[1]+  Done                    python3 /app/steal.py 2>&1 | tee /tmp/steal3.log
+Found row 1/20 (attempt 1, step 23)
+Found row 2/20 (attempt 2, step 6)
+Found row 3/20 (attempt 2, step 10)
+Found row 4/20 (attempt 3, step 7)
+Found row 5/20 (attempt 4, step 16)
+Found row 6/20 (attempt 4, step 17)
+Found row 7/20 (attempt 7, step 39)
+Found row 8/20 (attempt 8, step 77)
+Found row 9/20 (attempt 19, step 47)
+
+Total rows found: 9
+Stolen A1 shape: (9, 10)
+Saved to /app/stolen_A1.npy
+
+Verification:
+  Row 0 -> True row 8, cos_sim: 0.502488
+  Row 1 -> True row 9, cos_sim: 0.692667
+  Row 2 -> True row 1, cos_sim: 0.586906
+  Row 3 -> True row 3, cos_sim: 0.690671
+  Row 4 -> True row 2, cos_sim: 0.570067
+  Row 5 -> True row 1, cos_sim: 0.602983
+  Row 6 -> True row 13, cos_sim: 0.551460
+  Row 7 -> True row 14, cos_sim: 0.649910
+  Row 8 -> True row 19, cos_sim: 0.647790
+
+Matched 8 unique rows out of 20
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-5):
+>     """Compute gradient using central differences with moderate eps."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy(); xp[i] += eps
+>         xm = x.copy(); xm[i] -= eps
+>         grad[i] = (forward(xp) - forward(xm)) / (2 * eps)
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     # Step 1: Collect many unique gradient vectors
+>     # Use points far from origin where activation patterns are more stable
+>     n_samples = 3000
+>     gradients = []
+>
+>     for i in range(n_samples):
+>         x = np.random.randn(10) * 5.0  # Large scale to be far from boundaries
+>         g = compute_gradient(x)
+>         gradients.append(g)
+>
+>     gradients = np.array(gradients)
+>     print(f"Collected {len(gradients)} gradients")
+>
+>     # Step 2: Find unique gradient vectors (cluster by similarity)
+>     unique_grads = [gradients[0]]
+>     for i in range(1, len(gradients)):
+>         is_new = True
+>         for ug in unique_grads:
+>             if np.linalg.norm(gradients[i] - ug) < 1e-4:
+>                 is_new = False
+>                 break
+>         if is_new:
+>             unique_grads.append(gradients[i])
+>
+>     unique_grads = np.array(unique_grads)
+>     print(f"Found {len(unique_grads)} unique gradient vectors")
+>
+>     # Step 3: Compute all pairwise differences
+>     # Each difference is a sum of ±a2_k * A1[k,:] for neurons that differ
+>     # Single-neuron differences will have the smallest norm
+>     diffs = []
+>     diff_norms = []
+>     for i in range(len(unique_grads)):
+>         for j in range(i+1, len(unique_grads)):
+>             d = unique_grads[i] - unique_grads[j]
+>             n = np.linalg.norm(d)
+>             if n > 1e-6:  # Non-trivial difference
+>                 diffs.append(d)
+>                 diff_norms.append(n)
+>
+>     diffs = np.array(diffs)
+>     diff_norms = np.array(diff_norms)
+>     print(f"Computed {len(diffs)} pairwise differences")
+>
+>     # Sort by norm - smallest differences are most likely single-neuron flips
+>     sorted_idx = np.argsort(diff_norms)
+>
+>     # Step 4: Extract unique directions from smallest differences
+>     rows_found = []
+>
+>     for idx in sorted_idx:
+>         d = diffs[idx]
+>         d_norm = d / np.linalg.norm(d)
+>
+>         is_new = True
+>         for row in rows_found:
+>             r_norm = row / np.linalg.norm(row)
+>             if abs(np.dot(d_norm, r_norm)) > 0.99:
+>                 is_new = False
+>                 break
+>
+>         if is_new:
+>             rows_found.append(d.copy())
+>             print(f"Found row {len(rows_found)}/20, diff_norm={diff_norms[idx]:.6f}")
+>             if len(rows_found) >= 20:
+>                 break
+>
+>     print(f"\nTotal rows found: {len(rows_found)}")
+>
+>     A1_stolen = np.array(rows_found[:20])
+>     for i in range(len(A1_stolen)):
+>         A1_stolen[i] /= np.linalg.norm(A1_stolen[i])
+>
+>     return A1_stolen
+>
+> if __name__ == "__main__":
+>     A1_stolen = steal_A1()
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     # Verify
+>     from forward import A1 as true_A1
+>     true_A1_norm = true_A1.copy()
+>     for i in range(20):
+>         true_A1_norm[i] /= np.linalg.norm(true_A1_norm[i])
+>
+>     print("\nVerification:")
+>     matched = set()
+>     for i in range(A1_stolen.shape[0]):
+>         best_sim = 0
+>         best_j = -1
+>         for j in range(20):
+>             sim = abs(np.dot(A1_stolen[i], true_A1_norm[j]))
+>             if sim > best_sim:
+>                 best_sim = sim
+>                 best_j = j
+>         matched.add(best_j)
+>         print(f"  Row {i} -> True row {best_j}, cos_sim: {best_sim:.6f}")
+>     print(f"\nMatched {len(matched)} unique rows out of 20")
+> PYEOF
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app#

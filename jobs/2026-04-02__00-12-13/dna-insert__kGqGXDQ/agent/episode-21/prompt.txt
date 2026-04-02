@@ -1,0 +1,137 @@
+New Terminal Output:
+
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.upper()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # The insertion can be placed at position 213, 214, or 215
+> # Let's try all three and find the best primer pair for each
+>
+> for insert_pos in [213, 214, 215]:
+>     # Determine insertion sequence for this boundary
+>     # output = input[:insert_pos] + insertion + input[insert_pos:]
+>     insertion = output_seq[insert_pos : insert_pos + (len(output_seq) - len(input_seq))]
+>
+>     # Verify
+>     expected = input_seq[:insert_pos] + insertion + input_seq[insert_pos:]
+>     if expected != output_seq:
+>         print(f"Insert pos {insert_pos}: INVALID")
+>         continue
+>
+>     print(f"\n=== Insert position {insert_pos} ===")
+>     print(f"Insertion: {insertion} ({len(insertion)}bp)")
+>
+>     # Forward primer: tail(insertion) + annealing starting at insert_pos
+>     # But we need to check: does the tail overlap with the template?
+>     # The annealing region is the longest 3' match to the template
+>
+>     # Get all valid forward annealing options
+>     fwd_options = []
+>     for anneal_len in range(15, 46):
+>         anneal_seq = input_seq[insert_pos:insert_pos+anneal_len]
+>         if len(anneal_seq) < anneal_len:
+>             # Wrap around for circular
+>             anneal_seq = (input_seq + input_seq)[insert_pos:insert_pos+anneal_len]
+>
+>         # Check if the tail extends the annealing
+>         full_primer = insertion + anneal_seq
+>         # Find actual annealing: longest 3' match to template
+>         doubled = input_seq + input_seq
+>         actual_anneal_len = 0
+>         for l in range(anneal_len, min(len(full_primer)+1, 46)):
+>             if full_primer[-l:] in doubled:
+>                 actual_anneal_len = l
+>             else:
+>                 break
+>
+>         try:
+>             tm = get_tm(full_primer[-actual_anneal_len:])
+>             if 58 <= tm <= 72:
+>                 fwd_options.append((actual_anneal_len, tm, full_primer, full_primer[-actual_anneal_len:]))
+>         except:
+>             pass
+>
+>     # Deduplicate
+>     seen = set()
+>     unique_fwd = []
+>     for item in fwd_options:
+>         key = item[3]  # annealing sequence
+>         if key not in seen:
+>             seen.add(key)
+>             unique_fwd.append(item)
+>
+>     # Get all valid reverse annealing options
+>     rev_options = []
+>     for anneal_len in range(15, 46):
+>         region = (input_seq + input_seq)[insert_pos-anneal_len:insert_pos]
+>         if len(region) < anneal_len:
+>             continue
+>         rev_primer = reverse_complement(region)
+>         try:
+>             tm = get_tm(rev_primer)
+>             if 58 <= tm <= 72:
+>                 rev_options.append((anneal_len, tm, rev_primer))
+>         except:
+>             pass
+>
+>     # Find best pair
+>     best = None
+>     best_diff = float('inf')
+>     for fl, ftm, fprimer, fanneal in unique_fwd:
+>         for rl, rtm, rprimer in rev_options:
+>             diff = abs(ftm - rtm)
+>             if diff <= 5 and diff < best_diff:
+>                 best_diff = diff
+>                 best = (fl, ftm, fprimer, fanneal, rl, rtm, rprimer)
+>
+>     if best:
+>         fl, ftm, fprimer, fanneal, rl, rtm, rprimer = best
+>         print(f"Best pair: Fwd anneal={fanneal} ({fl}bp, Tm={ftm:.2f}), Rev={rprimer} ({rl}bp, Tm={rtm:.2f}), diff={abs(ftm-rtm):.2f}")
+>         print(f"Full fwd primer: {fprimer}")
+>     else:
+>         print("No valid pair found")
+>
+> PYEOF
+
+=== Insert position 213 ===
+Insertion: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39bp)
+Best pair: Fwd anneal=AGCAAGGGCGAGGAG (15bp, Tm=59.54), Rev=CATATGTATATCTCCTTCTTAAAGTTAAACAA (32bp, Tm=59.74), diff=0.21
+Full fwd primer: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG
+
+=== Insert position 214 ===
+Insertion: GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAA (39bp)
+Best pair: Fwd anneal=AGCAAGGGCGAGGAGC (16bp, Tm=63.48), Rev=TCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (44bp, Tm=63.41), diff=0.07
+Full fwd primer: GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGC
+
+=== Insert position 215 ===
+Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39bp)
+Best pair: Fwd anneal=AGCAAGGGCGAGGAGCT (17bp, Tm=65.14), Rev=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT (44bp, Tm=64.00), diff=1.14
+Full fwd primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCT
+root@37ed25e0-4a72-4dfe-91b5-2e7216afa990:/app#

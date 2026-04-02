@@ -1,0 +1,265 @@
+New Terminal Output:
+
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# python3 -c "
+> import pandas as pd
+> # Compare input and output formats
+> df_in = pd.read_csv('/app/demo_metadata.csv')
+> print('Input columns:', df_in.columns.tolist())
+> print('Input first col name:', df_in.columns[0])
+> print('Input index sample:', df_in.iloc[0][df_in.columns[0]])
+> "
+Input columns: ['Unnamed: 0', 'raw_classification', 'main_classification', 'super_classification', 'type', 'xmin', 'ymin', 'xmax', 'ymax', 'coords_x', 'coords_y
+']
+Input first col name: Unnamed: 0
+Input index sample: 0
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# cat > /app/convert_masks.py << 'PYTHON_SCRIPT'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> import torch
+> from mobile_sam import sam_model_registry, SamPredictor
+> from tqdm import tqdm
+>
+>
+> def mask_to_polyline(mask):
+>     """Convert a binary mask to polyline coordinates.
+>     Returns coords_x, coords_y as lists of ints.
+>     """
+>     mask_uint8 = mask.astype(np.uint8) * 255
+>     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     if len(contours) == 0:
+>         return [], []
+>     # Take the largest contour
+>     contour = max(contours, key=cv2.contourArea)
+>     # contour shape is (N, 1, 2) where 2 is (x, y)
+>     contour = contour.squeeze(axis=1)  # (N, 2)
+>     if len(contour) < 3:
+>         return [], []
+>     coords_x = contour[:, 0].tolist()
+>     coords_y = contour[:, 1].tolist()
+>     # Close the polyline if not already closed
+>     if coords_x[0] != coords_x[-1] or coords_y[0] != coords_y[-1]:
+>         coords_x.append(coords_x[0])
+>         coords_y.append(coords_y[0])
+>     return coords_x, coords_y
+>
+>
+> def largest_connected_component(mask):
+>     """Keep only the largest connected component in a binary mask."""
+>     mask_uint8 = mask.astype(np.uint8)
+>     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+>     if num_labels <= 1:
+>         return mask
+>     # Find the largest component (excluding background label 0)
+>     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>     return (labels == largest_label).astype(bool)
+>
+>
+> def main():
+>     parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+>     parser.add_argument('output_path', type=str, help='Path to the output CSV file')
+>     parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+>     parser.add_argument('csv_path', type=str, help='Path to metadata CSV')
+>     args = parser.parse_args()
+>
+>     # Load image
+>     image = cv2.imread(args.rgb_path)
+>     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+>     h, w = image.shape[:2]
+>
+>     # Load MobileSAM
+>     model_type = 'vit_t'
+>     device = 'cpu'
+>     sam = sam_model_registry[model_type](checkpoint=args.weights_path)
+>     sam.to(device=device)
+>     sam.eval()
+>     predictor = SamPredictor(sam)
+>     predictor.set_image(image_rgb)
+>
+>     # Load CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     n_cells = len(df)
+>
+>     # Step 1: Generate SAM masks and logits for ALL cells using bounding box prompts
+>     all_masks = []
+>     all_logits = []  # per-pixel logits for overlap resolution
+>
+>     print("Generating SAM masks for all cells...")
+>     for idx in tqdm(range(n_cells)):
+>         row = df.iloc[idx]
+>         xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>
+>         # Use bounding box as prompt
+>         input_box = np.array([xmin, ymin, xmax, ymax])
+>
+>         masks, scores, logits = predictor.predict(
+>             point_coords=None,
+>             point_labels=None,
+>             box=input_box[None, :],
+>             multimask_output=True,
+>         )
+>
+>         # Select the mask with the highest score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]  # (H, W) boolean
+>
+>         # Get the low-res logit and upscale to full resolution for per-pixel overlap resolution
+>         best_logit = logits[best_idx]  # (256, 256)
+>         # Resize logit to full image size
+>         logit_resized = cv2.resize(
+>             best_logit.astype(np.float32),
+>             (w, h),
+>             interpolation=cv2.INTER_LINEAR
+>         )
+>
+>         all_masks.append(best_mask)
+>         all_logits.append(logit_resized)
+>
+>     # Step 2: Resolve overlaps using per-pixel logits
+>     # For each pixel, assign it to the cell with the highest logit value
+>     print("Resolving overlaps...")
+>     assignment = np.full((h, w), -1, dtype=np.int32)
+>     logit_map = np.full((h, w), -np.inf, dtype=np.float32)
+>
+>     for idx in range(n_cells):
+>         mask = all_masks[idx]
+>         logit = all_logits[idx]
+>         # Only consider pixels where the mask is active
+>         active = mask & (logit > logit_map)
+>         assignment[active] = idx
+>         logit_map[active] = logit[active]
+>
+>     # Step 3: Extract final masks, ensure contiguity, and convert to polylines
+>     print("Extracting contours...")
+>     new_xmin = []
+>     new_ymin = []
+>     new_xmax = []
+>     new_ymax = []
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_types = []
+>
+>     for idx in tqdm(range(n_cells)):
+>         # Get the final mask after overlap resolution
+>         final_mask = (assignment == idx)
+>
+>         # Ensure contiguity - keep only largest connected component
+>         if np.any(final_mask):
+>             final_mask = largest_connected_component(final_mask)
+>
+>         if np.any(final_mask):
+>             # Get bounding box
+>             ys, xs = np.where(final_mask)
+>             xmin_new = int(xs.min())
+>             xmax_new = int(xs.max())
+>             ymin_new = int(ys.min())
+>             ymax_new = int(ys.max())
+>
+>             # Convert to polyline
+>             cx, cy = mask_to_polyline(final_mask)
+>
+>             if len(cx) >= 3:
+>                 new_xmin.append(xmin_new)
+>                 new_xmax.append(xmax_new)
+>                 new_ymin.append(ymin_new)
+>                 new_ymax.append(ymax_new)
+>                 new_coords_x.append(','.join(str(x) for x in cx))
+>                 new_coords_y.append(','.join(str(y) for y in cy))
+>                 new_types.append('polyline')
+>             else:
+>                 # Fallback: use original data
+>                 row = df.iloc[idx]
+>                 new_xmin.append(int(row['xmin']))
+>                 new_xmax.append(int(row['xmax']))
+>                 new_ymin.append(int(row['ymin']))
+>                 new_ymax.append(int(row['ymax']))
+>                 new_coords_x.append(row['coords_x'])
+>                 new_coords_y.append(row['coords_y'])
+>                 new_types.append(row['type'])
+>         else:
+>             # Mask is empty after overlap resolution - use original
+>             row = df.iloc[idx]
+>             new_xmin.append(int(row['xmin']))
+>             new_xmax.append(int(row['xmax']))
+>             new_ymin.append(int(row['ymin']))
+>             new_ymax.append(int(row['ymax']))
+>             new_coords_x.append(row['coords_x'])
+>             new_coords_y.append(row['coords_y'])
+>             new_types.append(row['type'])
+>
+>     # Update dataframe
+>     df['xmin'] = new_xmin
+>     df['xmax'] = new_xmax
+>     df['ymin'] = new_ymin
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = new_types
+>
+>     # Save output
+>     output_dir = os.path.dirname(args.output_path)
+>     if output_dir and not os.path.exists(output_dir):
+>         os.makedirs(output_dir, exist_ok=True)
+>     df.to_csv(args.output_path, index=False)
+>     print(f"Saved output to {args.output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# echo 'Script updated'
+Script updated
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# python3 /app/convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png
+ /app/demo_metadata.csv > /tmp/run2.log 2>&1 &
+[1] 4361
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# tail -100 /tmp/run2.log &
+[2] 4590
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# /usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.mo
+dels.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_5m_2
+24. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_11m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+[2]+  Done                    tail -100 /tmp/run2.log
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# kill %2 2>/dev/null; tail -5 /tmp/run2.log
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# ^C
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# jobs
+[1]+  Running                 python3 /app/convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png /app/demo_metadat
+a.csv > /tmp/run2.log 2>&1 &
+root@30f0524c-3806-4940-80d5-1428457e9259:/app# head -1 /tmp/run2.log && tail -5 /tmp/run2.log
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+root@30f0524c-3806-4940-80d5-1428457e9259:/app#

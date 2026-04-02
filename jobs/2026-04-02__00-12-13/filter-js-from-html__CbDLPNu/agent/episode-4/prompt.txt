@@ -1,0 +1,208 @@
+New Terminal Output:
+
+root@48752eef-d652-4664-babe-a8dcbb4fce7c:/app# cat > /app/filter.py << 'PYTHON_EOF'
+_dangerous = True
+
+     > import sys
+> import re
+> import html
+>
+>
+> def decode_html_entities(s):
+>     """Decode HTML entities for comparison purposes."""
+>     # Decode numeric entities (&#106; &#x6A;) and named entities
+>     return html.unescape(s)
+>
+>
+> def has_js_protocol(value):
+>     """Check if an attribute value contains javascript: protocol, accounting for obfuscation."""
+>     # Decode HTML entities
+>     decoded = decode_html_entities(value)
+>     # Remove whitespace characters (tabs, newlines, carriage returns, null bytes)
+>     cleaned = re.sub(r'[\s\x00]+', '', decoded).lower()
+>     # Check for javascript: protocol
+>     if cleaned.startswith('javascript:'):
+>         return True
+>     # Also check for vbscript: and data: with script content
+>     if cleaned.startswith('vbscript:'):
+>         return True
+>     return False
+>
+>
+> def has_dangerous_data_uri(value):
+>     """Check if a data: URI contains script content."""
+>     decoded = decode_html_entities(value)
+>     cleaned = re.sub(r'[\s\x00]+', '', decoded).lower()
+>     if cleaned.startswith('data:') and ('text/html' in cleaned or 'application/xhtml' in cleaned):
+>         return True
+>     return False
+>
+>
+> def process_tag(tag_match):
+>     """Process an HTML tag, removing dangerous attributes."""
+>     tag_str = tag_match.group(0)
+>
+>     # Don't process comments, doctypes, or closing tags
+>     if tag_str.startswith('<!--') or tag_str.startswith('<!') or tag_str.startswith('</'):
+>         return tag_str
+>
+>     # Extract tag name - handle <svg/onload=... case
+>     tag_name_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', tag_str)
+>     if not tag_name_match:
+>         return tag_str
+>
+>     tag_name = tag_name_match.group(1).lower()
+>
+>     # Get everything after the tag name
+>     rest = tag_str[tag_name_match.end():]
+>
+>     # Parse attributes from rest
+>     # We need to rebuild the tag, removing dangerous attributes
+>     result_parts = ['<' + tag_name_match.group(1)]  # preserve original case
+>
+>     # Pattern to match attributes in the rest of the tag
+>     # This handles: name="value", name='value', name=value, name (boolean)
+>     # Also handles /onload=... (slash as separator)
+>     pos = 0
+>     while pos < len(rest):
+>         # Match leading whitespace or / separator
+>         ws_match = re.match(r'([\s/]+)', rest[pos:])
+>         if ws_match:
+>             separator = ws_match.group(1)
+>             pos += ws_match.end()
+>         else:
+>             separator = ''
+>
+>         # Check for end of tag
+>         if pos >= len(rest):
+>             result_parts.append(separator)
+>             break
+>
+>         if rest[pos] == '>':
+>             result_parts.append(separator + '>')
+>             pos += 1
+>             break
+>
+>         # Try to match an attribute
+>         attr_match = re.match(
+>             r'([a-zA-Z_][a-zA-Z0-9_\-:]*)'
+>             r'(?:\s*=\s*'
+>             r'(?:"([^"]*)"'
+>             r"|'([^']*)'"
+>             r'|([^\s>]*))'
+>             r')?',
+>             rest[pos:]
+>         )
+>
+>         if attr_match and attr_match.group(0):
+>             attr_name = attr_match.group(1)
+>             attr_name_lower = attr_name.lower()
+>             # Get the full attribute text
+>             full_attr = attr_match.group(0)
+>
+>             # Determine attribute value
+>             attr_value = attr_match.group(2)  # double-quoted
+>             if attr_value is None:
+>                 attr_value = attr_match.group(3)  # single-quoted
+>             if attr_value is None:
+>                 attr_value = attr_match.group(4)  # unquoted
+>             if attr_value is None:
+>                 attr_value = ''  # boolean attribute
+>
+>             is_dangerous = False
+>
+>             # Check for event handler attributes (on*)
+>             if re.match(r'^on', attr_name_lower):
+>                 is_dangerous = True
+>
+>             # Check for javascript: or vbscript: in URL attributes
+>             if attr_value and has_js_protocol(attr_value):
+>                 is_dangerous = True
+>
+>             # Check for dangerous data: URIs
+>             if attr_value and has_dangerous_data_uri(attr_value):
+>                 is_dangerous = True
+>
+>             # Check for javascript: in style attribute
+>             if attr_name_lower == 'style' and attr_value:
+>                 decoded_style = decode_html_entities(attr_value)
+>                 cleaned_style = re.sub(r'[\s\x00]+', '', decoded_style).lower()
+>                 if 'javascript:' in cleaned_style or 'expression(' in cleaned_style or 'vbscript:' in cleaned_style:
+>                     is_dangerous = True
+>
+>             if not is_dangerous:
+>                 result_parts.append(separator + full_attr)
+>             # If dangerous, skip it (don't add separator or attribute)
+>
+>             pos += attr_match.end()
+>         else:
+>             # Not an attribute, just append the character
+>             result_parts.append(separator + rest[pos])
+>             pos += 1
+>
+>     return ''.join(result_parts)
+>
+>
+> def filter_js(html_content):
+>     # Step 1: Remove <script> tags and their contents
+>     # Handle multi-line, various attribute formats
+>     html_content = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html_content,
+>         flags=re.DOTALL | re.IGNORECASE
+>     )
+>     # Handle self-closing script tags
+>     html_content = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle unclosed script tags (opening only)
+>     html_content = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 2: Remove </script> orphan closing tags
+>     html_content = re.sub(
+>         r'</script\s*>',
+>         '',
+>         html_content,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Step 3: Process all HTML tags to remove dangerous attributes
+>     # Match HTML tags (opening tags with attributes)
+>     html_content = re.sub(
+>         r'<[a-zA-Z][a-zA-Z0-9]*(?:[\s/][^>]*)?>',
+>         process_tag,
+>         html_content
+>     )
+>
+>     return html_content
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     filtered = filter_js(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(filtered)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@48752eef-d652-4664-babe-a8dcbb4fce7c:/app#

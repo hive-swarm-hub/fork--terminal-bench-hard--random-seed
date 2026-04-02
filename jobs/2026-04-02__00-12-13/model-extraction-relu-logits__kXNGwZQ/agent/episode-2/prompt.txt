@@ -1,0 +1,239 @@
+New Terminal Output:
+
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) w.r.t. x using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def steal_A1():
+>     np.random.seed(42)
+>
+>     # Step 1: Collect many gradients at random points
+>     n_samples = 2000
+>     gradients = []
+>     points = []
+>
+>     for _ in range(n_samples):
+>         x = np.random.randn(10) * 2.0
+>         g = compute_gradient(x)
+>         gradients.append(g)
+>         points.append(x)
+>
+>     gradients = np.array(gradients)
+>     points = np.array(points)
+>
+>     # Step 2: Find gradient differences between nearby points
+>     # When we cross a single ReLU boundary, the gradient changes by
+>     # a2_i * a1_i (outer product contribution), so the difference
+>     # in the gradient vector is proportional to row i of A1.
+>
+>     # Compute all pairwise gradient differences
+>     # For efficiency, use a subset
+>     n_use = min(1000, n_samples)
+>
+>     # Collect unique gradient difference directions
+>     rows_found = []  # These will be candidate rows of A1 (up to scale)
+>
+>     for i in range(n_use):
+>         for j in range(i+1, min(i+20, n_use)):
+>             diff = gradients[i] - gradients[j]
+>             norm = np.linalg.norm(diff)
+>             if norm < 1e-10:
+>                 continue  # Same activation pattern
+>
+>             # Normalize the direction
+>             direction = diff / norm
+>
+>             # Check if this direction is already found
+>             is_new = True
+>             for existing in rows_found:
+>                 # Check if parallel (same or opposite direction)
+>                 cos_sim = abs(np.dot(direction, existing / np.linalg.norm(existing)))
+>                 if cos_sim > 0.999:
+>                     is_new = False
+>                     break
+>
+>             if is_new:
+>                 rows_found.append(direction.copy())
+>
+>     print(f"Found {len(rows_found)} candidate directions from gradient differences")
+>
+>     # The above might find directions that are sums of multiple rows.
+>     # We need to be smarter: find gradient differences where only ONE neuron flips.
+>     # Strategy: use interpolation between two points to find exact boundary crossings.
+>
+>     # Better approach: For each pair of points with different gradients,
+>     # binary search along the line to find the exact boundary point,
+>     # then the gradient difference across that boundary is exactly a2_i * a1_i[:].
+>
+>     rows_clean = []
+>
+>     for i in range(n_use):
+>         for j in range(i+1, min(i+5, n_use)):
+>             g_i = gradients[i]
+>             g_j = gradients[j]
+>             diff_norm = np.linalg.norm(g_i - g_j)
+>             if diff_norm < 1e-10:
+>                 continue
+>
+>             # Binary search along the line from points[i] to points[j]
+>             # to find a single boundary crossing
+>             lo, hi = 0.0, 1.0
+>             x_lo = points[i]
+>             x_hi = points[j]
+>             g_lo = g_i
+>
+>             # First check how many boundaries we cross
+>             # We'll do binary search to isolate single crossings
+>             boundaries = find_boundaries_on_segment(points[i], points[j])
+>
+>             for t_boundary in boundaries:
+>                 eps_t = 1e-7
+>                 x_before = points[i] + (t_boundary - eps_t) * (points[j] - points[i])
+>                 x_after = points[i] + (t_boundary + eps_t) * (points[j] - points[i])
+>                 g_before = compute_gradient(x_before)
+>                 g_after = compute_gradient(x_after)
+>                 diff = g_after - g_before
+>                 norm = np.linalg.norm(diff)
+>                 if norm < 1e-10:
+>                     continue
+>                 direction = diff / norm
+>
+>                 is_new = True
+>                 for existing in rows_clean:
+>                     cos_sim = abs(np.dot(direction, existing / np.linalg.norm(existing)))
+>                     if cos_sim > 0.999:
+>                         is_new = False
+>                         break
+>                 if is_new:
+>                     rows_clean.append(diff.copy())  # Keep unnormalized to preserve scale info
+>                     if len(rows_clean) >= 20:
+>                         break
+>         if len(rows_clean) >= 20:
+>             break
+>
+>     print(f"Found {len(rows_clean)} clean row directions")
+>
+>     # If we haven't found enough, do more sampling
+>     if len(rows_clean) < 20:
+>         print("Doing additional sampling...")
+>         for trial in range(5000):
+>             x1 = np.random.randn(10) * 2.0
+>             x2 = x1 + np.random.randn(10) * 0.5  # Nearby point
+>
+>             boundaries = find_boundaries_on_segment(x1, x2)
+>             for t_boundary in boundaries:
+>                 eps_t = 1e-7
+>                 x_before = x1 + (t_boundary - eps_t) * (x2 - x1)
+>                 x_after = x1 + (t_boundary + eps_t) * (x2 - x1)
+>                 g_before = compute_gradient(x_before)
+>                 g_after = compute_gradient(x_after)
+>                 diff = g_after - g_before
+>                 norm = np.linalg.norm(diff)
+>                 if norm < 1e-10:
+>                     continue
+>                 direction = diff / norm
+>
+>                 is_new = True
+>                 for existing in rows_clean:
+>                     cos_sim = abs(np.dot(direction, existing / np.linalg.norm(existing)))
+>                     if cos_sim > 0.999:
+>                         is_new = False
+>                         break
+>                 if is_new:
+>                     rows_clean.append(diff.copy())
+>                     print(f"  Found row {len(rows_clean)}")
+>                     if len(rows_clean) >= 20:
+>                         break
+>             if len(rows_clean) >= 20:
+>                 break
+>
+>     # Now rows_clean contains a2_i * a1_i[:] for each neuron i
+>     # We want A1 up to permutation and scaling, so each row is already
+>     # a scaled version of a row of A1. Just normalize each row.
+>     # Actually, the task says "up to permuting neurons and scaling",
+>     # meaning each row can be independently scaled. So we can just
+>     # use the directions we found.
+>
+>     # But we need to recover the actual scale of each row of A1.
+>     # The diff = a2_i * a1_i[:], so the row direction is correct but
+>     # scaled by a2_i. Since we want A1 up to scaling per neuron,
+>     # we can just normalize each row to unit norm, or keep as-is.
+>     # "up to permuting neurons and scaling" means the matrix should
+>     # equal D * P * A1 for some diagonal matrix D and permutation P.
+>     # So we just need the directions right.
+>
+>     # Let's normalize each row
+>     A1_stolen = np.array(rows_clean[:20])
+>     for i in range(len(A1_stolen)):
+>         A1_stolen[i] = A1_stolen[i] / np.linalg.norm(A1_stolen[i])
+>
+>     return A1_stolen
+>
+> def find_boundaries_on_segment(x1, x2, n_check=50):
+>     """Find parameter values t where a ReLU boundary is crossed on segment x1 + t*(x2-x1)."""
+>     ts = np.linspace(0, 1, n_check)
+>     grads = []
+>     for t in ts:
+>         x = x1 + t * (x2 - x1)
+>         g = compute_gradient(x)
+>         grads.append(g)
+>
+>     boundaries = []
+>     for k in range(len(ts) - 1):
+>         diff_norm = np.linalg.norm(grads[k+1] - grads[k])
+>         if diff_norm > 1e-10:
+>             # Binary search for exact boundary
+>             t_lo, t_hi = ts[k], ts[k+1]
+>             for _ in range(40):  # Binary search iterations
+>                 t_mid = (t_lo + t_hi) / 2
+>                 x_mid = x1 + t_mid * (x2 - x1)
+>                 g_mid = compute_gradient(x_mid)
+>                 if np.linalg.norm(g_mid - grads[k]) > 1e-10:
+>                     t_hi = t_mid
+>                 else:
+>                     t_lo = t_mid
+>             boundaries.append((t_lo + t_hi) / 2)
+>
+>     return boundaries
+>
+> if __name__ == "__main__":
+>     A1_stolen = steal_A1()
+>     print(f"Stolen A1 shape: {A1_stolen.shape}")
+>     np.save('/app/stolen_A1.npy', A1_stolen)
+>     print("Saved to /app/stolen_A1.npy")
+>
+>     # Verify by comparing with actual A1
+>     from forward import A1 as true_A1
+>     # Normalize true A1 rows for comparison
+>     true_A1_norm = true_A1.copy()
+>     for i in range(true_A1.shape[0]):
+>         true_A1_norm[i] = true_A1_norm[i] / np.linalg.norm(true_A1_norm[i])
+>
+>     # For each stolen row, find best matching true row
+>     print("\nVerification (max cosine similarity for each stolen row):")
+>     matched = set()
+>     for i in range(A1_stolen.shape[0]):
+>         best_sim = 0
+>         best_j = -1
+>         for j in range(true_A1_norm.shape[0]):
+>             sim = abs(np.dot(A1_stolen[i], true_A1_norm[j]))
+>             if sim > best_sim:
+>                 best_sim = sim
+>                 best_j = j
+>         matched.add(best_j)
+>         print(f"  Stolen row {i} -> True row {best_j}, similarity: {best_sim:.6f}")
+>     print(f"\nMatched {len(matched)} unique true rows out of {true_A1.shape[0]}")
+> PYEOF
+root@98db1854-a897-43c7-aef8-d0a52024d606:/app#
