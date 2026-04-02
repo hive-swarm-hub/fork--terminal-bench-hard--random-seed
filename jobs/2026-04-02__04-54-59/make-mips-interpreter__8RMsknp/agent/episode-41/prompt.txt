@@ -1,0 +1,779 @@
+New Terminal Output:
+
+>     const pageIdx = addr >>> PAGE_BITS;
+>     let page = this.pages.get(pageIdx);
+>     if (!page) {
+>       page = Buffer.alloc(PAGE_SIZE);
+>       this.pages.set(pageIdx, page);
+>     }
+>     return page;
+>   }
+>
+>   _hasPage(addr) {
+>     return this.pages.has(addr >>> PAGE_BITS);
+>   }
+>
+>   readU8(addr) {
+>     addr = addr >>> 0;
+>     return this._getPage(addr)[addr & PAGE_MASK];
+>   }
+>
+>   writeU8(addr, val) {
+>     addr = addr >>> 0;
+>     this._getPage(addr)[addr & PAGE_MASK] = val & 0xFF;
+>   }
+>
+>   readS8(addr) {
+>     const v = this.readU8(addr);
+>     return v >= 128 ? v - 256 : v;
+>   }
+>
+>   readU16(addr) {
+>     addr = addr >>> 0;
+>     const off = addr & PAGE_MASK;
+>     if (off <= PAGE_SIZE - 2) {
+>       const page = this._getPage(addr);
+>       return page[off] | (page[off + 1] << 8);
+>     }
+>     return this.readU8(addr) | (this.readU8(addr + 1) << 8);
+>   }
+>
+>   readS16(addr) {
+>     const v = this.readU16(addr);
+>     return v >= 0x8000 ? v - 0x10000 : v;
+>   }
+>
+>   writeU16(addr, val) {
+>     addr = addr >>> 0;
+>     const off = addr & PAGE_MASK;
+>     if (off <= PAGE_SIZE - 2) {
+>       const page = this._getPage(addr);
+>       page[off] = val & 0xFF;
+>       page[off + 1] = (val >>> 8) & 0xFF;
+>     } else {
+>       this.writeU8(addr, val & 0xFF);
+>       this.writeU8(addr + 1, (val >>> 8) & 0xFF);
+>     }
+>   }
+>
+>   readU32(addr) {
+>     addr = addr >>> 0;
+>     const off = addr & PAGE_MASK;
+>     if (off <= PAGE_SIZE - 4) {
+>       const page = this._getPage(addr);
+>       return (page[off] | (page[off+1] << 8) | (page[off+2] << 16) | (page[off+3] << 24)) >>> 0;
+>     }
+>     return (this.readU8(addr) | (this.readU8(addr+1) << 8) | (this.readU8(addr+2) << 16) | (this.readU8(addr+3) << 24)) >>> 0;
+>   }
+>
+>   readS32(addr) {
+>     return this.readU32(addr) | 0;
+>   }
+>
+>   writeU32(addr, val) {
+>     addr = addr >>> 0;
+>     val = val >>> 0;
+>     const off = addr & PAGE_MASK;
+>     if (off <= PAGE_SIZE - 4) {
+>       const page = this._getPage(addr);
+>       page[off] = val & 0xFF;
+>       page[off+1] = (val >>> 8) & 0xFF;
+>       page[off+2] = (val >>> 16) & 0xFF;
+>       page[off+3] = (val >>> 24) & 0xFF;
+>     } else {
+>       this.writeU8(addr, val & 0xFF);
+>       this.writeU8(addr+1, (val >>> 8) & 0xFF);
+>       this.writeU8(addr+2, (val >>> 16) & 0xFF);
+>       this.writeU8(addr+3, (val >>> 24) & 0xFF);
+>     }
+>   }
+>
+>   writeBuffer(addr, buf, offset, length) {
+>     for (let i = 0; i < length; i++) {
+>       this.writeU8(addr + i, buf[offset + i]);
+>     }
+>   }
+>
+>   readBuffer(addr, length) {
+>     const buf = Buffer.alloc(length);
+>     for (let i = 0; i < length; i++) {
+>       buf[i] = this.readU8(addr + i);
+>     }
+>     return buf;
+>   }
+>
+>   readString(addr) {
+>     let s = '';
+>     for (let i = 0; i < 4096; i++) {
+>       const c = this.readU8(addr + i);
+>       if (c === 0) break;
+>       s += String.fromCharCode(c);
+>     }
+>     return s;
+>   }
+> }
+>
+> // ============================================================
+> // ELF Loader
+> // ============================================================
+> function loadELF(filepath, mem) {
+>   const data = fs.readFileSync(filepath);
+>   if (data[0] !== 0x7F || data[1] !== 0x45 || data[2] !== 0x4C || data[3] !== 0x46) {
+>     throw new Error('Not an ELF file');
+>   }
+>   const entry = data.readUInt32LE(24);
+>   const phoff = data.readUInt32LE(28);
+>   const phentsize = data.readUInt16LE(42);
+>   const phnum = data.readUInt16LE(44);
+>   console.log('ELF: entry=0x' + entry.toString(16) + ', ' + phnum + ' program headers');
+>   for (let i = 0; i < phnum; i++) {
+>     const off = phoff + i * phentsize;
+>     const ptype = data.readUInt32LE(off);
+>     const poff = data.readUInt32LE(off + 4);
+>     const vaddr = data.readUInt32LE(off + 8);
+>     const filesz = data.readUInt32LE(off + 16);
+>     const memsz = data.readUInt32LE(off + 20);
+>     if (ptype === 1) {
+>       console.log('  LOAD: vaddr=0x' + vaddr.toString(16) + ' filesz=0x' + filesz.toString(16) + ' memsz=0x' + memsz.toString(16));
+>       mem.writeBuffer(vaddr, data, poff, filesz);
+>     }
+>   }
+>   return entry;
+> }
+>
+> // ============================================================
+> // MIPS CPU
+> // ============================================================
+> class MIPSCPU {
+>   constructor(mem) {
+>     this.mem = mem;
+>     this.regs = new Int32Array(32);
+>     this.pc = 0;
+>     this.nextPc = 0;
+>     this.hi = 0;
+>     this.lo = 0;
+>     this.running = true;
+>     this.instructionCount = 0;
+>     this.delaySlot = false;
+>
+>     // File descriptor management
+>     this.fdMap = new Map(); // virtual fd -> {realFd, pos}
+>     this.nextFd = 10;
+>
+>     // Frame tracking
+>     this.frameCount = 0;
+>     this.DG_DRAW_FRAME_ADDR = 0x004395e4;
+>     this.DG_SCREEN_BUFFER_PTR = 0x004b0a40;
+>     this.SCREEN_W = 640;
+>     this.SCREEN_H = 400;
+>   }
+>
+>   getReg(r) { return r === 0 ? 0 : this.regs[r]; }
+>   getRegU(r) { return r === 0 ? 0 : this.regs[r] >>> 0; }
+>   setReg(r, val) { if (r !== 0) this.regs[r] = val | 0; }
+>
+>   // ============================================================
+>   // Syscall Handler
+>   // ============================================================
+>   handleSyscall() {
+>     const sn = this.getReg(2); // v0 = syscall number
+>     const a0 = this.getRegU(4);
+>     const a1 = this.getRegU(5);
+>     const a2 = this.getRegU(6);
+>     const a3 = this.getRegU(7);
+>     let result = 0;
+>
+>     switch (sn) {
+>       case 0: result = this._sysRead(a0, a1, a2); break;
+>       case 1: result = this._sysWrite(a0, a1, a2); break;
+>       case 2: result = this._sysOpen(a0, a1, a2); break;
+>       case 3: result = this._sysClose(a0); break;
+>       case 8: result = this._sysLseek(a0, a1 | 0, a2); break;
+>       case 35: result = 0; break; // nanosleep
+>       case 60: // exit
+>         console.log('EXIT code=' + a0);
+>         this.running = false;
+>         return;
+>       case 74: result = 0; break; // fsync
+>       case 82: result = 0; break; // rename
+>       case 83: result = 0; break; // mkdir
+>       case 87: result = 0; break; // unlink
+>       case 96: // gettimeofday
+>         if (a0) {
+>           const now = Date.now();
+>           this.mem.writeU32(a0, Math.floor(now / 1000));
+>           this.mem.writeU32(a0 + 4, (now % 1000) * 1000);
+>         }
+>         result = 0;
+>         break;
+>       case 201: // time
+>         result = Math.floor(Date.now() / 1000);
+>         if (a0) this.mem.writeU32(a0, result);
+>         break;
+>       default:
+>         console.log('Unknown syscall ' + sn + ' at PC=0x' + this.pc.toString(16));
+>         result = -22;
+>     }
+>     this.setReg(2, result);
+>   }
+>
+>   _sysOpen(pathAddr, flags, mode) {
+>     const pathname = this.mem.readString(pathAddr);
+>     try {
+>       let nflags = 0;
+>       if (flags & 1) nflags |= fs.constants.O_WRONLY;
+>       if (flags & 2) nflags |= fs.constants.O_RDWR;
+>       if (flags === 0) nflags = fs.constants.O_RDONLY;
+>       if (flags & 64) nflags |= fs.constants.O_CREAT;
+>       if (flags & 512) nflags |= fs.constants.O_TRUNC;
+>       if (flags & 1024) nflags |= fs.constants.O_APPEND;
+>       const realFd = fs.openSync(pathname, nflags, mode & 0o777);
+>       const vfd = this.nextFd++;
+>       this.fdMap.set(vfd, { realFd: realFd, pos: 0 });
+>       return vfd;
+>     } catch (e) {
+>       return -2;
+>     }
+>   }
+>
+>   _sysRead(fd, bufAddr, count) {
+>     if (fd < 5) return -9;
+>     const entry = this.fdMap.get(fd);
+>     if (!entry) return -9;
+>     const buf = Buffer.alloc(count);
+>     try {
+>       const n = fs.readSync(entry.realFd, buf, 0, count, entry.pos);
+>       for (let i = 0; i < n; i++) this.mem.writeU8(bufAddr + i, buf[i]);
+>       entry.pos += n;
+>       return n;
+>     } catch (e) { return -5; }
+>   }
+>
+>   _sysWrite(fd, bufAddr, count) {
+>     if (fd === 0 || fd === 1 || fd === 2) {
+>       const buf = this.mem.readBuffer(bufAddr, count);
+>       process.stdout.write(buf);
+>       return count;
+>     }
+>     const entry = this.fdMap.get(fd);
+>     if (!entry) return -9;
+>     const buf = this.mem.readBuffer(bufAddr, count);
+>     try {
+>       const n = fs.writeSync(entry.realFd, buf, 0, count, entry.pos);
+>       entry.pos += n;
+>       return n;
+>     } catch (e) { return -5; }
+>   }
+>
+g>   _sysClose(fd) {
+>     if (fd < 5) return 0;
+>     const entry = this.fdMap.get(fd);
+>     if (!entry) return -9;
+>     try {
+>       fs.closeSync(entry.realFd);
+>       this.fdMap.delete(fd);
+>       return 0;
+>     } catch (e) { return -5; }
+>   }
+>
+>   _sysLseek(fd, offset, whence) {
+>     if (fd < 5) return -9;
+>     const entry = this.fdMap.get(fd);
+>     if (!entry) return -9;
+>     try {
+>       const stat = fs.fstatSync(entry.realFd);
+>       switch (whence) {
+>         case 0: entry.pos = offset; break; // SEEK_SET
+>         case 1: entry.pos += offset; break; // SEEK_CUR
+>         case 2: entry.pos = stat.size + offset; break; // SEEK_END
+>         default: return -22;
+>       }
+>       if (entry.pos < 0) entry.pos = 0;
+>       return entry.pos;
+>     } catch (e) { return -5; }
+>   }
+>
+>   // ============================================================
+>   // Save frame as BMP
+>   // ============================================================
+>   saveFrame() {
+>     const bufPtr = this.mem.readU32(this.DG_SCREEN_BUFFER_PTR);
+>     if (bufPtr === 0) return;
+>
+>     const W = this.SCREEN_W;
+>     const H = this.SCREEN_H;
+>     const imageSize = W * H * 4;
+>     const fileSize = 54 + imageSize;
+>     const bmp = Buffer.alloc(fileSize);
+>
+>     // BMP header
+>     bmp[0] = 0x42; bmp[1] = 0x4D; // 'BM'
+>     bmp.writeUInt32LE(fileSize, 2);
+>     bmp.writeUInt32LE(0, 6); // reserved
+>     bmp.writeUInt32LE(54, 10); // offset to pixel data
+>
+>     // DIB header
+>     bmp.writeUInt32LE(40, 14); // header size
+>     bmp.writeInt32LE(W, 18);
+>     bmp.writeInt32LE(-H, 22); // negative = top-down
+>     bmp.writeUInt16LE(1, 26); // planes
+>     bmp.writeUInt16LE(32, 28); // bpp
+>     bmp.writeUInt32LE(0, 30); // compression
+>     bmp.writeUInt32LE(imageSize, 34);
+>
+>     // Pixel data - copy from MIPS memory
+>     for (let i = 0; i < W * H; i++) {
+>       const pixel = this.mem.readU32(bufPtr + i * 4);
+>       bmp.writeUInt32LE(pixel, 54 + i * 4);
+>     }
+>
+>     const filename = '/tmp/frame.bmp';
+>     fs.writeFileSync(filename, bmp);
+>     console.log('Saved frame to ' + filename + ' (' + fileSize + ' bytes)');
+>     this.frameCount++;
+>   }
+>
+>   // ============================================================
+>   // Execute one instruction
+>   // ============================================================
+>   step() {
+>     const pc = this.pc >>> 0;
+>     const instr = this.mem.readU32(pc);
+>     this.pc = this.nextPc;
+>     this.nextPc = this.pc + 4;
+>
+>     if (instr === 0) { // NOP
+>       return;
+>     }
+>
+>     const op = (instr >>> 26) & 0x3F;
+>     const rs = (instr >>> 21) & 0x1F;
+>     const rt = (instr >>> 16) & 0x1F;
+>     const rd = (instr >>> 11) & 0x1F;
+>     const shamt = (instr >>> 6) & 0x1F;
+>     const funct = instr & 0x3F;
+>     const imm16 = instr & 0xFFFF;
+>     const simm16 = imm16 >= 0x8000 ? imm16 - 0x10000 : imm16;
+>     const target = instr & 0x3FFFFFF;
+>
+
+>     switch (op) {
+>       case 0x00: // SPECIAL
+>         this._execSpecial(rs, rt, rd, shamt, funct, pc);
+>         break;
+>       case 0x01: // REGIMM
+>         this._execRegimm(rs, rt, simm16, pc);
+>         break;
+>       case 0x02: // J
+>         this.nextPc = ((pc + 4) & 0xF0000000) | (target << 2);
+>         break;
+>       case 0x03: // JAL
+>         this.setReg(31, pc + 8);
+>         this.nextPc = ((pc + 4) & 0xF0000000) | (target << 2);
+>         break;
+>       case 0x04: // BEQ
+>         if (this.getReg(rs) === this.getReg(rt))
+>           this.nextPc = (pc + 4 + (simm16 << 2)) >>> 0;
+>         break;
+>       case 0x05: // BNE
+>         if (this.getReg(rs) !== this.getReg(rt))
+>           this.nextPc = (pc + 4 + (simm16 << 2)) >>> 0;
+>         break;
+>       case 0x06: // BLEZ
+>         if (this.getReg(rs) <= 0)
+>           this.nextPc = (pc + 4 + (simm16 << 2)) >>> 0;
+>         break;
+>       case 0x07: // BGTZ
+>         if (this.getReg(rs) > 0)
+>           this.nextPc = (pc + 4 + (simm16 << 2)) >>> 0;
+>         break;
+>       case 0x08: // ADDI
+>         this.setReg(rt, this.getReg(rs) + simm16);
+>         break;
+>       case 0x09: // ADDIU
+>         this.setReg(rt, this.getReg(rs) + simm16);
+>         break;
+>       case 0x0A: // SLTI
+>         this.setReg(rt, this.getReg(rs) < simm16 ? 1 : 0);
+>         break;
+>       case 0x0B: // SLTIU
+>         this.setReg(rt, this.getRegU(rs) < (simm16 >>> 0) ? 1 : 0);
+>         break;
+>       case 0x0C: // ANDI
+>         this.setReg(rt, this.getReg(rs) & imm16);
+>         break;
+>       case 0x0D: // ORI
+>         this.setReg(rt, this.getReg(rs) | imm16);
+>         break;
+>       case 0x0E: // XORI
+>         this.setReg(rt, this.getReg(rs) ^ imm16);
+>         break;
+>       case 0x0F: // LUI
+>         this.setReg(rt, imm16 << 16);
+>         break;
+>       case 0x1C: // SPECIAL2
+>         this._execSpecial2(rs, rt, rd, shamt, funct);
+>         break;
+>       case 0x1F: // SPECIAL3
+>         this._execSpecial3(rs, rt, rd, shamt, funct, instr);
+>         break;
+>       case 0x20: // LB
+>         this.setReg(rt, this.mem.readS8((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x21: // LH
+>         this.setReg(rt, this.mem.readS16((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x22: // LWL
+>         this._lwl(rs, rt, simm16);
+>         break;
+>       case 0x23: // LW
+>         this.setReg(rt, this.mem.readS32((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x24: // LBU
+>         this.setReg(rt, this.mem.readU8((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x25: // LHU
+>         this.setReg(rt, this.mem.readU16((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x26: // LWR
+>         this._lwr(rs, rt, simm16);
+>         break;
+>       case 0x28: // SB
+>         this.mem.writeU8((this.getReg(rs) + simm16) >>> 0, this.getReg(rt) & 0xFF);
+>         break;
+>       case 0x29: // SH
+>         this.mem.writeU16((this.getReg(rs) + simm16) >>> 0, this.getReg(rt) & 0xFFFF);
+>         break;
+>       case 0x2A: // SWL
+>         this._swl(rs, rt, simm16);
+>         break;
+>       case 0x2B: // SW
+>         this.mem.writeU32((this.getReg(rs) + simm16) >>> 0, this.getRegU(rt));
+>         break;
+>       case 0x2E: // SWR
+>         this._swr(rs, rt, simm16);
+>         break;
+>       case 0x30: // LL (load linked - treat as LW)
+>         this.setReg(rt, this.mem.readS32((this.getReg(rs) + simm16) >>> 0));
+>         break;
+>       case 0x38: // SC (store conditional - treat as SW, return 1)
+>         this.mem.writeU32((this.getReg(rs) + simm16) >>> 0, this.getRegU(rt));
+>         this.setReg(rt, 1);
+>         break;
+>       case 0x11: //
+[... output limited to 30000 bytes; 71 interior bytes omitted ...]
+>         break;
+>       default:
+>         if ((funct & 0x30) === 0x30) {
+>           const cond = funct & 0x0F;
+>           const a = getD(fs_), b = getD(ft);
+>           switch (cond & 0x07) {
+>             case 0: this.fpCondition = false; break;
+>             case 1: this.fpCondition = isNaN(a) || isNaN(b); break;
+>             case 2: this.fpCondition = a === b; break;
+>             case 3: this.fpCondition = isNaN(a) || isNaN(b) || a === b; break;
+>             case 4: this.fpCondition = a < b; break;
+>             case 5: this.fpCondition = isNaN(a) || isNaN(b) || a < b; break;
+>             case 6: this.fpCondition = a <= b; break;
+>             case 7: this.fpCondition = isNaN(a) || isNaN(b) || a <= b; break;
+>           }
+>         } else {
+>           console.log('Unknown FPU.D funct=0x' + funct.toString(16));
+>         }
+>     }
+>   }
+>
+>   _fpuW(fs_, ft, fd, funct) {
+>     switch (funct) {
+>       case 0x20: // CVT.S.W
+>         this.fpr[fd] = Math.fround(this.fprI[fs_]);
+>         break;
+>       case 0x21: { // CVT.D.W
+>         if (!this.dpr) {
+>           this.dpr = new Float64Array(16);
+>           this.dprI = new Int32Array(this.dpr.buffer);
+>         }
+>         const idx = fd >> 1;
+>         this.dpr[idx] = this.fprI[fs_];
+>         this.fprI[fd] = this.dprI[idx * 2];
+>         this.fprI[fd + 1] = this.dprI[idx * 2 + 1];
+>         break;
+>       }
+>       default:
+>         console.log('Unknown FPU.W funct=0x' + funct.toString(16));
+>     }
+>   }
+>
+>   // ============================================================
+>   // FPU load/store (handled in main opcode switch for LWC1/SWC1)
+>   // ============================================================
+>
+>   // ============================================================
+>   // Main execution loop
+>   // ============================================================
+>   run() {
+>     this.nextPc = this.pc + 4;
+>     const BATCH = 1000000;
+>     let lastFrameCheck = 0;
+>
+>     while (this.running) {
+>       for (let i = 0; i < BATCH && this.running; i++) {
+>         this.step();
+>         this.instructionCount++;
+>       }
+>
+>       // Check for frame save periodically
+>       if (this.instructionCount - lastFrameCheck > 50000000) {
+>         lastFrameCheck = this.instructionCount;
+>         const drawk = this.mem.readU32(0x004b0a50);
+>         if (drawk > 0 && this.frameCount === 0) {
+>           this.saveFrame();
+>         }
+>       }
+>
+>       if (this.instructionCount % 100000000 === 0) {
+>         console.log('Instructions: ' + this.instructionCount + ' PC=0x' + this.pc.toString(16));
+>       }
+>     }
+>   }
+> }
+>
+> // ============================================================
+> // Main
+> // ============================================================
+> function main() {
+>   const mem = new Memory();
+>   const entry = loadELF('./doomgeneric_mips', mem);
+>
+>   const cpu = new MIPSCPU(mem);
+>   cpu.pc = entry;
+>
+>   // Set up stack pointer (high memory area)
+>   const STACK_TOP = 0x7FFF0000;
+>   cpu.setReg(29, STACK_TOP); // $sp
+>   cpu.setReg(30, STACK_TOP); // $fp
+>
+>   console.log('Starting MIPS execution at 0x' + entry.toString(16));
+>   cpu.run();
+>   console.log('Execution finished after ' + cpu.instructionCount + ' instructions');
+> }
+>
+> main();
+> """)
+> PYEOF
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# wc -l /app/vm.js
+1035 /app/vm.js
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# grep -n 'LWC1\|SWC1\|0x31\|0x39\|case 0x2E\|case 0x30\|case 0x38' /app/vm.js | head -20
+468:      case 0x2E: // SWR
+471:      case 0x30: // LL (load linked - treat as LW)
+474:      case 0x38: // SC (store conditional - treat as SW, return 1)
+603:      case 0x30: // TGE (trap if greater or equal - ignore)
+981:  // FPU load/store (handled in main opcode switch for LWC1/SWC1)
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sed -n '474,480p' /app/vm.js
+      case 0x38: // SC (store conditional - treat as SW, return 1)
+        this.mem.writeU32((this.getReg(rs) + simm16) >>> 0, this.getRegU(rt));
+        this.setReg(rt, 1);
+        break;
+      case 0x11: // COP1 (FPU)
+        this._execCOP1(instr);
+        break;
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sed -n '480,485p' /app/vm.js
+        break;
+      default:
+        console.log('Unknown opcode 0x' + op.toString(16) + ' at PC=0x' + pc.toString(16) + ' instr=0x' + instr.toString(16));
+        this.running = false;
+    }
+  }
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sed -i '480a\      case 0x31: { // LWC1\n        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = n
+ew Int32Array(this.fpr.buffer); this.fpCondition = false; }\n        this.fprI[rt] = this.mem.readS32((this.getReg(rs) + simm16) >>> 0);\n        break;\n
+}\n      case 0x35: { // LDC1\n        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false;
+}\n        const addr35 = (this.getReg(rs) + simm16) >>> 0;\n        this.fprI[rt] = this.mem.readS32(addr35);\n        this.fprI[rt + 1] = this.mem.readS32(add
+r35 + 4);\n        break;\n      }\n      case 0x39: { // SWC1\n        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.bu
+ffer); this.fpCondition = false; }\n        this.mem.writeU32((this.getReg(rs) + simm16) >>> 0, this.fprI[rt] >>> 0);\n        break;\n      }\n      case 0x3D:
+ { // SDC1\n        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false; }\n        const ad
+dr3d = (this.getReg(rs) + simm16) >>> 0;\n        this.mem.writeU32(addr3d, this.fprI[rt] >>> 0);\n        this.mem.writeU32(addr3d + 4, this.fprI[rt + 1] >>> 0
+);\n        break;\n      }\n      case 0x2F: // CACHE - ignore\n        break;' /app/vm.js
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sed -n '480,510p' /app/vm.js
+        break;
+      case 0x31: { // LWC1
+        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false; }
+        this.fprI[rt] = this.mem.readS32((this.getReg(rs) + simm16) >>> 0);
+        break;
+      }
+      case 0x35: { // LDC1
+        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false; }
+        const addr35 = (this.getReg(rs) + simm16) >>> 0;
+        this.fprI[rt] = this.mem.readS32(addr35);
+        this.fprI[rt + 1] = this.mem.readS32(addr35 + 4);
+        break;
+      }
+      case 0x39: { // SWC1
+        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false; }
+        this.mem.writeU32((this.getReg(rs) + simm16) >>> 0, this.fprI[rt] >>> 0);
+        break;
+      }
+      case 0x3D: { // SDC1
+        if (!this.fpr) { this.fpr = new Float32Array(32); this.fprI = new Int32Array(this.fpr.buffer); this.fpCondition = false; }
+        const addr3d = (this.getReg(rs) + simm16) >>> 0;
+        this.mem.writeU32(addr3d, this.fprI[rt] >>> 0);
+        this.mem.writeU32(addr3d + 4, this.fprI[rt + 1] >>> 0);
+        break;
+      }
+      case 0x2F: // CACHE - ignore
+        break;
+      default:
+        console.log('Unknown opcode 0x' + op.toString(16) + ' at PC=0x' + pc.toString(16) + ' instr=0x' + instr.toString(16));
+        this.running = false;
+    }
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# cd /app && timeout 120 node --max-old-space-size=4096 vm.js > /tmp/vm_output.log 2>&1 &
+[1] 3116
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sleep 5 && head -30 /tmp/vm_output.log
+ELF: entry=0x400110, 5 program headers
+  LOAD: vaddr=0x400000 filesz=0x56514 memsz=0x56514
+  LOAD: vaddr=0x466520 filesz=0xeb80 memsz=0x4004b270
+Starting MIPS execution at 0x400110
+DoomGeneric initialized. Frames will be saved to /tmp/frame.bmp
+                           Doom Generic 0.1
+@Z_Init: Init zone memory allocation daemon.
+zone memory: 0x5e6b50, 600000 allocated for zone
+Using . for configuration and saves
+V_Init: allocate screens.
+M_LoadDefaults: Load system defaults.
+saving config in .default.cfg
+-iwad not specified, trying a few iwad names
+Trying IWAD file:doom2.wad
+Trying IWAD file:plutonia.wad
+Trying IWAD file:tnt.wad
+Trying IWAD file:doom.wad
+W_Init: Init WADfiles.
+ adding doom.wad
+Using ./.savegame/ for savegames
+===========================================================================
+                            DOOM Shareware
+CK
+===========================================================================
+ Doom Generic is free software, covered by the GNU General Public
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sleep 5 && cat /tmp/vm_output.log
+ELF: entry=0x400110, 5 program headers
+  LOAD: vaddr=0x400000 filesz=0x56514 memsz=0x56514
+  LOAD: vaddr=0x466520 filesz=0xeb80 memsz=0x4004b270
+Starting MIPS execution at 0x400110
+DoomGeneric initialized. Frames will be saved to /tmp/frame.bmp
+                           Doom Generic 0.1
+@Z_Init: Init zone memory allocation daemon.
+zone memory: 0x5e6b50, 600000 allocated for zone
+Using . for configuration and saves
+V_Init: allocate screens.
+M_LoadDefaults: Load system defaults.
+saving config in .default.cfg
+-iwad not specified, trying a few iwad names
+Trying IWAD file:doom2.wad
+Trying IWAD file:plutonia.wad
+Trying IWAD file:tnt.wad
+Trying IWAD file:doom.wad
+W_Init: Init WADfiles.
+ adding doom.wad
+Using ./.savegame/ for savegames
+===========================================================================
+                            DOOM Shareware
+CK
+===========================================================================
+ Doom Generic is free software, covered by the GNU General Public
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+M_Init: Init miscellaneous info.
+R_Init: Init DOOM refresh daemon - ...................
+P_Init: Init Playloop state.
+S_Init: Setting up sound.
+D_CheckNetGame: Checking network game status.
+startskill 2  deathmatch: 0  startmap: 1  startepisode: 1
+player 1 of 1 (1 nodes)
+Emulating the behavior of the 'Doom 1.9' executable.
+HU_Init: Setting up heads up display.
+ST_Init: Init status bar.
+DoomGeneric title: DOOM Shareware
+I_InitGraphics: framebuffer: x_res: 640, y_res: 400, x_virtual: 640, y_virtual: 400, bpp: 32
+I_InitGraphics: framebuffer: RGBA: 8888, red_off: 16, green_off: 8, blue_off: 0, transp_off: 24
+I_InitGraphics: DOOM screen size: w x h: 320 x 200
+I_InitGraphics: Auto-scaling factor: 2
+Saved frame to /tmp/frame.bmp (1024054 bytes)
+Instructions: 100000000 PC=0x439070
+Instructions: 200000000 PC=0x43900c
+Instructions: 300000000 PC=0x439088
+Instructions: 400000000 PC=0x439028
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sleep 10 && tail -30 /tmp/vm_output.log
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+M_Init: Init miscellaneous info.
+R_Init: Init DOOM refresh daemon - ...................
+P_Init: Init Playloop state.
+S_Init: Setting up sound.
+D_CheckNetGame: Checking network game status.
+startskill 2  deathmatch: 0  startmap: 1  startepisode: 1
+player 1 of 1 (1 nodes)
+Emulating the behavior of the 'Doom 1.9' executable.
+HU_Init: Setting up heads up display.
+ST_Init: Init status bar.
+DoomGeneric title: DOOM Shareware
+I_InitGraphics: framebuffer: x_res: 640, y_res: 400, x_virtual: 640, y_virtual: 400, bpp: 32
+I_InitGraphics: framebuffer: RGBA: 8888, red_off: 16, green_off: 8, blue_off: 0, transp_off: 24
+I_InitGraphics: DOOM screen size: w x h: 320 x 200
+I_InitGraphics: Auto-scaling factor: 2
+Saved frame to /tmp/frame.bmp (1024054 bytes)
+Instructions: 100000000 PC=0x439070
+Instructions: 200000000 PC=0x43900c
+Instructions: 300000000 PC=0x439088
+Instructions: 400000000 PC=0x439028
+Instructions: 500000000 PC=0x43907c
+Instructions: 600000000 PC=0x4390a4
+Instructions: 700000000 PC=0x43907c
+Instructions: 800000000 PC=0x439000
+Instructions: 900000000 PC=0x43901c
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# ls -la /tmp/frame.bmp
+-rw-r--r-- 1 root root 1024054 Apr  2 12:04 /tmp/frame.bmp
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# python3 -c "data=open('/tmp/frame.bmp','rb').read(); print('Size:', len(data)); print('Header:', data[:2]); prin
+t('BMP size field:', int.from_bytes(data[2:6],'little')); print('Width:', int.from_bytes(data[18:22],'little',signed=True)); print('Height:', int.from_bytes(dat
+a[22:26],'little',signed=True)); print('BPP:', int.from_bytes(data[28:30],'little'))"
+Size: 1024054
+Header: b'BM'
+BMP size field: 1024054
+Width: 640
+Height: -400
+BPP: 32
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# kill %1 2>/dev/null; kill -9 3116 2>/dev/null
+[1]+  Terminated              cd /app && timeout 120 node --max-old-space-size=4096 vm.js > /tmp/vm_output.log 2>&1
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# pip install Pillow -q 2>&1 | tail -3
+
+[notice] A new release of pip is available: 25.2 -> 26.0.1
+[notice] To update, run: pip install --upgrade pip
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# python3 -c "from PIL import Image; img = Image.open('/tmp/frame.bmp'); img.save('/tmp/frame.png')"
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# ls -la /app/
+total 5644
+drwxr-xr-x 1 root root      27 Apr  2 12:03 .
+drwxr-xr-x 1 root root     117 Apr  2 11:55 ..
+-rw-r--r-- 1 root root 4196020 Sep 13  2025 doom.wad
+drwxr-xr-x 1 root root      33 Sep 13  2025 doomgeneric
+-rwxr-xr-x 1 root root 1543608 Sep 13  2025 doomgeneric_mips
+-rw-r--r-- 1 root root   34629 Apr  2 12:03 vm.js
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# ls -la /tmp/frame.bmp
+-rw-r--r-- 1 root root 1024054 Apr  2 12:05 /tmp/frame.bmp
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# ls -la /app/.default.cfg /app/.savegame 2>&1
+ls: cannot access '/app/.default.cfg': No such file or directory
+ls: cannot access '/app/.savegame': No such file or directory
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# rm -f /tmp/vm_output.log /tmp/frame.png
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# rm -f /tmp/frame.bmp
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# cd /app && timeout 120 node --max-old-space-size=4096 vm.js > /tmp/vm_output.log 2>&1 &
+[1] 3826
+root@92bb53e6-d5f5-4f9d-8f15-5e21b260b8cf:/app# sleep 30 && ls -la /tmp/frame.bmp 2>&1 && tail -5 /tmp/vm_output.log
+

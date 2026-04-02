@@ -1,0 +1,126 @@
+New Terminal Output:
+
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.lower()
+>     return seqs
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Insertion at position 215 of input
+> insertion = output_seq[215:254]  # 39 nt
+>
+> # Forward primer: insertion_tail + annealing
+> # The annealing from 3' end matches input[213:233] (20 nt) or input[215:233] (18 nt)
+> # We use the same forward primer regardless
+> fwd_anneal_18 = input_seq[215:233]  # CAAGGGCGAGGAGCTGTT
+> fwd_primer = insertion + fwd_anneal_18
+> print(f"Forward primer: {fwd_primer.upper()}")
+> print(f"Forward primer length: {len(fwd_primer)}")
+>
+> # Forward annealing Tm (both interpretations)
+> fwd_tm_18 = get_tm(fwd_anneal_18)
+> fwd_anneal_20 = input_seq[213:233]
+> fwd_tm_20 = get_tm(fwd_anneal_20)
+> print(f"Fwd annealing 18nt Tm: {fwd_tm_18:.2f}")
+> print(f"Fwd annealing 20nt Tm: {fwd_tm_20:.2f}")
+>
+> # Reverse primer: 44 nt, annealing to input[171:215]
+> rev_len = 44
+> rev_template = input_seq[215-rev_len:215]
+> rev_primer = reverse_complement(rev_template)
+> rev_tm = get_tm(rev_primer)
+> print(f"\nReverse primer: {rev_primer.upper()}")
+> print(f"Reverse primer length: {len(rev_primer)}")
+> print(f"Rev annealing Tm: {rev_tm:.2f}")
+>
+> print(f"\nTm diff (18nt fwd): {abs(fwd_tm_18 - rev_tm):.2f}")
+> print(f"Tm diff (20nt fwd): {abs(fwd_tm_20 - rev_tm):.2f}")
+>
+> # Verify constraints
+> print(f"\n=== Constraints ===")
+> for name, anneal_len, tm in [("Fwd(18)", 18, fwd_tm_18), ("Fwd(20)", 20, fwd_tm_20), ("Rev", rev_len, rev_tm)]:
+>     print(f"{name}: len={anneal_len}, Tm={tm:.2f}, len_ok={15<=anneal_len<=45}, tm_ok={58<=tm<=72}")
+>
+> for fwd_tm_label, fwd_tm_val in [("18nt", fwd_tm_18), ("20nt", fwd_tm_20)]:
+>     diff = abs(fwd_tm_val - rev_tm)
+>     print(f"Tm diff ({fwd_tm_label}): {diff:.2f}, ok={diff<=5}")
+>
+> # Verify PCR product
+> new_plasmid = fwd_primer + input_seq[233:] + input_seq[:215-rev_len]
+> new_plasmid2 = fwd_primer + input_seq[233:] + input_seq[:215]
+> print(f"\nProduct length (without rev overlap): {len(new_plasmid)}")
+> print(f"Product length (with rev coverage): {len(new_plasmid2)}")
+>
+> # Actually, the product top strand goes from fwd primer 5' end to rev primer 5' end position
+> # Rev primer template region: input[171:215], so rev 5' end is at position 214 (sense strand)
+> # Top strand = fwd_primer + input[233:] + input[:215]
+> top_strand = fwd_primer + input_seq[233:] + input_seq[:215]
+> print(f"Top strand length: {len(top_strand)}")
+> print(f"Expected: {len(output_seq)}")
+>
+> def circular_match(seq1, seq2):
+>     if len(seq1) != len(seq2):
+>         return False
+>     return seq2 in (seq1 + seq1)
+>
+> print(f"Circular match: {circular_match(top_strand, output_seq)}")
+>
+> # Write output
+> with open('/app/primers.fasta', 'w') as f:
+>     f.write(f">forward_primer\n{fwd_primer.upper()}\n")
+>     f.write(f">reverse_primer\n{rev_primer.upper()}\n")
+> print("\nWritten to /app/primers.fasta")
+>
+> PYEOF
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Forward primer length: 57
+Fwd annealing 18nt Tm: 63.81
+Fwd annealing 20nt Tm: 68.19
+
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+Reverse primer length: 44
+Rev annealing Tm: 64.00
+
+Tm diff (18nt fwd): 0.19
+Tm diff (20nt fwd): 4.20
+
+=== Constraints ===
+Fwd(18): len=18, Tm=63.81, len_ok=True, tm_ok=True
+Fwd(20): len=20, Tm=68.19, len_ok=True, tm_ok=True
+Rev: len=44, Tm=64.00, len_ok=True, tm_ok=True
+Tm diff (18nt): 0.19, ok=True
+Tm diff (20nt): 4.20, ok=True
+
+Product length (without rev overlap): 3586
+Product length (with rev coverage): 3630
+Top strand length: 3630
+Expected: 3630
+Circular match: True
+
+Written to /app/primers.fasta
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app#

@@ -1,0 +1,71 @@
+New Terminal Output:
+
+root@007a23f4-ab74-4633-b553-b0a81f37fa43:/app# df -h /
+Filesystem      Size  Used Avail Use% Mounted on
+overlay          10G  380M  9.7G   4% /
+root@007a23f4-ab74-4633-b553-b0a81f37fa43:/app# mount | grep -E 'md[01]'
+/dev/md1 on /etc/resolv.conf type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /etc/hostname type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /etc/hosts type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md0 on /usr/local/bin/daytona type ext4 (ro,relatime,idmapped,stripe=32)
+/dev/md0 on /usr/local/lib/daytona-computer-use type ext4 (ro,relatime,idmapped,stripe=32)
+/dev/md1 on /var/lib/kubelet type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/k0s type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/buildkit type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/docker type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/rancher/k3s type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md1 on /var/lib/rancher/rke2 type xfs (rw,relatime,idmapped,attr2,inode64,logbufs=8,logbsize=32k,prjquota)
+/dev/md0 on /usr/src/linux-headers-6.8.0-100 type ext4 (ro,relatime,idmapped,stripe=32)
+/dev/md0 on /usr/src/linux-headers-6.8.0-100-generic type ext4 (ro,relatime,idmapped,stripe=32)
+/dev/md0 on /usr/lib/modules/6.8.0-100-generic type ext4 (ro,relatime,idmapped,stripe=32)
+udev on /dev/md0 type devtmpfs (rw,nosuid,relatime,size=395907956k,nr_inodes=98976989,mode=755,inode64)
+udev on /dev/md1 type devtmpfs (rw,nosuid,relatime,size=395907956k,nr_inodes=98976989,mode=755,inode64)
+root@007a23f4-ab74-4633-b553-b0a81f37fa43:/app# # Search for SQLite WAL magic on the md devices
+root@007a23f4-ab74-4633-b553-b0a81f37fa43:/app# python3 << 'PYEOF'
+> import os, struct
+>
+> # WAL file magic bytes
+> wal_magic_be = b'\x37\x7f\x06\x82'
+> wal_magic_le = b'\x37\x7f\x06\x83'
+>
+> # The overlay is on... let's check
+> # The root is overlay, but the backing store might be on md0 or md1
+> # Let's try to find the WAL data on the block devices
+>
+> for dev in ['/dev/md0', '/dev/md1']:
+>     try:
+>         print(f'Searching {dev}...')
+>         fd = os.open(dev, os.O_RDONLY)
+>         chunk_size = 1024 * 1024  # 1MB chunks
+>         offset = 0
+>         found = False
+>         while offset < 100 * 1024 * 1024 * 1024:  # Search first 100GB
+>             data = os.pread(fd, chunk_size, offset)
+>             if not data:
+>                 break
+>             for magic in [wal_magic_be, wal_magic_le]:
+>                 pos = data.find(magic)
+>                 if pos != -1:
+>                     abs_pos = offset + pos
+>                     print(f'Found WAL magic at {dev} offset {abs_pos} (0x{abs_pos:x})')
+>                     # Read 16512 bytes from this position
+>                     wal_data = os.pread(fd, 16512, abs_pos)
+>                     # Verify it looks like a WAL
+>                     print(f'First 32 bytes: {wal_data[:32].hex()}')
+>                     found = True
+>             if found:
+>                 break
+>             offset += chunk_size - 4  # overlap to catch boundary matches
+>         os.close(fd)
+>         if found:
+>             break
+>     except Exception as e:
+>         print(f'Error with {dev}: {e}')
+>
+> PYEOF
+Searching /dev/md0...
+Error with /dev/md0: [Errno 13] Permission denied: '/dev/md0'
+Searching /dev/md1...
+Error with /dev/md1: [Errno 13] Permission denied: '/dev/md1'
+root@007a23f4-ab74-4633-b553-b0a81f37fa43:/app#

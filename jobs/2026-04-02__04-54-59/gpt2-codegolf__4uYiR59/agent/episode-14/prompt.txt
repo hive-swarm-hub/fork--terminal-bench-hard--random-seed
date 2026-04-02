@@ -1,0 +1,207 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# python3 << 'PYEOF'
+> import mmap, struct, math
+>
+> E=768; L=12; V=50257; C=1024; H=12; HS=E//H
+> layer_order = [0,1,10,11,2,3,4,5,6,7,8,9]
+> PL = 7087872
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def getf(off, n):
+>     return struct.unpack_from(f'{n}f', m, off*4)
+>
+> # Build tokenizer
+> with open('vocab.bpe') as vf:
+>     lines = vf.read().split('\n')
+> merges = []
+> for line in lines[1:]:
+>     if line.strip():
+>         parts = line.split(' ')
+>         if len(parts) == 2:
+>             merges.append((parts[0], parts[1]))
+>
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256 + n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> byte_encoder = bytes_to_unicode()
+> byte_decoder = {v: k for k, v in byte_encoder.items()}
+> vocab = {}
+> for i in range(256):
+>     vocab[byte_encoder[i]] = i
+> for i, (a, b) in enumerate(merges):
+>     vocab[a + b] = 256 + i
+> rev_vocab = {v: k for k, v in vocab.items()}
+>
+> def bpe_encode(text):
+>     tokens = [byte_encoder[b] for b in text.encode('utf-8')]
+>     merge_ranks = {m: i for i, m in enumerate(merges)}
+>     while len(tokens) > 1:
+>         best = None
+>         for i in range(len(tokens)-1):
+>             pair = (tokens[i], tokens[i+1])
+>             if pair in merge_ranks:
+>                 if best is None or merge_ranks[pair] < merge_ranks[best]:
+>                     best = pair
+>         if best is None: break
+>         new_tokens = []
+>         i = 0
+>         while i < len(tokens):
+>             if i < len(tokens)-1 and (tokens[i], tokens[i+1]) == best:
+>                 new_tokens.append(tokens[i] + tokens[i+1])
+>                 i += 2
+>             else:
+>                 new_tokens.append(tokens[i])
+>                 i += 1
+>         tokens = new_tokens
+>     return [vocab[t] for t in tokens]
+>
+> def bpe_decode(ids):
+>     text = ''.join(rev_vocab.get(t,'') for t in ids)
+>     return bytes([byte_decoder[c] for c in text]).decode('utf-8', errors='replace')
+>
+> test = "Hello world"
+> tokens = bpe_encode(test)
+> print(f'Tokens: {tokens}')
+> print(f'Decoded: "{bpe_decode(tokens)}"')
+>
+> # Now do a forward pass for just the first token to verify
+> def layernorm(x, g_off, b_off):
+>     g = getf(g_off, E)
+>     b = getf(b_off, E)
+>     mean = sum(x)/E
+>     var = sum((xi-mean)**2 for xi in x)/E
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)/std * g[i] + b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> # Get wte and wpe offsets
+> wte_off = 85842432
+> wpe_off = 85056000
+>
+> # Forward pass for input tokens
+> input_tokens = bpe_encode("The")
+> print(f'Input tokens: {input_tokens}')
+> T = len(input_tokens)
+>
+> # Initial embeddings: wte[token] + wpe[pos]
+> x = [0.0]*E
+> for i in range(E):
+>     x[i] = getf(wte_off + input_tokens[0]*E, E)[i] + getf(wpe_off, E)[i]
+>
+> print(f'Initial embedding[0:5]: {x[0:5]}')
+>
+> # Process through layers (just layer 0 for testing)
+> for layer in range(L):
+>     base = file_layer_offsets[layer]  # wrong - need to use layer_order mapping
+>     # Actually file_layer_offsets maps real layer -> file offset
+>     # For layer i in order 0..11, we need the file offset
+>     fi = layer_order.index(layer)
+>     base = fi * PL
+>
+>     # ln_1
+>     ln1_g_off = base + 3*E + E*3*E + E + E*E  # after c_attn_b, c_attn_w, c_proj_b, c_proj_w
+>     # Wait: offsets within layer:
+>     # c_attn_b: 0
+>     # c_attn_w: 3*E
+>     # c_proj_b: 3*E + E*3*E
+>     # c_proj_w: 3*E + E*3*E + E
+>     # ln_1_b: 3*E + E*3*E + E + E*E
+>     # ln_1_g: 3*E + E*3*E + E + E*E + E
+>     ln1_b_off = base + 3*E + E*3*E + E + E*E
+>     ln1_g_off = ln1_b_off + E
+>
+>     h = layernorm(x, ln1_g_off, ln1_b_off)
+>
+>     # c_attn: h @ w + b -> qkv
+>     cattn_b_off = base
+>     cattn_w_off = base + 3*E
+>     cattn_b = getf(cattn_b_off, 3*E)
+>
+>     qkv = list(cattn_b)  # start with bias
+>     for j in range(3*E):
+>         s = cattn_b[j]
+>         for k in range(E):
+>             s += h[k] * getf(cattn_w_off + k*3*E + j, 1)[0]  # This is very slow but correct
+>         qkv[j] = s
+>
+>     if layer == 0:
+>         print(f'Layer 0 qkv[0:5]: {qkv[0:5]}')
+>
+>     # For single token, attention is just softmax of q@k (which is just the token itself)
+>     # attn_output = v (since single token, attention weight is 1.0)
+>     # So for single token: attn_out = v part of qkv, projected through c_proj
+>     v = qkv[2*E:3*E]
+>
+>     # c_proj: v @ w + b
+>     cproj_b_off = base + 3*E + E*3*E
+>     cproj_w_off = cproj_b_off + E
+>     cproj_b = getf(cproj_b_off, E)
+>
+>     attn_out = list(cproj_b)
+>     for j in range(E):
+>         s = cproj_b[j]
+>         for k in range(E):
+>             s += v[k] * getf(cproj_w_off + k*E + j, 1)[0]
+>         attn_out[j] = s
+>
+>     # Residual
+>     x = [x[i] + attn_out[i] for i in range(E)]
+>
+>     # ln_2
+>     ln2_b_off = ln1_g_off + E
+>     ln2_g_off = ln2_b_off + E
+>     h2 = layernorm(x, ln2_g_off, ln2_b_off)
+>
+>     # MLP: fc -> gelu -> proj
+>     fc_b_off = ln2_g_off + E
+>     fc_w_off = fc_b_off + 4*E
+>     fc_b = getf(fc_b_off, 4*E)
+>
+>     hidden = list(fc_b)
+>     for j in range(4*E):
+>         s = fc_b[j]
+>         for k in range(E):
+>             s += h2[k] * getf(fc_w_off + k*4*E + j, 1)[0]
+>         hidden[j] = gelu(s)
+>
+>     # proj
+>     fcproj_b_off = fc_w_off + E*4*E
+>     fcproj_w_off = fcproj_b_off + E
+>     fcproj_b = getf(fcproj_b_off, E)
+>
+>     mlp_out = list(fcproj_b)
+>     for j in range(E):
+>         s = fcproj_b[j]
+>         for k in range(4*E):
+>             s += hidden[k] * getf(fcproj_w_off + k*E + j, 1)[0]
+>         mlp_out[j] = s
+>
+>     x = [x[i] + mlp_out[i] for i in range(E)]
+>     print(f'After layer {layer}: x[0:3]={x[0:3]}')
+>
+> print('Done with all layers')
+>
+> m.close()
+> f.close()
+> PYEOF
+Tokens: [15496, 995]
+Decoded: "Hello world"
+Input tokens: [464]
+Initial embedding[0:5]: [-0.08744361437857151, -0.21771634183824062, 0.06849727686494589, -0.050737722776830196, -0.049695029854774475]
+Traceback (most recent call last):
+  File "<stdin>", line 105, in <module>
+NameError: name 'file_layer_offsets' is not defined
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app#

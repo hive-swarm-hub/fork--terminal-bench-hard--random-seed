@@ -1,0 +1,167 @@
+New Terminal Output:
+
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# cat > /tmp/simulate.py << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.lower()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> fwd_primer = 'tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctgtt'
+> rev_primer = 'ctcatatgtatatctccttcttaaagttaaacaaaattatttcta'
+>
+> # The template is circular: input_seq
+> # Double it for easier circular operations
+> doubled = input_seq + input_seq
+>
+> # Find where forward primer 3' end anneals
+> # Try different lengths from the 3' end
+> fwd_anneal_pos = None
+> fwd_anneal_len = None
+> for alen in range(len(fwd_primer), 14, -1):
+>     subseq = fwd_primer[-alen:]
+>     pos = doubled.find(subseq)
+>     if pos >= 0 and pos < len(input_seq):
+>         fwd_anneal_pos = pos  # start position on template
+>         fwd_anneal_len = alen
+>         break
+>
+> print(f"Forward primer anneals at template pos {fwd_anneal_pos}, length {fwd_anneal_len}")
+> print(f"Forward annealing region: {input_seq[fwd_anneal_pos:fwd_anneal_pos+fwd_anneal_len]}")
+> print(f"Forward primer 3' end at template pos: {fwd_anneal_pos + fwd_anneal_len - 1}")
+>
+> # Find where reverse primer anneals (on bottom strand)
+> # The reverse primer sequence matches the reverse complement of a template region
+> rev_rc = reverse_complement(rev_primer)  # This is the template sense strand
+> rev_pos = doubled.find(rev_rc)
+> print(f"\nReverse primer template region at pos {rev_pos}-{rev_pos+len(rev_rc)-1}")
+> print(f"Reverse primer template: {rev_rc}")
+>
+> # In PCR with circular template:
+> # The forward primer starts at fwd_anneal_pos on the sense strand, extending clockwise
+> # The reverse primer starts at (rev_pos + len(rev_rc) - 1) on the antisense strand, extending counter-clockwise
+> #
+> # The linear PCR product's top strand is:
+> # 5'- fwd_primer_full - [template extension] -3'
+> # where template extension fills from fwd_primer's 3' end to the reverse primer's 5' end position
+> #
+> # Forward primer 3' end is at template pos: fwd_anneal_pos + fwd_anneal_len - 1
+> # Reverse primer 5' end is at template pos: rev_pos + len(rev_rc) - 1
+> # (The 5' end of the reverse primer corresponds to the highest template position in its region)
+>
+> fwd_3prime = fwd_anneal_pos + fwd_anneal_len  # first position NOT covered by fwd primer annealing
+> rev_5prime = rev_pos + len(rev_rc)  # first position NOT covered by rev primer template
+>
+> print(f"\nFwd primer covers template [{fwd_anneal_pos}, {fwd_3prime})")
+> print(f"Rev primer covers template [{rev_pos}, {rev_5prime})")
+>
+> # The PCR product top strand:
+> # fwd_primer_full + template from fwd_3prime going clockwise to rev_5prime - 1
+> # = fwd_primer + template[fwd_3prime : rev_5prime] (going around circle)
+>
+> # Going clockwise from fwd_3prime to rev_5prime:
+> if fwd_3prime <= rev_5prime:
+>     # They don't wrap around - but this would mean the primers overlap or are nested
+>     # For back-to-back primers, we expect fwd_3prime > rev_5prime or they're adjacent
+>     extension = doubled[fwd_3prime:rev_5prime]
+>     print(f"Extension (non-wrapping): {len(extension)} bases")
+> else:
+>     # Normal case for back-to-back: fwd is after rev on the circle
+>     extension = input_seq[fwd_3prime:] + input_seq[:rev_5prime]
+>     # Wait, actually we need to go from fwd_3prime clockwise to rev_5prime
+>     # But if fwd_3prime > rev_5prime, going clockwise means going through the end and wrapping
+>     # Hmm, but the reverse primer is at 170-214, and forward is at 213-232 (or 215-232)
+>     # fwd_3prime = 233 (or 233), rev_5prime = 215
+>     # Going clockwise from 233 to 215 means going 233->234->...->3590->0->1->...->214
+>     extension = input_seq[fwd_3prime:] + input_seq[:rev_5prime]
+>     print(f"Extension (wrapping): {len(extension)} bases")
+>
+> # Wait, I need to reconsider. The top strand of the PCR product ends at the position
+> # corresponding to the reverse primer's 5' end. The reverse primer anneals to the
+> # bottom strand. Its 5' end on the bottom strand corresponds to the HIGHEST position
+> # on the template sense strand within its region.
+>
+> # Rev primer template region: positions 170-214 (sense strand)
+> # On the bottom strand, the reverse primer reads 3'->5' corresponding to
+> # sense strand positions 170->171->...->214
+> # So the reverse primer's 5' end is at sense strand position 214
+> # And the reverse primer's 3' end is at sense strand position 170
+>
+> # The bottom strand synthesis (from reverse primer) extends from position 170
+> # going counter-clockwise (decreasing positions), wrapping around.
+>
+> # The top strand of the final PCR product goes from the forward primer's 5' end
+> # to the position corresponding to the reverse primer's 5' end.
+> # The reverse primer's 5' end is at sense position 214.
+> # So the top strand ends at sense position 214 (inclusive).
+>
+> # Top strand = fwd_primer_full + template[fwd_3prime:] + template[:215]
+> # (position 214 inclusive = [:215])
+>
+> top_strand = fwd_primer + input_seq[fwd_3prime:] + input_seq[:rev_5prime]
+> print(f"\nTop strand (PCR product) length: {len(top_strand)}")
+> print(f"Expected output length: {len(output_seq)}")
+>
+> # Check circular match
+> def circular_match(seq1, seq2):
+>     if len(seq1) != len(seq2):
+>         return False
+>     return seq2 in (seq1 + seq1)
+>
+> print(f"Circular match: {circular_match(top_strand, output_seq)}")
+>
+> # If this doesn't work with fwd_anneal starting at 213 (overlap), try 215
+> print("\n--- Alternative: forward annealing at 215 (no overlap) ---")
+> fwd_anneal_pos2 = 215
+> fwd_anneal_len2 = 18  # CAAGGGCGAGGAGCTGTT
+> fwd_3prime2 = fwd_anneal_pos2 + fwd_anneal_len2  # = 233
+>
+> top_strand2 = fwd_primer + input_seq[fwd_3prime2:] + input_seq[:rev_5prime]
+> print(f"Top strand length: {len(top_strand2)}")
+> print(f"Circular match: {circular_match(top_strand2, output_seq)}")
+>
+> # The key question: what is rev_5prime?
+> print(f"\nrev_5prime = {rev_5prime}")
+> print(f"rev_pos = {rev_pos}")
+> print(f"rev_rc length = {len(rev_rc)}")
+>
+> PYEOF
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# python3 /tmp/simulate.py
+Forward primer anneals at template pos 213, length 20
+Forward annealing region: agcaagggcgaggagctgtt
+Forward primer 3' end at template pos: 232
+
+Reverse primer template region at pos 170-214
+Reverse primer template: tagaaataattttgtttaactttaagaaggagatatacatatgag
+
+Fwd primer covers template [213, 233)
+Rev primer covers template [170, 215)
+Extension (wrapping): 3573 bases
+
+Top strand (PCR product) length: 3630
+Expected output length: 3630
+Circular match: True
+
+--- Alternative: forward annealing at 215 (no overlap) ---
+Top strand length: 3630
+Circular match: True
+
+rev_5prime = 215
+rev_pos = 170
+rev_rc length = 45
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app#

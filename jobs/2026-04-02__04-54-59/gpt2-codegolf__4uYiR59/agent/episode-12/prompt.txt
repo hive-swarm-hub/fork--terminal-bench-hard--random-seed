@@ -1,0 +1,118 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> E=768; L=12; V=50257; C=1024; H=12; HS=E//H
+> layer_order = [0,1,10,11,2,3,4,5,6,7,8,9]
+>
+> f = open('gpt2-124M.ckpt','rb')
+> W = struct.unpack(f'{124439808}f', f.read())
+> f.close()
+>
+> # Build offset map: for each real layer 0-11, find its file offset
+> PL = 7087872  # per layer params
+> file_layer_offsets = {}  # real_layer -> file_offset
+> for fi, real_layer in enumerate(layer_order):
+>     file_layer_offsets[real_layer] = fi * PL
+>
+> def get(off, n):
+>     return list(W[off:off+n])
+>
+> # Test: get ln_f_g
+> lnf_g = get(85055232, E)
+> print(f'ln_f_g mean: {sum(lnf_g)/E:.4f}, first3: {lnf_g[:3]}')
+>
+> # Now let's do a simple forward pass
+> # First, let's build a minimal tokenizer
+> # Read vocab.bpe
+> with open('vocab.bpe') as vf:
+>     lines = vf.read().split('\n')
+>
+> # BPE merges
+> merges = []
+> for line in lines[1:]:
+>     if line.strip():
+>         parts = line.split(' ')
+>         if len(parts) == 2:
+>             merges.append((parts[0], parts[1]))
+>
+> print(f'Number of merges: {len(merges)}')
+>
+> # Build vocab: GPT-2 uses byte-level BPE
+> # Base vocab: 256 byte values
+> # Then merges create new tokens
+> # Token 0-255: single bytes
+> # Token 256+i: merge i result
+> # Total: 256 + 50000 = 50256, plus one special token = 50257
+>
+> # GPT-2 byte encoder
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256 + n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> byte_encoder = bytes_to_unicode()
+> byte_decoder = {v: k for k, v in byte_encoder.items()}
+>
+> # Build token vocabulary
+> vocab = {}
+> for i in range(256):
+>     vocab[byte_encoder[i]] = i
+> for i, (a, b) in enumerate(merges):
+>     vocab[a + b] = 256 + i
+>
+> print(f'Vocab size: {len(vocab)}')
+>
+> # Encode text
+> def bpe_encode(text):
+>     # Convert text to unicode representation
+>     tokens = [byte_encoder[b] for b in text.encode('utf-8')]
+>     # Apply BPE merges
+>     merge_ranks = {m: i for i, m in enumerate(merges)}
+>     while len(tokens) > 1:
+>         best = None
+>         best_idx = -1
+>         for i in range(len(tokens)-1):
+>             pair = (tokens[i], tokens[i+1])
+>             if pair in merge_ranks:
+>                 if best is None or merge_ranks[pair] < merge_ranks[best]:
+>                     best = pair
+>                     best_idx = i
+>         if best is None:
+>             break
+>         # Merge all occurrences of best pair
+>         new_tokens = []
+>         i = 0
+>         while i < len(tokens):
+>             if i < len(tokens)-1 and (tokens[i], tokens[i+1]) == best:
+>                 new_tokens.append(tokens[i] + tokens[i+1])
+>                 i += 2
+>             else:
+>                 new_tokens.append(tokens[i])
+>                 i += 1
+>         tokens = new_tokens
+>     return [vocab[t] for t in tokens]
+>
+> def bpe_decode(token_ids):
+>     # Build reverse vocab
+>     rev_vocab = {v: k for k, v in vocab.items()}
+>     text_parts = [rev_vocab.get(t, '') for t in token_ids]
+>     text = ''.join(text_parts)
+>     bs = bytes([byte_decoder[c] for c in text])
+>     return bs.decode('utf-8', errors='replace')
+>
+> # Test tokenization
+> test = "Hello world"
+> tokens = bpe_encode(test)
+> print(f'Tokens for "{test}": {tokens}')
+> print(f'Decoded: "{bpe_decode(tokens)}"')
+>
+> PYEOF
+

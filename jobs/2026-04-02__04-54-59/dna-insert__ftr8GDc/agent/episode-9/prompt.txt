@@ -1,0 +1,195 @@
+New Terminal Output:
+
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# cat > /tmp/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.lower()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     # oligotm has a 36-base limit, but we need up to 45
+>     # Let's check if ntthal or other tools are available
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     if result.returncode != 0:
+>         print(f"oligotm error for {seq}: {result.stderr}", file=sys.stderr)
+>         return None
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # Insertion point: position 215 in input
+> # Insertion sequence: "tagattagaagaagaattaagaagaagattaacagaaag" (39 nt)
+> insertion_point = 215
+> insertion = 'tagattagaagaagaattaagaagaagattaacagaaag'
+>
+> # Forward primer: 5'-[insertion_tail]-[annealing]-3'
+> # Annealing part binds to input starting at position 215 going forward
+> # Reverse primer: anneals to the reverse strand, ending at position 214
+> # i.e., it's the reverse complement of input[insertion_point-N : insertion_point]
+>
+> print("=== Forward primer annealing candidates ===")
+> fwd_candidates = []
+> for length in range(15, 46):
+>     anneal_seq = input_seq[insertion_point:insertion_point+length]
+>     if len(anneal_seq) < length:  # wrap around for circular plasmid
+>         anneal_seq = input_seq[insertion_point:] + input_seq[:length - len(input_seq[insertion_point:])]
+>     tm = get_tm(anneal_seq)
+>     if tm is not None:
+>         print(f"  len={length}, Tm={tm:.2f}, seq={anneal_seq}")
+>         if 58 <= tm <= 72:
+>             fwd_candidates.append((length, tm, anneal_seq))
+>
+> print("\n=== Reverse primer annealing candidates ===")
+> rev_candidates = []
+> for length in range(15, 46):
+>     # The reverse primer anneals upstream of the insertion point
+>     # It reads the template in the reverse direction
+>     start = insertion_point - length
+>     if start >= 0:
+>         template_region = input_seq[start:insertion_point]
+>     else:
+>         # wrap around for circular plasmid
+>         template_region = input_seq[start:] + input_seq[:insertion_point]
+>     anneal_seq = reverse_complement(template_region)
+>     tm = get_tm(anneal_seq)
+>     if tm is not None:
+>         print(f"  len={length}, Tm={tm:.2f}, seq={anneal_seq}")
+>         if 58 <= tm <= 72:
+>             rev_candidates.append((length, tm, anneal_seq))
+>
+> print(f"\nForward candidates in Tm range: {len(fwd_candidates)}")
+> print(f"Reverse candidates in Tm range: {len(rev_candidates)}")
+>
+> # Find best pair with Tm difference <= 5
+> best_pair = None
+> best_diff = float('inf')
+> for fl, ftm, fseq in fwd_candidates:
+>     for rl, rtm, rseq in rev_candidates:
+>         diff = abs(ftm - rtm)
+>         if diff <= 5 and diff < best_diff:
+>             best_diff = diff
+>             best_pair = (fl, ftm, fseq, rl, rtm, rseq)
+>
+> if best_pair:
+>     fl, ftm, fwd_anneal, rl, rtm, rev_anneal = best_pair
+>     fwd_primer = insertion + fwd_anneal  # 5' tail + annealing
+>     rev_primer = rev_anneal  # just annealing
+>
+>     print(f"\n=== Best primer pair ===")
+>     print(f"Forward primer (full): {fwd_primer.upper()}")
+>     print(f"  Tail (insertion): {insertion.upper()} ({len(insertion)} nt)")
+>     print(f"  Annealing: {fwd_anneal.upper()} ({fl} nt, Tm={ftm:.2f})")
+>     print(f"Reverse primer: {rev_primer.upper()}")
+>     print(f"  Annealing: {rev_anneal.upper()} ({rl} nt, Tm={rtm:.2f})")
+>     print(f"Tm difference: {abs(ftm-rtm):.2f}")
+>
+>     # Write output
+>     with open('/app/primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer.upper()}\n")
+>         f.write(f">reverse_primer\n{rev_primer.upper()}\n")
+>     print("\nPrimers written to /app/primers.fasta")
+> else:
+>     print("ERROR: No valid primer pair found!")
+>
+> PYEOF
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# python3 /tmp/design_primers.py
+=== Forward primer annealing candidates ===
+  len=15, Tm=59.54, seq=caagggcgaggagct
+  len=16, Tm=61.24, seq=caagggcgaggagctg
+  len=17, Tm=63.28, seq=caagggcgaggagctgt
+  len=18, Tm=63.81, seq=caagggcgaggagctgtt
+  len=19, Tm=64.67, seq=caagggcgaggagctgttc
+  len=20, Tm=66.29, seq=caagggcgaggagctgttca
+  len=21, Tm=67.18, seq=caagggcgaggagctgttcac
+  len=22, Tm=69.15, seq=caagggcgaggagctgttcacc
+  len=23, Tm=71.14, seq=caagggcgaggagctgttcaccg
+  len=24, Tm=72.79, seq=caagggcgaggagctgttcaccgg
+  len=25, Tm=74.34, seq=caagggcgaggagctgttcaccggg
+  len=26, Tm=75.77, seq=caagggcgaggagctgttcaccgggg
+  len=27, Tm=76.70, seq=caagggcgaggagctgttcaccggggt
+  len=28, Tm=76.89, seq=caagggcgaggagctgttcaccggggtg
+  len=29, Tm=78.10, seq=caagggcgaggagctgttcaccggggtgg
+  len=30, Tm=78.88, seq=caagggcgaggagctgttcaccggggtggt
+  len=31, Tm=78.97, seq=caagggcgaggagctgttcaccggggtggtg
+  len=32, Tm=80.30, seq=caagggcgaggagctgttcaccggggtggtgc
+  len=33, Tm=81.27, seq=caagggcgaggagctgttcaccggggtggtgcc
+  len=34, Tm=82.20, seq=caagggcgaggagctgttcaccggggtggtgccc
+  len=35, Tm=82.78, seq=caagggcgaggagctgttcaccggggtggtgccca
+  len=36, Tm=82.43, seq=caagggcgaggagctgttcaccggggtggtgcccat
+  len=37, Tm=82.23, seq=caagggcgaggagctgttcaccggggtggtgcccatc
+  len=38, Tm=83.04, seq=caagggcgaggagctgttcaccggggtggtgcccatcc
+  len=39, Tm=83.44, seq=caagggcgaggagctgttcaccggggtggtgcccatcct
+  len=40, Tm=83.35, seq=caagggcgaggagctgttcaccggggtggtgcccatcctg
+  len=41, Tm=84.08, seq=caagggcgaggagctgttcaccggggtggtgcccatcctgg
+  len=42, Tm=84.54, seq=caagggcgaggagctgttcaccggggtggtgcccatcctggt
+  len=43, Tm=84.30, seq=caagggcgaggagctgttcaccggggtggtgcccatcctggtc
+  len=44, Tm=84.95, seq=caagggcgaggagctgttcaccggggtggtgcccatcctggtcg
+  len=45, Tm=85.24, seq=caagggcgaggagctgttcaccggggtggtgcccatcctggtcga
+
+=== Reverse primer annealing candidates ===
+  len=15, Tm=37.97, seq=ctcatatgtatatct
+  len=16, Tm=41.09, seq=ctcatatgtatatctc
+  len=17, Tm=45.08, seq=ctcatatgtatatctcc
+  len=18, Tm=47.34, seq=ctcatatgtatatctcct
+  len=19, Tm=48.71, seq=ctcatatgtatatctcctt
+  len=20, Tm=50.53, seq=ctcatatgtatatctccttc
+  len=21, Tm=52.30, seq=ctcatatgtatatctccttct
+  len=22, Tm=53.25, seq=ctcatatgtatatctccttctt
+  len=23, Tm=53.33, seq=ctcatatgtatatctccttctta
+  len=24, Tm=54.16, seq=ctcatatgtatatctccttcttaa
+  len=25, Tm=54.92, seq=ctcatatgtatatctccttcttaaa
+  len=26, Tm=56.01, seq=ctcatatgtatatctccttcttaaag
+  len=27, Tm=57.48, seq=ctcatatgtatatctccttcttaaagt
+  len=28, Tm=58.04, seq=ctcatatgtatatctccttcttaaagtt
+  len=29, Tm=57.95, seq=ctcatatgtatatctccttcttaaagtta
+  len=30, Tm=58.45, seq=ctcatatgtatatctccttcttaaagttaa
+  len=31, Tm=58.93, seq=ctcatatgtatatctccttcttaaagttaaa
+  len=32, Tm=59.84, seq=ctcatatgtatatctccttcttaaagttaaac
+  len=33, Tm=60.95, seq=ctcatatgtatatctccttcttaaagttaaaca
+  len=34, Tm=61.31, seq=ctcatatgtatatctccttcttaaagttaaacaa
+  len=35, Tm=61.65, seq=ctcatatgtatatctccttcttaaagttaaacaaa
+  len=36, Tm=61.96, seq=ctcatatgtatatctccttcttaaagttaaacaaaa
+  len=37, Tm=62.15, seq=ctcatatgtatatctccttcttaaagttaaacaaaat
+  len=38, Tm=62.44, seq=ctcatatgtatatctccttcttaaagttaaacaaaatt
+  len=39, Tm=62.25, seq=ctcatatgtatatctccttcttaaagttaaacaaaatta
+  len=40, Tm=62.42, seq=ctcatatgtatatctccttcttaaagttaaacaaaattat
+  len=41, Tm=62.68, seq=ctcatatgtatatctccttcttaaagttaaacaaaattatt
+  len=42, Tm=62.93, seq=ctcatatgtatatctccttcttaaagttaaacaaaattattt
+  len=43, Tm=63.35, seq=ctcatatgtatatctccttcttaaagttaaacaaaattatttc
+  len=44, Tm=64.00, seq=ctcatatgtatatctccttcttaaagttaaacaaaattatttct
+  len=45, Tm=63.81, seq=ctcatatgtatatctccttcttaaagttaaacaaaattatttcta
+
+Forward candidates in Tm range: 9
+Reverse candidates in Tm range: 17
+
+=== Best primer pair ===
+Forward primer (full): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+  Tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 nt)
+  Annealing: CAAGGGCGAGGAGCTGTT (18 nt, Tm=63.81)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Annealing: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 nt, Tm=63.81)
+Tm difference: 0.00
+
+Primers written to /app/primers.fasta
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app#

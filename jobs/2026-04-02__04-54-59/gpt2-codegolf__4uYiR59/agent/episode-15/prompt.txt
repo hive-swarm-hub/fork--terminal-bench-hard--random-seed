@@ -1,0 +1,248 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define E 768
+> #define L 12
+> #define H 12
+> #define V 50257
+> #define C 1024
+> #define E4 3072
+> #define PL 7087872
+> float *W;
+> int lo[12]={0,1,10,11,2,3,4,5,6,7,8,9}; // layer order in file
+> int lmap[12]; // real layer -> file index
+> char *toks[V]; // token strings
+> int ntok;
+> // BPE merges
+> char *ma[50000],*mb[50000];
+> int nm;
+> // byte encoder
+> char be[256][5]; // byte -> unicode string
+> int bd[65536]; // unicode char -> byte
+> void init_be(){
+>     int bs[]={0}; int nb=0;
+>     for(int i='!';i<='~';i++) be[i][0]=i,be[i][1]=0;
+>     for(int i=0xa1;i<=0xac;i++){int c=i;if(c<128)be[i][0]=c,be[i][1]=0;else{be[i][0]=0xc0|(c>>6);be[i][1]=0x80|(c&0x3f);be[i][2]=0;}}
+>     for(int i=0xae;i<=0xff;i++){int c=i;be[i][0]=0xc0|(c>>6);be[i][1]=0x80|(c&0x3f);be[i][2]=0;}
+>     // remaining bytes get mapped to 256+
+>     int n=0;
+>     int used[256]={0};
+>     for(int i='!';i<='~';i++) used[i]=1;
+>     for(int i=0xa1;i<=0xac;i++) used[i]=1;
+>     for(int i=0xae;i<=0xff;i++) used[i]=1;
+>     for(int i=0;i<256;i++) if(!used[i]){
+>         int c=256+n; // unicode codepoint
+>         // encode as UTF-8
+>         if(c<0x80){be[i][0]=c;be[i][1]=0;}
+>         else{be[i][0]=0xc0|(c>>6);be[i][1]=0x80|(c&0x3f);be[i][2]=0;}
+>         n++;
+>     }
+>     // build byte decoder
+>     for(int i=0;i<256;i++){
+>         // decode be[i] as UTF-8 to get codepoint
+>         unsigned char*s=(unsigned char*)be[i];
+>         int cp;
+>         if(s[0]<0x80) cp=s[0]; else cp=((s[0]&0x1f)<<6)|(s[1]&0x3f);
+>         bd[cp]=i;
+>     }
+> }
+> void load_bpe(char*fn){
+>     FILE*f=fopen(fn,"r");
+>     char line[1024];
+>     fgets(line,sizeof(line),f); // skip header
+>     nm=0;
+>     // Build vocab: first 256 tokens are single byte-encoded chars
+>     ntok=0;
+>     for(int i=0;i<256;i++){
+>         toks[ntok]=strdup(be[i]);
+>         ntok++;
+>     }
+>     while(fgets(line,sizeof(line),f)){
+>         int len=strlen(line);
+>         while(len>0&&(line[len-1]=='\n'||line[len-1]=='\r'))line[--len]=0;
+>         if(len==0)continue;
+>         char*sp=strchr(line,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         ma[nm]=strdup(line);
+>         mb[nm]=strdup(sp+1);
+>         // merged token
+>         char buf[256];
+>         sprintf(buf,"%s%s",line,sp+1);
+>         toks[ntok]=strdup(buf);
+>         ntok++;
+>         nm++;
+>     }
+>     fclose(f);
+> }
+> int find_tok(char*s){
+>     for(int i=0;i<ntok;i++) if(strcmp(toks[i],s)==0) return i;
+>     return -1;
+> }
+> void encode(char*text, int*out, int*nout){
+>     // convert text bytes to BPE token strings
+>     int n=0;
+>     char*parts[1024];
+>     unsigned char*t=(unsigned char*)text;
+>     while(*t){
+>         parts[n]=strdup(be[*t]);
+>         n++; t++;
+>     }
+>     // apply merges
+>     for(int m=0;m<nm;m++){
+>         for(int i=0;i<n-1;i++){
+>             if(strcmp(parts[i],ma[m])==0&&strcmp(parts[i+1],mb[m])==0){
+>                 char buf[256];
+>                 sprintf(buf,"%s%s",parts[i],parts[i+1]);
+>                 free(parts[i]); free(parts[i+1]);
+>                 parts[i]=strdup(buf);
+>                 for(int j=i+1;j<n-1;j++) parts[j]=parts[j+1];
+>                 n--; i--;
+>             }
+>         }
+>     }
+>     *nout=0;
+>     for(int i=0;i<n;i++){
+>         int id=find_tok(parts[i]);
+>         if(id>=0) out[(*nout)++]=id;
+>         free(parts[i]);
+>     }
+> }
+> void decode(int*ids,int n){
+>     for(int i=0;i<n;i++){
+>         char*s=toks[ids[i]];
+>         // decode UTF-8 chars back to bytes
+>         unsigned char*p=(unsigned char*)s;
+>         while(*p){
+>             int cp;
+>             if(*p<0x80){cp=*p++;}
+>             else if((*p&0xe0)==0xc0){cp=((*p&0x1f)<<6)|(p[1]&0x3f);p+=2;}
+>             else if((*p&0xf0)==0xe0){cp=((*p&0xf)<<12)|((p[1]&0x3f)<<6)|(p[2]&0x3f);p+=3;}
+>             else{p++;continue;}
+>             if(cp<65536&&bd[cp]>=0) putchar(bd[cp]);
+>         }
+>     }
+> }
+> float x[C][E], buf[E], qkv[C][3*E], att[H][C][C];
+> float hid[C][E4];
+> void layernorm(float*out,float*in,float*g,float*b){
+>     float m=0,v=0;
+>     for(int i=0;i<E;i++) m+=in[i];
+>     m/=E;
+>     for(int i=0;i<E;i++) v+=(in[i]-m)*(in[i]-m);
+>     v=1.0f/sqrtf(v/E+1e-5f);
+>     for(int i=0;i<E;i++) out[i]=(in[i]-m)*v*g[i]+b[i];
+> }
+> float gelu(float x){return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> void forward(int*tokens,int T,float*logits){
+>     float*wte=W+85842432, *wpe=W+85056000;
+>     for(int t=0;t<T;t++)
+>         for(int i=0;i<E;i++)
+>             x[t][i]=wte[tokens[t]*E+i]+wpe[t*E+i];
+>     for(int l=0;l<L;l++){
+>         int fi;
+>         for(fi=0;fi<L;fi++) if(lo[fi]==l) break;
+>         float*base=W+fi*(long)PL;
+>         float*cab=base, *caw=base+3*E, *cpb=base+3*E+E*3*E, *cpw=cpb+E;
+>         float*l1b=cpw+E*E, *l1g=l1b+E, *l2b=l1g+E, *l2g=l2b+E;
+>         float*fcb=l2g+E, *fcw=fcb+4*E, *fpb=fcw+(long)E*4*E, *fpw=fpb+E;
+>         for(int t=0;t<T;t++){
+>             float ln[E];
+>             layernorm(ln,x[t],l1g,l1b);
+>             // qkv = ln @ caw + cab
+>             for(int j=0;j<3*E;j++){
+>                 float s=cab[j];
+>                 for(int k=0;k<E;k++) s+=ln[k]*caw[k*3*E+j];
+>                 qkv[t][j]=s;
+>             }
+>         }
+>         // attention per head
+>         int hs=E/H;
+>         for(int h=0;h<H;h++){
+>             for(int t=0;t<T;t++){
+>                 for(int t2=0;t2<=t;t2++){
+>                     float s=0;
+>                     for(int i=0;i<hs;i++) s+=qkv[t][h*hs+i]*qkv[t2][E+h*hs+i];
+>                     att[h][t][t2]=s/sqrtf(hs);
+>                 }
+>                 // softmax
+>                 float mx=-1e9;
+>                 for(int t2=0;t2<=t;t2++) if(att[h][t][t2]>mx) mx=att[h][t][t2];
+>                 float sm=0;
+>                 for(int t2=0;t2<=t;t2++){att[h][t][t2]=expf(att[h][t][t2]-mx);sm+=att[h][t][t2];}
+>                 for(int t2=0;t2<=t;t2++) att[h][t][t2]/=sm;
+>             }
+>         }
+>         // attention output
+>         for(int t=0;t<T;t++){
+>             float ao[E];
+>             for(int h=0;h<H;h++)
+>                 for(int i=0;i<hs;i++){
+>                     float s=0;
+>                     for(int t2=0;t2<=t;t2++) s+=att[h][t][t2]*qkv[t2][2*E+h*hs+i];
+>                     ao[h*hs+i]=s;
+>                 }
+>             // c_proj
+>             for(int j=0;j<E;j++){
+>                 float s=cpb[j];
+>                 for(int k=0;k<E;k++) s+=ao[k]*cpw[k*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>         // MLP
+>         for(int t=0;t<T;t++){
+>             float ln[E];
+>             layernorm(ln,x[t],l2g,l2b);
+>             for(int j=0;j<E4;j++){
+>                 float s=fcb[j];
+>                 for(int k=0;k<E;k++) s+=ln[k]*fcw[k*E4+j];
+>                 hid[t][j]=gelu(s);
+>             }
+>             for(int j=0;j<E;j++){
+>                 float s=fpb[j];
+>                 for(int k=0;k<E4;k++) s+=hid[t][k]*fpw[k*E+j];
+>                 x[t][j]+=s;
+>             }
+>         }
+>     }
+>     // final layernorm + logits for last token
+>     float*lnfb=W+85054464, *lnfg=W+85055232;
+>     float ln[E];
+>     layernorm(ln,x[T-1],lnfg,lnfb);
+>     float*wte2=W+85842432;
+>     for(int i=0;i<V;i++){
+>         float s=0;
+>         for(int j=0;j<E;j++) s+=ln[j]*wte2[i*E+j];
+>         logits[i]=s;
+>     }
+> }
+> int main(int argc,char**argv){
+>     if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st; fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     init_be();
+>     load_bpe(argv[2]);
+>     int tokens[1024],nt;
+>     encode(argv[3],tokens,&nt);
+>     float*logits=malloc(V*sizeof(float));
+>     for(int g=0;g<20;g++){
+>         forward(tokens,nt,logits);
+>         int best=0;
+>         for(int i=1;i<V;i++) if(logits[i]>logits[best]) best=i;
+>         tokens[nt++]=best;
+>         decode(&best,1);
+>     }
+>     printf("\n");
+>     free(logits);
+>     return 0;
+> }
+> CEOF
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app#

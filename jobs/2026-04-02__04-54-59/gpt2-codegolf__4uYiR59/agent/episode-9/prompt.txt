@@ -1,0 +1,62 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# python3 << 'EOF'
+> import struct
+>
+> # Let me re-read the first few values as integers to check for magic numbers
+> f = open('gpt2-124M.ckpt', 'rb')
+> first_ints = struct.unpack('10I', f.read(40))
+> print('First 10 uint32:', first_ints)
+> first_floats = struct.unpack('10f', f.read(40))
+> print('Floats at offset 40:', [f'{v:.6f}' for v in first_floats])
+>
+> # Check the llm.c format - it has a 256-byte header
+> # header[0] = magic (20240326 or 20240730)
+> # header[1] = version
+> f.seek(0)
+> magic = struct.unpack('I', f.read(4))[0]
+> print(f'\nFirst uint32 as potential magic: {magic} (hex: {magic:#x})')
+> print(f'As float: {struct.unpack("f", struct.pack("I", magic))[0]}')
+>
+> # The first float is 0.4798... Let me check if wte starts at offset 0
+> # wte[0][0] for GPT-2 should be the embedding of token 0 (which is '!')
+> # These are typically small random values, which matches
+>
+> # Let me try: maybe the ln weights are stored but they're pre-layer-norm style
+> # In GPT-2, ln1 is applied BEFORE attention (pre-norm)
+> # The gamma values after training might not be exactly 1.0
+> # Let me search with a wider tolerance
+>
+> # Actually, let me check specific offsets in the llm.c grouped format
+> V=50257; C=1024; E=768; L=12
+>
+> # llm.c format groups by parameter type:
+> # wte[V,E] wpe[C,E] ln1w[L,E] ln1b[L,E] qkvw[L,E,3E] qkvb[L,3E] attnpw[L,E,E] attnpb[L,E] ln2w[L,E] ln2b[L,E] fcw[L,E,4E] fcb[L,4E] fcpw[L,4E,E] fcpb[L,E] lnf
+w[E] lnfb[E]
+>
+> off = V*E + C*E  # after wte and wpe
+> f.seek(off * 4)
+> # This should be ln1w for all 12 layers (L*E values)
+> ln1w = struct.unpack(f'{L*E}f', f.read(L*E*4))
+> print(f'\nGrouped ln1w (first layer, first 10): {[f"{v:.4f}" for v in ln1w[:10]]}')
+> print(f'Grouped ln1w mean (layer 0): {sum(ln1w[:E])/E:.4f}')
+> print(f'Grouped ln1w mean (all): {sum(ln1w)/(L*E):.4f}')
+>
+> # Hmm, these don't look like layer norm weights (mean ~0.01 not ~1.0)
+> # Maybe the format is different. Let me check if maybe wte is NOT first
+> # Or maybe there's no wte and it shares with the output projection
+>
+> # Let me check: what if the file is in the order that TF saves checkpoints?
+> # TF checkpoint order is alphabetical by variable name
+> f.close()
+> EOF
+First 10 uint32: (1056304899, 3204874944, 3202074768, 3193103670, 3187854502, 3183701867, 3199511083, 3181156538, 3174827247, 3172579197)
+Floats at offset 40: ['-0.013764', '-0.184783', '-0.119844', '0.043963', '0.042387', '-0.313024', '0.016617', '0.349092', '-0.390350', '-0.029889']
+
+First uint32 as potential magic: 1056304899 (hex: 0x3ef5ef03)
+As float: 0.4803391396999359
+
+Grouped ln1w (first layer, first 10): ['0.0126', '0.1113', '-0.0190', '-0.0797', '-0.1945', '-0.0229', '-0.0454', '0.0487', '0.0393', '0.1060']
+Grouped ln1w mean (layer 0): 0.0147
+Grouped ln1w mean (all): -0.0050
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app#

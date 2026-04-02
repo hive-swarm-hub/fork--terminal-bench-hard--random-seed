@@ -1,0 +1,260 @@
+New Terminal Output:
+
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# cat > /tmp/verify.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.lower()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> primers = parse_fasta('/app/primers.fasta')
+> fwd_primer = list(primers.values())[0]
+> rev_primer = list(primers.values())[1]
+>
+> print(f"Forward primer: {fwd_primer.upper()}")
+> print(f"Reverse primer: {rev_primer.upper()}")
+> print(f"Forward length: {len(fwd_primer)}")
+> print(f"Reverse length: {len(rev_primer)}")
+>
+> # For Q5 SDM with insertion:
+> # Forward primer = 5'[insertion_tail][annealing_fwd]3' - annealing_fwd binds template starting at insertion point
+> # Reverse primer = 5'[annealing_rev]3' - annealing_rev binds reverse strand ending at insertion point
+> #
+> # The reverse primer's annealing region on the template (sense strand) is:
+> #   input_seq[insertion_point - len(rev_primer) : insertion_point]
+> # And the reverse primer itself = reverse_complement of that region
+>
+> # Find where forward primer annealing portion binds to input
+> # The 3' end of forward primer should match the input
+> for fwd_anneal_len in range(15, 46):
+>     fwd_anneal = fwd_primer[-fwd_anneal_len:]
+>     # Check if this annealing portion exists in input_seq (circular)
+>     doubled = input_seq + input_seq
+>     pos = doubled.find(fwd_anneal)
+>     if pos >= 0 and pos < len(input_seq):
+>         fwd_tail = fwd_primer[:-fwd_anneal_len]
+>         if len(fwd_tail) > 0:
+>             print(f"\nForward primer annealing found at input pos {pos}, anneal_len={fwd_anneal_len}")
+>             print(f"  Tail: {fwd_tail.upper()} ({len(fwd_tail)} nt)")
+>             print(f"  Annealing: {fwd_anneal.upper()} ({fwd_anneal_len} nt)")
+>             fwd_tm = get_tm(fwd_anneal)
+>             print(f"  Tm: {fwd_tm:.2f}")
+>             fwd_bind_start = pos
+>             break
+>
+> # Find where reverse primer annealing portion binds to input
+> # Reverse primer binds to the antisense strand
+> rev_anneal = rev_primer  # entire reverse primer is annealing
+> rev_template = reverse_complement(rev_anneal)  # this is what's on the sense strand
+> doubled = input_seq + input_seq
+> pos = doubled.find(rev_template)
+> if pos >= 0 and pos < len(input_seq):
+>     rev_bind_end = pos + len(rev_template)  # position after the last base of template match
+>     print(f"\nReverse primer template region at input pos {pos}-{rev_bind_end}")
+>     print(f"  Template region: {rev_template.upper()} ({len(rev_template)} nt)")
+>     print(f"  Reverse primer: {rev_anneal.upper()} ({len(rev_anneal)} nt)")
+>     rev_tm = get_tm(rev_anneal)
+>     print(f"  Tm: {rev_tm:.2f}")
+> else:
+>     print(f"WARNING: reverse primer template region not found in input!")
+>     # Try finding it
+>     for ral in range(15, len(rev_primer)+1):
+>         rt = reverse_complement(rev_primer[:ral])
+>         p = doubled.find(rt)
+>         if p < 0:
+>             print(f"  Failed at anneal_len={ral}")
+>             break
+>
+> # Now simulate Q5 SDM:
+> # PCR amplifies the entire plasmid with primers pointing away from each other
+> # The product is: fwd_primer_full + template between primers + rev_complement(rev_primer)
+> # After KLD (ligation), we get the new circular plasmid
+>
+> # The forward primer binds at fwd_bind_start on the sense strand
+> # The reverse primer binds ending at rev_bind_end on the sense strand (pointing backward)
+> # So the template region amplified between them (going around the circle) is:
+> #   From fwd_bind_start + fwd_anneal_len to rev_bind_end - rev_anneal_len (going around)
+> # Wait, actually in Q5 SDM, the primers are back-to-back
+> # The amplified product (linear) is:
+> #   5'-[fwd_primer_full]-[template from fwd_end to rev_start]-[RC(rev_primer)]-3'
+> # Where fwd_end = fwd_bind_start + fwd_anneal_len
+> # And rev_start = rev_bind_end - len(rev_anneal) = pos
+> # Going around the circle from fwd_end to pos
+>
+> fwd_end = fwd_bind_start + fwd_anneal_len
+> rev_start = pos  # start of reverse primer template region
+>
+> print(f"\nFwd annealing ends at: {fwd_end}")
+> print(f"Rev annealing starts at: {rev_start}")
+>
+> # The template between the two primer annealing regions (going forward from fwd_end around to rev_start)
+> if fwd_end <= rev_start:
+>     middle_template = input_seq[fwd_end:rev_start]
+> else:
+>     middle_template = input_seq[fwd_end:] + input_seq[:rev_start]
+>
+> print(f"Middle template length: {len(middle_template)}")
+>
+> # The linear PCR product (sense strand) is:
+> # fwd_primer_full + middle_template + reverse_complement(rev_primer)
+> # But wait - the reverse primer binds the antisense strand, so the sense strand at that position
+> # is the template region itself. The PCR product ends with the template region that the rev primer covers.
+> # Actually, let me think again:
+> #
+> # In PCR:
+> # - Forward primer extends from fwd_bind_start through the template going clockwise
+> # - Reverse primer extends from rev_bind_end going counter-clockwise (on the antisense strand)
+> # - They meet somewhere in the middle
+> #
+> # The linear product (top strand, 5' to 3') is:
+> # [fwd_primer_full] + [template from fwd_anneal_end going clockwise to where rev primer template starts] + [rev primer template region]
+> # But the rev primer template region is already part of the template...
+> #
+> # Actually, the linear PCR product is:
+> # 5'-fwd_full_primer-[intervening template]-RC(rev_primer)-3' on one strand
+> # After KLD ligation of the blunt ends, the circular product is:
+> # fwd_full_primer + intervening_template + RC(rev_primer) joined circularly
+> # Which is the same as:
+> # fwd_tail + fwd_anneal + intervening_template + rev_template_region
+> # = insertion + input[fwd_bind_start:fwd_end] + input[fwd_end:rev_start] + input[rev_start:rev_bind_end]
+> # Wait, that's not right either. Let me think step by step.
+>
+> # In back-to-back primer PCR (Q5 SDM):
+> # The two primers point AWAY from each other on the template
+> # Forward primer anneals at position 215 going right (clockwise)
+> # Reverse primer anneals at position 170-214 going left (counter-clockwise on sense strand)
+> #
+> # The PCR product amplifies the ENTIRE plasmid:
+> # Top strand: 5'- fwd_primer_full - template[fwd_end to circle back to rev_start] - 3'
+> # Bottom strand: 3' - template_complement - rev_primer_full - 5'
+> #
+> # After ligation, the circular product is:
+> # fwd_primer_full + template[fwd_end ... rev_start (going around)] + RC(rev_primer)
+> # = fwd_tail + fwd_anneal_region + template[fwd_end...rev_start] + rev_template_region
+> # = insertion + input[fwd_bind_start:rev_bind_end going around]
+> # = insertion + input[215:] + input[:170]  (if rev starts at 170)
+> # Hmm wait, that gives us: insertion + input[215:] + input[:215] minus the overlap
+>
+> # Let me just construct it and check
+> if fwd_bind_start <= rev_start:
+>     # Going from fwd_bind_start clockwise through rev_bind_end
+>     # The template covered by both primers and between them:
+>     # input[fwd_bind_start:fwd_end] + input[fwd_end:rev_start] + input[rev_start:rev_bind_end]
+>     # = input[fwd_bind_start:rev_bind_end]
+>     # But we also need the part NOT covered: input[rev_bind_end:] + input[:fwd_bind_start]
+>     # The linear PCR product top strand is:
+>     # fwd_full + input[fwd_end:] + input[:rev_start]
+>     # Hmm, this depends on direction
+>     pass
+>
+> # Let me just try direct reconstruction:
+> # After Q5 SDM, the new plasmid = fwd_tail + input[fwd_bind_start:] + input[:rev_bind_end]
+> # where the fwd_anneal overlaps with input[fwd_bind_start:fwd_end]
+> # Actually the product after ligation is:
+> # fwd_tail + fwd_anneal + (template going clockwise from fwd_end all the way around to where rev primer template ends)
+> # = fwd_tail + input[fwd_bind_start ... going clockwise ... rev_bind_end]
+>
+> # Since rev_bind_end should be = fwd_bind_start (back-to-back), the entire plasmid is covered
+> # rev_bind_end = pos + len(rev_template)
+> print(f"\nrev_bind_end = {rev_bind_end % len(input_seq)}")
+> print(f"fwd_bind_start = {fwd_bind_start}")
+>
+> # Construct the output plasmid
+> if rev_bind_end <= fwd_bind_start:
+>     covered = input_seq[fwd_bind_start:] + input_seq[:rev_bind_end]
+> else:
+>     covered = input_seq[fwd_bind_start:rev_bind_end]  # This shouldn't happen for back-to-back
+>     # Actually for back-to-back going around the circle:
+>     covered = input_seq[fwd_bind_start:] + input_seq[:rev_bind_end % len(input_seq)]
+>
+> new_plasmid = fwd_tail + covered
+> print(f"\nNew plasmid length: {len(new_plasmid)}")
+> print(f"Expected output length: {len(output_seq)}")
+>
+> # Check if it matches (need to check all rotations since it's circular)
+> def circular_match(seq1, seq2):
+>     if len(seq1) != len(seq2):
+>         return False, -1
+>     doubled = seq1 + seq1
+>     pos = doubled.find(seq2)
+>     if pos >= 0:
+>         return True, pos
+>     return False, -1
+>
+> match, rot = circular_match(new_plasmid, output_seq)
+> print(f"Circular match: {match} (rotation: {rot})")
+>
+> if not match:
+>     # Debug
+>     print(f"New plasmid first 50: {new_plasmid[:50]}")
+>     print(f"Output first 50: {output_seq[:50]}")
+>     # Try to find where they differ
+>     doubled_new = new_plasmid + new_plasmid
+>     for rot_try in range(len(new_plasmid)):
+>         rotated = doubled_new[rot_try:rot_try+len(new_plasmid)]
+>         if rotated == output_seq:
+>             print(f"Match found at rotation {rot_try}!")
+>             break
+>         # Find first diff
+>         for j in range(len(output_seq)):
+>             if j >= len(rotated):
+>                 break
+>             if rotated[j] != output_seq[j]:
+>                 if rot_try == 0:
+>                     print(f"  Rot 0: first diff at pos {j}: new={rotated[j]}, out={output_seq[j]}")
+>                     print(f"  Context new: {rotated[max(0,j-10):j+10]}")
+>                     print(f"  Context out: {output_seq[max(0,j-10):j+10]}")
+>                 break
+>
+> PYEOF
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# python3 /tmp/verify.py
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+Forward length: 57
+Reverse length: 45
+
+Forward primer annealing found at input pos 218, anneal_len=15
+  Tail: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAA (42 nt)
+  Annealing: GGGCGAGGAGCTGTT (15 nt)
+  Tm: 59.92
+
+Reverse primer template region at input pos 170-215
+  Template region: TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG (45 nt)
+  Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 nt)
+  Tm: 63.81
+
+Fwd annealing ends at: 233
+Rev annealing starts at: 170
+Middle template length: 3528
+
+rev_bind_end = 215
+fwd_bind_start = 218
+
+New plasmid length: 3630
+Expected output length: 3630
+Circular match: True (rotation: 3415)
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app#

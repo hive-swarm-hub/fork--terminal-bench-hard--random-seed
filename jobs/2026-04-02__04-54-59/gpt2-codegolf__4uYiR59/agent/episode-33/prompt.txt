@@ -1,0 +1,104 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# python3 << 'PYEOF'
+> import mmap, struct, math
+>
+> E=768; L=12; V=50257; C=1024; H=12; HS=E//H
+> layer_order = [0,1,10,11,2,3,4,5,6,7,8,9]
+> PL = 7087872
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def getf(off, n):
+>     return list(struct.unpack_from(f'{n}f', m, off*4))
+>
+> # Forward pass for single token "The" = token 464
+> wte_off = 85842432
+> wpe_off = 85056000
+>
+> # Get embedding
+> x = [0.0]*E
+> wte = getf(wte_off + 464*E, E)
+> wpe = getf(wpe_off, E)
+> for i in range(E):
+>     x[i] = wte[i] + wpe[i]
+>
+> print(f'Embedding x[0:5]: {x[0:5]}')
+>
+> def layernorm(x, g, b):
+>     mean = sum(x)/E
+>     var = sum((xi-mean)**2 for xi in x)/E
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)/std * g[i] + b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> # Process layer 0
+> for layer in range(1):  # just layer 0
+>     fi = layer_order.index(layer)
+>     base = fi * PL
+>
+>     # Offsets within layer
+>     cab_off = base
+>     caw_off = base + 3*E
+>     cpb_off = caw_off + E*3*E
+>     cpw_off = cpb_off + E
+>     l1b_off = cpw_off + E*E
+>     l1g_off = l1b_off + E
+>     l2b_off = l1g_off + E
+>     l2g_off = l2b_off + E
+>     fcb_off = l2g_off + E
+>     fcw_off = fcb_off + 4*E
+>     fpb_off = fcw_off + E*4*E
+>     fpw_off = fpb_off + E
+>
+>     # Layer norm 1
+>     l1g = getf(l1g_off, E)
+>     l1b = getf(l1b_off, E)
+>     h = layernorm(x, l1g, l1b)
+>     print(f'After LN1 h[0:5]: {h[0:5]}')
+>
+>     # QKV = h @ caw + cab
+>     cab = getf(cab_off, 3*E)
+>     qkv = list(cab[:])
+>     for j in range(3*E):
+>         s = cab[j]
+>         for k in range(E):
+>             s += h[k] * getf(caw_off + k*3*E + j, 1)[0]
+>         qkv[j] = s
+>
+>     print(f'QKV q[0:5]: {qkv[0:5]}')
+>     print(f'QKV k[0:5]: {qkv[E:E+5]}')
+>     print(f'QKV v[0:5]: {qkv[2*E:2*E+5]}')
+>
+>     # Single token: attention output = v (attention weight is 1.0)
+>     v = qkv[2*E:3*E]
+>
+>     # c_proj: v @ cpw + cpb
+>     cpb = getf(cpb_off, E)
+>     cpw_data = getf(cpw_off, E*E)
+>     attn_out = [0.0]*E
+>     for j in range(E):
+>         s = cpb[j]
+>         for k in range(E):
+>             s += v[k] * cpw_data[k*E+j]
+>         attn_out[j] = s
+>
+>     # Residual
+>     x = [x[i] + attn_out[i] for i in range(E)]
+>     print(f'After attn+residual x[0:5]: {x[0:5]}')
+>
+> print('Layer 0 done')
+> m.close()
+> f.close()
+> PYEOF
+Embedding x[0:5]: [-0.08744361437857151, -0.21771634183824062, 0.06849727686494589, -0.050737722776830196, -0.049695029854774475]
+After LN1 h[0:5]: [-0.052923525486207754, -0.0777903682779395, -0.032439102014827435, -0.028004391531450214, -0.03955240494174235]
+QKV q[0:5]: [0.15319389489460236, -0.41475122173176643, 0.36701318993375387, -1.1779778873823146, 0.1678028593311225]
+QKV k[0:5]: [-0.9420208942786027, 1.902251352834726, 0.8721914303938233, -0.1501804460327603, 0.40399637158728063]
+QKV v[0:5]: [-0.013066330602803067, -0.014464070906786013, 0.1269401900161433, -0.022084157559343842, -0.20818818666843533]
+After attn+residual x[0:5]: [0.12177938963626497, -0.4313147704778838, 0.8060512915377559, -0.0635174407347222, -0.04263863503609843]
+Layer 0 done
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app#

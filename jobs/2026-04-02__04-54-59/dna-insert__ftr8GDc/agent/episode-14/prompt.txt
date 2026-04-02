@@ -1,0 +1,176 @@
+New Terminal Output:
+
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# cat > /tmp/final_verify.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line.lower()
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> # The mutation: pure insertion of 39 nt at position 215
+> insertion_point = 215
+> insertion = output_seq[215:254]  # 'tagattagaagaagaattaagaagaagattaacagaaag'
+> assert input_seq[:215] + insertion + input_seq[215:] == output_seq
+> print(f"Mutation: insertion of {len(insertion)} nt at position {insertion_point}")
+> print(f"Insertion: {insertion.upper()}")
+>
+> # Forward primer design:
+> # 5'-[insertion]-[annealing to input starting at pos 215]-3'
+> fwd_anneal = input_seq[215:233]  # 18 nt: CAAGGGCGAGGAGCTGTT
+> fwd_tail = insertion  # 39 nt
+> fwd_primer = fwd_tail + fwd_anneal
+>
+> # Reverse primer design:
+> # Anneals to reverse strand, ending at position 214 (just before insertion point)
+> # Template region: input[170:215] = 45 nt
+> rev_template = input_seq[170:215]
+> rev_primer = reverse_complement(rev_template)
+>
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_primer)
+>
+> print(f"\n=== CONSTRAINT VERIFICATION ===")
+> print(f"\nForward primer: {fwd_primer.upper()}")
+> print(f"  Total length: {len(fwd_primer)}")
+> print(f"  Tail (insertion): {fwd_tail.upper()} ({len(fwd_tail)} nt)")
+> print(f"  Annealing: {fwd_anneal.upper()} ({len(fwd_anneal)} nt)")
+> print(f"  Annealing Tm: {fwd_tm:.2f}°C")
+>
+> print(f"\nReverse primer: {rev_primer.upper()}")
+> print(f"  Total length: {len(rev_primer)}")
+> print(f"  Annealing: {rev_primer.upper()} ({len(rev_primer)} nt)")
+> print(f"  Annealing Tm: {rev_tm:.2f}°C")
+>
+> print(f"\nTm difference: {abs(fwd_tm - rev_tm):.2f}°C")
+>
+> # Check all constraints
+> all_ok = True
+>
+> # 1. Annealing length 15-45
+> if not (15 <= len(fwd_anneal) <= 45):
+>     print(f"FAIL: Forward annealing length {len(fwd_anneal)} not in [15,45]")
+>     all_ok = False
+> else:
+>     print(f"OK: Forward annealing length {len(fwd_anneal)} in [15,45]")
+>
+> if not (15 <= len(rev_primer) <= 45):
+>     print(f"FAIL: Reverse annealing length {len(rev_primer)} not in [15,45]")
+>     all_ok = False
+> else:
+>     print(f"OK: Reverse annealing length {len(rev_primer)} in [15,45]")
+>
+> # 2. Tm 58-72
+> if not (58 <= fwd_tm <= 72):
+>     print(f"FAIL: Forward Tm {fwd_tm:.2f} not in [58,72]")
+>     all_ok = False
+> else:
+>     print(f"OK: Forward Tm {fwd_tm:.2f} in [58,72]")
+>
+> if not (58 <= rev_tm <= 72):
+>     print(f"FAIL: Reverse Tm {rev_tm:.2f} not in [58,72]")
+>     all_ok = False
+> else:
+>     print(f"OK: Reverse Tm {rev_tm:.2f} in [58,72]")
+>
+> # 3. Tm difference <= 5
+> if abs(fwd_tm - rev_tm) > 5:
+>     print(f"FAIL: Tm difference {abs(fwd_tm - rev_tm):.2f} > 5")
+>     all_ok = False
+> else:
+>     print(f"OK: Tm difference {abs(fwd_tm - rev_tm):.2f} <= 5")
+>
+> # 4. Minimum number of primer pairs (1 for single insertion)
+> print(f"OK: 1 primer pair (minimum for single insertion)")
+>
+> # 5. Verify output file
+> primers = parse_fasta('/app/primers.fasta')
+> names = list(primers.keys())
+> print(f"\nOutput file primer names: {names}")
+> print(f"Forward primer in file: {primers[names[0]].upper()}")
+> print(f"Reverse primer in file: {primers[names[1]].upper()}")
+> assert primers[names[0]].lower() == fwd_primer, "Forward primer mismatch!"
+> assert primers[names[1]].lower() == rev_primer, "Reverse primer mismatch!"
+> print(f"OK: Primers in file match design")
+>
+> # 6. Verify the primers produce the correct output plasmid
+> # Simulate: the PCR product after KLD ligation
+> # Linear product top strand: fwd_primer + template[233:] + template[:170]
+> # After circularization: this becomes the new plasmid
+> new_linear = fwd_primer + input_seq[233:] + input_seq[:170]
+> print(f"\nSimulated new plasmid length: {len(new_linear)}")
+> print(f"Expected output length: {len(output_seq)}")
+>
+> # Check circular match
+> def circular_match(seq1, seq2):
+>     if len(seq1) != len(seq2):
+>         return False
+>     return seq2 in (seq1 + seq1)
+>
+> print(f"Circular match with output: {circular_match(new_linear, output_seq)}")
+>
+> if all_ok:
+>     print(f"\n=== ALL CONSTRAINTS SATISFIED ===")
+> else:
+>     print(f"\n=== SOME CONSTRAINTS FAILED ===")
+>
+> PYEOF
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app# python3 /tmp/final_verify.py
+Mutation: insertion of 39 nt at position 215
+Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+
+=== CONSTRAINT VERIFICATION ===
+
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+  Total length: 57
+  Tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 nt)
+  Annealing: CAAGGGCGAGGAGCTGTT (18 nt)
+  Annealing Tm: 63.81°C
+
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Total length: 45
+  Annealing: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 nt)
+  Annealing Tm: 63.81°C
+
+Tm difference: 0.00°C
+OK: Forward annealing length 18 in [15,45]
+OK: Reverse annealing length 45 in [15,45]
+OK: Forward Tm 63.81 in [58,72]
+OK: Reverse Tm 63.81 in [58,72]
+OK: Tm difference 0.00 <= 5
+OK: 1 primer pair (minimum for single insertion)
+
+Output file primer names: ['forward_primer', 'reverse_primer']
+Forward primer in file: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Reverse primer in file: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+OK: Primers in file match design
+
+Simulated new plasmid length: 3585
+Expected output length: 3630
+Circular match with output: False
+
+=== ALL CONSTRAINTS SATISFIED ===
+root@5d2d9eb5-8cda-4336-91a2-5df4158e45f0:/app#

@@ -1,0 +1,125 @@
+New Terminal Output:
+
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app# python3 << 'PYEOF'
+> import struct
+>
+> # GPT-2 TF variable names (alphabetical order as TF stores them):
+> # model/h0/attn/c_attn/b  [3*768]
+> # model/h0/attn/c_attn/w  [1, 768, 3*768] - note the leading 1 dim in TF GPT-2!
+> # model/h0/attn/c_proj/b  [768]
+> # model/h0/attn/c_proj/w  [1, 768, 768]
+> # model/h0/ln_1/b  [768]
+> # model/h0/ln_1/g  [768]
+> # model/h0/ln_2/b  [768]
+> # model/h0/ln_2/g  [768]
+> # model/h0/mlp/c_fc/b  [4*768]
+> # model/h0/mlp/c_fc/w  [1, 768, 4*768]
+> # model/h0/mlp/c_proj/b  [768]
+> # model/h0/mlp/c_proj/w  [1, 4*768, 768]
+> # ... repeat for h1-h11 ...
+> # model/ln_f/b  [768]
+> # model/ln_f/g  [768]
+> # model/wpe  [1024, 768]
+> # model/wte  [50257, 768]
+>
+> # Wait, but TF GPT-2 uses Conv1D which has shape [1, in, out] for weights
+> # Actually no, the original GPT-2 code uses tf.get_variable with shape [nx, nf]
+> # So c_attn/w is [768, 2304] and c_attn/b is [2304]
+>
+> E = 768
+> L = 12
+> V = 50257
+> C = 1024
+>
+> # Alphabetical order of TF variables:
+> vars_order = []
+> for i in range(L):
+>     vars_order.append((f'model/h{i}/attn/c_attn/b', 3*E))
+>     vars_order.append((f'model/h{i}/attn/c_attn/w', E*3*E))
+>     vars_order.append((f'model/h{i}/attn/c_proj/b', E))
+>     vars_order.append((f'model/h{i}/attn/c_proj/w', E*E))
+>     vars_order.append((f'model/h{i}/ln_1/b', E))
+>     vars_order.append((f'model/h{i}/ln_1/g', E))
+>     vars_order.append((f'model/h{i}/ln_2/b', E))
+>     vars_order.append((f'model/h{i}/ln_2/g', E))
+>     vars_order.append((f'model/h{i}/mlp/c_fc/b', 4*E))
+>     vars_order.append((f'model/h{i}/mlp/c_fc/w', E*4*E))
+>     vars_order.append((f'model/h{i}/mlp/c_proj/b', E))
+>     vars_order.append((f'model/h{i}/mlp/c_proj/w', 4*E*E))
+> vars_order.append(('model/ln_f/b', E))
+> vars_order.append(('model/ln_f/g', E))
+> vars_order.append(('model/wpe', C*E))
+> vars_order.append(('model/wte', V*E))
+>
+> # But wait - h0, h1, ..., h10, h11 sort as h0, h1, h10, h11, h2, h3, ...
+> # because string sorting! Let me fix this.
+> vars_order_correct = []
+> layer_order = sorted(range(L), key=lambda x: str(x))  # '0','1','10','11','2',...
+> print('Layer sort order:', layer_order)
+>
+> vars_order_correct = []
+> for i in layer_order:
+>     vars_order_correct.append((f'model/h{i}/attn/c_attn/b', 3*E))
+>     vars_order_correct.append((f'model/h{i}/attn/c_attn/w', E*3*E))
+>     vars_order_correct.append((f'model/h{i}/attn/c_proj/b', E))
+>     vars_order_correct.append((f'model/h{i}/attn/c_proj/w', E*E))
+>     vars_order_correct.append((f'model/h{i}/ln_1/b', E))
+>     vars_order_correct.append((f'model/h{i}/ln_1/g', E))
+>     vars_order_correct.append((f'model/h{i}/ln_2/b', E))
+>     vars_order_correct.append((f'model/h{i}/ln_2/g', E))
+>     vars_order_correct.append((f'model/h{i}/mlp/c_fc/b', 4*E))
+>     vars_order_correct.append((f'model/h{i}/mlp/c_fc/w', E*4*E))
+>     vars_order_correct.append((f'model/h{i}/mlp/c_proj/b', E))
+>     vars_order_correct.append((f'model/h{i}/mlp/c_proj/w', 4*E*E))
+> vars_order_correct.append(('model/ln_f/b', E))
+> vars_order_correct.append(('model/ln_f/g', E))
+> vars_order_correct.append(('model/wpe', C*E))
+> vars_order_correct.append(('model/wte', V*E))
+>
+> total_params = sum(s for _, s in vars_order_correct)
+> print(f'Total params: {total_params}')
+> print(f'Expected: 124439808')
+> print(f'Match: {total_params == 124439808}')
+>
+> # Now check if ln_1/g for layer 0 has mean ~1.0
+> f = open('gpt2-124M.ckpt', 'rb')
+> off = 0
+> for name, size in vars_order_correct:
+>     if 'ln_1/g' in name or 'ln_f/g' in name or 'ln_1/b' in name:
+>         f.seek(off * 4)
+>         vals = struct.unpack(f'{size}f', f.read(size * 4))
+>         mean = sum(vals) / size
+>         print(f'{name} at offset {off}: mean={mean:.6f}, first3={[f"{v:.4f}" for v in vals[:3]]}')
+>     off += size
+> f.close()
+> PYEOF
+Layer sort order: [0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9]
+Total params: 124439808
+Expected: 124439808
+Match: True
+model/h0/ln_1/b at offset 2362368: mean=-0.006593, first3=['-0.0037', '0.0272', '-0.0640']
+model/h0/ln_1/g at offset 2363136: mean=0.180359, first3=['0.2232', '0.1820', '0.1534']
+model/h1/ln_1/b at offset 9450240: mean=-0.005023, first3=['-0.0036', '-0.0062', '-0.0036']
+model/h1/ln_1/g at offset 9451008: mean=0.222841, first3=['0.2086', '0.2185', '0.2183']
+model/h10/ln_1/b at offset 16538112: mean=0.018613, first3=['0.0305', '0.0060', '0.0488']
+model/h10/ln_1/g at offset 16538880: mean=0.378208, first3=['0.4269', '0.3799', '0.3893']
+model/h11/ln_1/b at offset 23625984: mean=0.023284, first3=['0.0510', '0.0053', '0.0720']
+model/h11/ln_1/g at offset 23626752: mean=0.478693, first3=['0.5293', '0.4873', '0.4876']
+model/h2/ln_1/b at offset 30713856: mean=-0.000360, first3=['0.0049', '-0.0015', '0.0018']
+model/h2/ln_1/g at offset 30714624: mean=0.240770, first3=['0.1871', '0.2227', '0.2366']
+model/h3/ln_1/b at offset 37801728: mean=0.005448, first3=['0.0236', '0.0040', '0.0108']
+model/h3/ln_1/g at offset 37802496: mean=0.301098, first3=['0.2725', '0.3078', '0.3174']
+model/h4/ln_1/b at offset 44889600: mean=0.007916, first3=['0.0224', '0.0061', '0.0158']
+model/h4/ln_1/g at offset 44890368: mean=0.319345, first3=['0.2971', '0.3330', '0.3428']
+model/h5/ln_1/b at offset 51977472: mean=0.011876, first3=['0.0201', '0.0202', '0.0177']
+model/h5/ln_1/g at offset 51978240: mean=0.373119, first3=['0.3461', '0.3910', '0.4093']
+model/h6/ln_1/b at offset 59065344: mean=0.011822, first3=['0.0233', '0.0142', '0.0237']
+model/h6/ln_1/g at offset 59066112: mean=0.345598, first3=['0.3310', '0.3408', '0.3612']
+model/h7/ln_1/b at offset 66153216: mean=0.014344, first3=['0.0303', '0.0209', '0.0318']
+model/h7/ln_1/g at offset 66153984: mean=0.356572, first3=['0.3551', '0.3564', '0.3759']
+model/h8/ln_1/b at offset 73241088: mean=0.013252, first3=['0.0266', '0.0141', '0.0361']
+model/h8/ln_1/g at offset 73241856: mean=0.335226, first3=['0.3518', '0.3381', '0.3564']
+model/h9/ln_1/b at offset 80328960: mean=0.015903, first3=['0.0305', '0.0109', '0.0433']
+model/h9/ln_1/g at offset 80329728: mean=0.357556, first3=['0.3815', '0.3605', '0.3697']
+model/ln_f/g at offset 85055232: mean=1.507809, first3=['1.3971', '1.3750', '1.8870']
+root@26332d41-b4d2-409e-ad64-33c7dc224fbe:/app#

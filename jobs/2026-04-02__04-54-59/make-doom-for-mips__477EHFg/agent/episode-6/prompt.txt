@@ -1,0 +1,168 @@
+New Terminal Output:
+
+root@d1440d1f-8e00-46df-a0dd-c4525817850b:/app# sed -n '1750,1850p' vm.js
+  const sectionsToLoad = [textSection, dataSection, rodataSection].filter(s => s !== null);
+
+  for (const section of sectionsToLoad) {
+    const vaddr = section.addr;
+    const size = section.size;
+    const data = getSectionData(fileBuffer, section);
+
+    // Load the section data into memory (assuming 4-byte words)
+    for (let i = 0; i < data.length; i += 4) {
+      if (i + 4 <= data.length) {
+        // For MIPS, we use little-endian byte order
+        const word = data.readUInt32LE(i);
+        memory[vaddr + i] = word;
+      }
+    }
+  }
+
+  let entryPoint = 0; // Default entry point
+  const functionBounds = [];
+
+  // Parse symbol tables
+  for (const symbolTableSection of symbolTableSections) {
+    // Get the associated string table
+    const strTabIdx = symbolTableSection.link;
+    const strTabSection = sectionHeaders[strTabIdx];
+    const strTab = getSectionData(fileBuffer, strTabSection);
+
+    // Parse symbols
+    const entrySize = symbolTableSection.entsize;
+    const symbolData = getSectionData(fileBuffer, symbolTableSection);
+
+    for (let offset = 0; offset < symbolData.length; offset += entrySize) {
+      const symbol = parseSymbol(symbolData, offset, elfHeader.class);
+      const symbolName = getString(strTab, symbol.name);
+
+      if (symbolName) {
+        symbols[symbolName] = symbol.value;
+        invSymbols[symbol.value] = symbolName;
+
+        if (STT_TYPE(symbol.info) === STT_FUNC) {
+          functionBounds.push([symbol.value, symbol.size, symbolName]);
+
+          if (symbolName === 'main') {
+            entryPoint = symbol.value;
+          }
+        }
+      }
+    }
+  }
+
+  // Sort function bounds by address
+  functionBounds.sort((a, b) => a[0] - b[0]);
+
+  // Create mapping from each instruction address to its function
+  for (const [startAddr, size, funcName] of functionBounds) {
+    const endAddr = startAddr + size;
+    let currAddr = startAddr;
+
+    while (currAddr < endAddr) {
+      if (currAddr in memory) { // Only map addresses that exist in memory
+        addrToFn[currAddr] = funcName;
+      }
+      currAddr += 4;
+    }
+  }
+
+  // Create a proper JSON object with keys as strings
+  const memoryOutput = {};
+  for (const [addr, value] of Object.entries(memory)) {
+    memoryOutput[addr] = value;
+  }
+
+  // Output as valid JSON
+    return {"memory": memoryOutput,
+            "entry_point": entryPoint
+           }
+}
+/**
+ * Parse the ELF header
+ * @param {Buffer} buffer - The ELF file buffer
+ * @returns {Object} The parsed ELF header
+ */
+function parseElfHeader(buffer) {
+  // Check ELF magic number
+  if (buffer.readUInt32BE(0) !== 0x7F454C46) { // 0x7F + "ELF"
+    throw new Error('Not a valid ELF file');
+  }
+
+  const elfClass = buffer[4]; // 1 = 32-bit, 2 = 64-bit
+  const elfData = buffer[5];  // 1 = little-endian, 2 = big-endian
+
+  const isLittleEndian = elfData === ELF_DATA_2_LSB;
+  const readHalf = isLittleEndian ? buffer.readUInt16LE : buffer.readUInt16BE;
+  const readWord = isLittleEndian ? buffer.readUInt32LE : buffer.readUInt32BE;
+  const readAddr = elfClass === ELF_CLASS_64
+    ? (isLittleEndian ? buffer.readBigUInt64LE : buffer.readBigUInt64BE)
+    : readWord;
+
+  const headerSize = elfClass === ELF_CLASS_64 ? 64 : 52;
+
+  return {
+root@d1440d1f-8e00-46df-a0dd-c4525817850b:/app# grep -n 'syscall\|SYS_\|open\|write\|read\|close\|brk\|mmap\|malloc\|printf\|fopen\|fwrite' vm.js | head -40
+39:    // File descriptors for syscalls
+422:  syscall(code) {
+773:  // Get syscall number from $v0 (register 2)
+774:  const syscallNum = this.registers[2];
+781:  // Initialize file descriptors tracking if not already done
+782:  if (syscallNum === 0) {  // SYS_read
+786:    const count = this.registers[6];         // Number of bytes to read
+789:      // Check if we're reading from stdin
+798:          this.writeMemoryByte(bufferAddr + i, testInput.charCodeAt(i));
+803:          // For regular files, read from our cached file data
+814:        // Calculate how many bytes we can actually read
+820:          this.writeMemoryByte(bufferAddr + i, fileData[position + i]);
+826:        // Return number of bytes read
+830:      console.error(`SYS_read error: ${error.message}`);
+834:  } else if (syscallNum === 1) {  // SYS_write
+838:    const count = this.registers[6];        // Number of bytes to write
+841:      // Create a buffer to hold the data to write
+846:        buffer[i] = this.readMemoryByte(bufferAddr + i);
+849:      // For files opened for writing, we'll buffer the data and write on close
+853:        // If the file was opened in append mode, move position to end
+873:        // For stdout, stderr, or other uncached files, use direct write
+874:        const bytesWritten = fs.writeSync(fd, buffer, 0, count, null);
+878:      console.error(`SYS_write error: ${error.message}`);
+882:  } else if (syscallNum === 2) {  // SYS_open
+893:    while ((byte = this.readMemoryByte(pathnameAddr + i)) !== 0) {
+938:      const fd = fs.openSync(pathname, fsFlags, mode);
+946:        // For regular files, read the entire file into memory
+952:            // For read-only files, read all data immediately
+954:            fs.readSync(fd, fileData, 0, stats.size, 0);
+956:            // For write or truncate, start with empty buffer
+959:            // For append or read+write, read existing content
+962:              fs.readSync(fd, fileData, 0, stats.size, 0);
+980:      console.error(`SYS_open error: ${error.message}`);
+984:  } else if (syscallNum === 3) {  // SYS_close
+989:      // Don't close standard streams
+997:          // For cached files, write back if modified
+1001:            fs.writeFileSync(fileInfo.path, fileInfo.data);
+1005:          fs.closeSync(fd);
+1010:          // For regular files, just close the fd
+1011:          fs.closeSync(fd);
+root@d1440d1f-8e00-46df-a0dd-c4525817850b:/app# apt-cache search mips | grep -i 'cross\|gcc' | head -20
+crossbuild-essential-mips - Informational list of cross-build-essential packages
+crossbuild-essential-mips64 - Informational list of cross-build-essential packages
+crossbuild-essential-mips64el - Informational list of cross-build-essential packages
+crossbuild-essential-mips64r6 - Informational list of cross-build-essential packages
+crossbuild-essential-mips64r6el - Informational list of cross-build-essential packages
+crossbuild-essential-mipsel - Informational list of cross-build-essential packages
+crossbuild-essential-mipsr6 - Informational list of cross-build-essential packages
+crossbuild-essential-mipsr6el - Informational list of cross-build-essential packages
+libc6-dev-mips-cross - GNU C Library: Development Libraries and Header Files (for cross-compiling)
+libc6-dev-mips32-mips64-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mips64el-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mips64r6-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mips64r6el-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mipsn32-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mipsn32el-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mipsn32r6-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips32-mipsn32r6el-cross - GNU C Library: o32 Development Libraries for MIPS (for cross-compiling)
+libc6-dev-mips64-cross - GNU C Library: Development Libraries and Header Files (for cross-compiling)
+libc6-dev-mips64-mips-cross - GNU C Library: 64bit Development Libraries for MIPS64 (for cross-compiling)
+libc6-dev-mips64-mipsel-cross - GNU C Library: 64bit Development Libraries for MIPS64 (for cross-compiling)
+grep: write error: Broken pipe
+
