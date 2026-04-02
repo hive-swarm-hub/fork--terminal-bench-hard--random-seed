@@ -1,0 +1,126 @@
+New Terminal Output:
+
+root@d3a059a4-f345-4c82-b834-e81b97d2de29:/app# python3 << 'PYEOF'
+> import socket, time, json
+>
+> def read_vga_text(qmp_sock):
+>     """Read VGA text buffer and return screen text"""
+>     cmd = {
+>         "execute": "human-monitor-command",
+>         "arguments": {"command-line": "xp /2000hx 0xb8000"}
+>     }
+>     qmp_sock.sendall(json.dumps(cmd).encode() + b"\n")
+>     time.sleep(2)
+>     data = b''
+>     while True:
+>         try:
+>             qmp_sock.settimeout(1)
+>             chunk = qmp_sock.recv(65536)
+>             if not chunk:
+>                 break
+>             data += chunk
+>         except socket.timeout:
+>             break
+>
+>     response = json.loads(data.decode())
+>     text = response.get('return', '')
+>
+>     lines_text = text.strip().split('\n')
+>     screen = []
+>     for line in lines_text:
+>         if ':' not in line:
+>             continue
+>         hex_part = line.split(':')[1].strip()
+>         values = hex_part.split()
+>         for val in values:
+>             v = int(val, 16)
+>             char = v & 0xFF
+>             screen.append(char)
+>
+>     rows = []
+>     for row in range(25):
+>         line = ''
+>         for col in range(80):
+>             idx = row * 80 + col
+>             if idx < len(screen):
+>                 ch = screen[idx]
+>                 if 32 <= ch < 127:
+>                     line += chr(ch)
+>                 else:
+>                     line += '.'
+>         rows.append(line.rstrip())
+>     return rows
+>
+> def send_key(mon_sock, key):
+>     mon_sock.sendall(f'sendkey {key}\n'.encode())
+>     time.sleep(0.2)
+>     try:
+>         mon_sock.settimeout(0.5)
+>         mon_sock.recv(4096)
+>     except socket.timeout:
+>         pass
+>
+> # Connect to QMP
+> qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+> qmp.connect('/tmp/qmp-sock')
+> time.sleep(0.5)
+> qmp.recv(4096)
+> qmp.sendall(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n")
+> time.sleep(0.5)
+> qmp.recv(4096)
+>
+> # Connect to monitor
+> mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+> mon.connect('/tmp/monitor-sock')
+> time.sleep(0.5)
+> mon.recv(4096)
+>
+> print('Waiting for boot...')
+> for attempt in range(30):
+>     time.sleep(2)
+>     rows = read_vga_text(qmp)
+>     # Check for any non-empty content
+>     content = '\n'.join(r for r in rows if r.strip())
+>     if content.strip():
+>         print(f'Attempt {attempt}: Found content!')
+>         for i, r in enumerate(rows):
+>             if r.strip():
+>                 print(f'  Row {i}: [{r}]')
+>
+>         # Check if it's the RTL8029 warning
+>         full = ' '.join(rows)
+>         if 'Press any key' in full or 'RTL8029' in full:
+>             print('Found RTL8029 warning, pressing Enter...')
+>             send_key(mon, 'ret')
+>             time.sleep(1)
+>             send_key(mon, 'ret')
+>             continue
+>         elif 'C:\\>' in full or 'C:\\' in full:
+>             print('At DOS prompt!')
+>             break
+>     else:
+>         if attempt % 5 == 0:
+>             print(f'Attempt {attempt}: Screen still blank')
+>
+> print('\nChecking screen dimensions...')
+> cmd = {
+>     "execute": "human-monitor-command",
+>     "arguments": {"command-line": "screendump /tmp/screen_final.ppm"}
+> }
+> qmp.sendall(json.dumps(cmd).encode() + b"\n")
+> time.sleep(1)
+> try:
+>     qmp.recv(4096)
+> except:
+>     pass
+>
+> import subprocess
+> result = subprocess.run(['head', '-2', '/tmp/screen_final.ppm'], capture_output=True, text=True)
+> print(f'Dimensions: {result.stdout.strip()}')
+>
+> qmp.close()
+> mon.close()
+> print('Done')
+> PYEOF
+Waiting for boot...
+

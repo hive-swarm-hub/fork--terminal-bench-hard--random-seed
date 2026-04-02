@@ -1,0 +1,187 @@
+New Terminal Output:
+
+root@6271c10b-aa9b-4a79-b3a2-4e1d0ce9a51e:/app# rm -f /tmp/test1.html /tmp/test1_orig.html /tmp/test2.html /tmp/test2_orig.html /tmp/test3.html /tmp/test3_orig.
+html
+root@6271c10b-aa9b-4a79-b3a2-4e1d0ce9a51e:/app# ls -la /app/
+total 8
+drwxr-xr-x 1 root root   23 Apr  2 10:45 .
+drwxr-xr-x 1 root root  117 Apr  2 10:44 ..
+-rw-r--r-- 1 root root 5341 Apr  2 10:48 filter.py
+root@6271c10b-aa9b-4a79-b3a2-4e1d0ce9a51e:/app# cat /app/filter.py
+import sys
+import re
+
+
+def remove_javascript(html):
+    # 1. Remove <script> tags and their contents
+    html = re.sub(
+        r'<\s*script\b[^>]*>.*?<\s*/\s*script\s*>',
+        '',
+        html,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    # Remove self-closing script tags
+    html = re.sub(
+        r'<\s*script\b[^>]*/\s*>',
+        '',
+        html,
+        flags=re.IGNORECASE
+    )
+    # Remove orphan opening script tags (no closing tag found)
+    html = re.sub(
+        r'<\s*script\b[^>]*>',
+        '',
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # 2. Remove event handler attributes (on*="...")
+    def remove_event_handlers(match):
+        tag = match.group(0)
+        cleaned = re.sub(
+            r'\s+on\w+\s*=\s*(?:"[^"]*"|' + r"'[^']*'" + r'|[^\s>]+)',
+            '',
+            tag,
+            flags=re.IGNORECASE
+        )
+        return cleaned
+
+    html = re.sub(
+        r'<[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>',
+        remove_event_handlers,
+        html,
+        flags=re.DOTALL
+    )
+
+    # 3. Remove javascript: URLs in attributes
+    # Double-quoted
+    html = re.sub(
+        r'((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)\s*=\s*)"\s*javascript\s*:[^"]*"',
+        r'\1""',
+        html,
+        flags=re.IGNORECASE
+    )
+    # Single-quoted
+    html = re.sub(
+        r"((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)\s*=\s*)'\s*javascript\s*:[^']*'",
+        r"\1''",
+        html,
+        flags=re.IGNORECASE
+    )
+    # Unquoted
+    html = re.sub(
+        r'((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)\s*=\s*)javascript\s*:[^\s>]*',
+        r'\1""',
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # 4. Handle HTML-entity-encoded javascript: in URLs
+    def make_entity_char_pattern(ch):
+        lower = ch.lower()
+        upper = ch.upper()
+        dec = str(ord(lower))
+        hexval = format(ord(lower), 'x')
+        return r'(?:' + re.escape(lower) + r'|' + re.escape(upper) + r'|&#0*' + dec + r';?|&#[xX]0*' + hexval + r';?)'
+
+    js_chars = 'javascript'
+    entity_pattern = r'\s*'.join(make_entity_char_pattern(c) for c in js_chars)
+    entity_pattern += r'\s*(?:&#0*58;?|&#[xX]0*3[aA];?|:)'
+
+    html = re.sub(
+        r'((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)\s*=\s*)"\s*' + entity_pattern + r'[^"]*"',
+        r'\1""',
+        html,
+        flags=re.IGNORECASE
+    )
+    html = re.sub(
+        r"((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|xlink:href)\s*=\s*)'\s*" + entity_pattern + r"[^']*'",
+        r"\1''",
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # 5. Remove vbscript: URLs
+    html = re.sub(
+        r'((?:href|src|action|formaction|data|codebase)\s*=\s*)"\s*vbscript\s*:[^"]*"',
+        r'\1""',
+        html,
+        flags=re.IGNORECASE
+    )
+    html = re.sub(
+        r"((?:href|src|action|formaction|data|codebase)\s*=\s*)'\s*vbscript\s*:[^']*'",
+        r"\1''",
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # 6. Remove data:text/html URLs (XSS vector)
+    html = re.sub(
+        r'((?:href|src|action|formaction)\s*=\s*)"\s*data\s*:[^"]*text/html[^"]*"',
+        r'\1""',
+        html,
+        flags=re.IGNORECASE
+    )
+    html = re.sub(
+        r"((?:href|src|action|formaction)\s*=\s*)'\s*data\s*:[^']*text/html[^']*'",
+        r"\1''",
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # 7. Clean style attributes
+    # Pattern for nested parens (1 level deep)
+    NESTED_PARENS = r'(?:[^)(]*(?:\([^)]*\))?[^)(]*)'
+
+    def clean_style_value(value):
+        # Remove expression(...) with nested parens
+        value = re.sub(r'expression\s*\(' + NESTED_PARENS + r'\)', '', value, flags=re.IGNORECASE)
+        # Remove url(javascript:...) with nested parens
+        value = re.sub(r'url\s*\(\s*["\']?\s*javascript\s*:' + NESTED_PARENS + r'\)', '', value, flags=re.IGNORECASE)
+        # Remove -moz-binding
+        value = re.sub(r'-moz-binding\s*:[^;]*;?', '', value, flags=re.IGNORECASE)
+        # Remove behavior
+        value = re.sub(r'behavior\s*:[^;]*;?', '', value, flags=re.IGNORECASE)
+        return value
+
+    def has_dangerous_style(value):
+        v = value.lower()
+        return any(x in v for x in ['expression', 'javascript', '-moz-binding', 'behavior'])
+
+    # Double-quoted style
+    html = re.sub(
+        r'(style\s*=\s*)"([^"]*)"',
+        lambda m: m.group(0) if not has_dangerous_style(m.group(2)) else m.group(1) + '"' + clean_style_value(m.group(2)) + '"',
+        html,
+        flags=re.IGNORECASE
+    )
+    # Single-quoted style
+    html = re.sub(
+        r"(style\s*=\s*)'([^']*)'",
+        lambda m: m.group(0) if not has_dangerous_style(m.group(2)) else m.group(1) + "'" + clean_style_value(m.group(2)) + "'",
+        html,
+        flags=re.IGNORECASE
+    )
+
+    return html
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python filter.py <html_file>", file=sys.stderr)
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+
+    cleaned = remove_javascript(content)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(cleaned)
+
+
+if __name__ == '__main__':
+    main()
+root@6271c10b-aa9b-4a79-b3a2-4e1d0ce9a51e:/app#

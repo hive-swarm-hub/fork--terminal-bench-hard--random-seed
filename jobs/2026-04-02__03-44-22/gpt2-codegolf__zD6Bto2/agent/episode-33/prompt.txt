@@ -1,0 +1,80 @@
+New Terminal Output:
+
+root@fe30c015-f053-4111-816f-cabd16f6b8bc:/app# python3 << 'PYEOF'
+> # The od output was:
+> # \v I'm sorry\v but I'm not sure if you're aware of this\r I'm not
+> # \v = 0x0B = byte 11
+> # \r = 0x0D = byte 13
+> # Expected: \n = 0x0A = byte 10
+>
+> # Let me check: in the C code dec() function, it iterates b from 0 to 255
+> # For the BPE token representing newline (Ċ = c4 8a):
+> # When b=0: b2u[0] = c4 80, len=2, strncmp("c48a","c480",2) != 0
+> # When b=1: b2u[1] = c4 81, len=2, strncmp("c48a","c481",2) != 0
+> # ...
+> # When b=10: b2u[10] = c4 8a, len=2, strncmp("c48a","c48a",2) == 0 -> MATCH byte 10
+> # So it should output byte 10 (newline)
+>
+> # Unless... the b2u initialization is wrong in C.
+> # Let me check: 0xC0 | (266 >> 6) = 0xC0 | 4 = 0xC4 ✓
+> # 0x80 | (266 & 63) = 0x80 | 10 = 0x8A ✓
+>
+> # Wait, in C code: 0x80|(p&63)
+> # p = 266, p&63 = 266 % 64 = 266 - 4*64 = 266 - 256 = 10
+> # 0x80 | 10 = 0x8A ✓
+>
+> # Hmm, but what about byte 0? b2u[0] should be codepoint 256.
+> # 0xC0 | (256>>6) = 0xC0 | 4 = 0xC4
+> # 0x80 | (256&63) = 0x80 | 0 = 0x80
+> # So b2u[0] = c4 80
+>
+> # And b2u[10] should be codepoint 266
+> # 0xC0 | (266>>6) = 0xC0 | 4 = 0xC4
+> # 0x80 | (266&63) = 0x80 | 10 = 0x8A
+> # So b2u[10] = c4 8a ✓
+>
+> # I wonder if the issue is something else entirely.
+> # Let me check: maybe the BPE vocab file uses a different encoding?
+> # Let me check what token 198 looks like in the vocab
+>
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = list(bs)
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return {b: chr(c) for b, c in zip(bs, cs)}
+>
+> b2u = bytes_to_unicode()
+>
+> merges = []
+> with open('vocab.bpe','r',encoding='utf-8') as f:
+>     f.readline()
+>     for line in f:
+>         parts = line.rstrip('\n').split(' ')
+>         if len(parts)==2:
+>             merges.append((parts[0],parts[1]))
+>
+> vocab = {b2u[b]: b for b in range(256)}
+> for i,(a,b) in enumerate(merges):
+>     vocab[a+b] = 256+i
+>
+> # Token 198 = Ċ (newline)
+> for tok_str, tok_id in vocab.items():
+>     if tok_id == 198:
+>         print(f'Token 198: repr={repr(tok_str)} hex={tok_str.encode("utf-8").hex()}')
+>         break
+>
+> # Also check what the first generated token should be
+> print(f'Token 11: repr={repr([k for k,v in vocab.items() if v==11][0])}')
+> print(f'Newline char: {repr(b2u[10])}')
+> print(f'Token for Ċ: {vocab.get(chr(266), "NOT FOUND")}')
+> PYEOF
+Token 198: repr='Æ' hex=c386
+Token 11: repr='ċ'
+Newline char: 'Ċ'
+Token for Ċ: 10
+root@fe30c015-f053-4111-816f-cabd16f6b8bc:/app#

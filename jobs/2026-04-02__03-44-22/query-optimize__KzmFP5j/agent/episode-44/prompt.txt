@@ -1,0 +1,75 @@
+New Terminal Output:
+
+root@6a5e7d96-c4f4-4db2-a9ce-a9c3d582fd88:/app# python3 << 'EOF'
+> import sqlite3
+> conn = sqlite3.connect('/tmp/oewn_indexed.sqlite')
+> cur = conn.cursor()
+>
+> # Original query (buggy scoping, 500 rows)
+> with open('/app/my-sql-query.sql') as f:
+>     sql_orig = f.read()
+> cur.execute(sql_orig)
+> orig_rows = cur.fetchall()
+>
+> # Fixed query (17834 rows)
+> sql_fixed = sql_orig.replace(') w\n', ') outer_w\n').replace('= w.wordid', '= outer_w.wordid')
+> # Actually let me just use the outer_w version
+> sql_fixed = '''
+> SELECT
+>   outer_w.wordid AS word_id,
+>   outer_w.word AS word,
+>   total_synsets,
+>   total_senses,
+>   distinct_domains,
+>   distinct_posids,
+>   (SELECT s.synsetid FROM senses s
+>    WHERE s.wordid = outer_w.wordid
+>    GROUP BY s.synsetid
+>    ORDER BY COUNT(*) DESC, s.synsetid ASC
+>    LIMIT 1) AS top_synsetid,
+>   (SELECT COUNT(*) FROM senses s
+>    WHERE s.wordid = outer_w.wordid
+>    AND s.synsetid = (SELECT s2.synsetid FROM senses s2
+>                      WHERE s2.wordid = outer_w.wordid
+>                      GROUP BY s2.synsetid
+>                      ORDER BY COUNT(*) DESC, s2.synsetid ASC
+>                      LIMIT 1)) AS top_synset_sense_count
+> FROM (
+>   SELECT
+>     w.wordid,
+>     w.word,
+>     COUNT(DISTINCT s.synsetid) AS total_synsets,
+>     COUNT(*) AS total_senses,
+>     COUNT(DISTINCT syn.domainid) AS distinct_domains,
+>     COUNT(DISTINCT syn.posid) AS distinct_posids
+>   FROM words w
+>   JOIN senses s ON w.wordid = s.wordid
+>   JOIN synsets syn ON s.synsetid = syn.synsetid
+>   GROUP BY w.wordid, w.word
+>   HAVING total_synsets >= 2
+>     AND distinct_domains >= 2
+>     AND total_senses >= 2
+> ) outer_w
+> ORDER BY
+>   total_senses DESC,
+>   total_synsets DESC,
+>   distinct_domains DESC,
+>   word_id ASC
+> '''
+> cur.execute(sql_fixed)
+> fixed_rows = cur.fetchall()
+>
+> # Compare first 500 rows
+> print(f'Original: {len(orig_rows)} rows')
+> print(f'Fixed: {len(fixed_rows)} rows')
+> print(f'First 500 match: {orig_rows == fixed_rows[:500]}')
+> if orig_rows != fixed_rows[:500]:
+>     for i, (a, b) in enumerate(zip(orig_rows, fixed_rows)):
+>         if a != b:
+>             print(f'Mismatch at row {i}: {a} vs {b}')
+>             break
+> EOF
+Original: 500 rows
+Fixed: 17834 rows
+First 500 match: True
+root@6a5e7d96-c4f4-4db2-a9ce-a9c3d582fd88:/app#

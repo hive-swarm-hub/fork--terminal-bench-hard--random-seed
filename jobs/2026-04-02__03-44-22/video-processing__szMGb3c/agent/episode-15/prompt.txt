@@ -1,0 +1,179 @@
+New Terminal Output:
+
+root@3a3bf8bd-e854-4f44-925c-870aa5d31848:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_gray = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Process all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     frame_idx = 0
+>
+>     # Store per-frame data: (frame_idx, bbox_bottom, bbox_top, bbox_left, bbox_right, area)
+>     frame_data = []
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(bg_gray, gray)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>         thresh = cv2.dilate(thresh, None, iterations=2)
+>
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter small noise contours
+>         sig_contours = [c for c in contours if cv2.contourArea(c) > 50]
+>
+>         if sig_contours:
+>             all_points = np.vstack(sig_contours)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             total_area = sum(cv2.contourArea(c) for c in sig_contours)
+>
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'top': y,
+>                 'bottom': y + h,
+>                 'left': x,
+>                 'right': x + w,
+>                 'area': total_area,
+>                 'width': w,
+>                 'height': h
+>             })
+>         else:
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'top': -1,
+>                 'bottom': -1,
+>                 'left': -1,
+>                 'right': -1,
+>                 'area': 0,
+>                 'width': 0,
+>                 'height': 0
+>             })
+>
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Identify frames where the athlete is present
+>     # The athlete creates a large detection area (> 3000 pixels)
+>     # and has a tall bounding box (height > 150)
+>     athlete_frames = []
+>     for fd in frame_data:
+>         if fd['area'] > 3000 and fd['height'] > 100:
+>             athlete_frames.append(fd)
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Determine ground level from running frames
+>     # During running, the bottom of bbox should be at track level
+>     # Use the maximum bottom values as ground level reference
+>     bottom_values = [fd['bottom'] for fd in athlete_frames]
+>     ground_level = max(bottom_values)
+>
+>     # The jump is characterized by the bottom of the bounding box rising
+>     # significantly above ground level (feet leave the ground)
+>
+>     # Find the frame range where the athlete is present
+>     first_athlete_frame = athlete_frames[0]['frame']
+>     last_athlete_frame = athlete_frames[-1]['frame']
+>
+>     # Build a list of (frame, bottom) for athlete frames only
+>     frame_bottom = []
+>     for fd in athlete_frames:
+>         frame_bottom.append((fd['frame'], fd['bottom']))
+>
+>     # Find the minimum bottom value (highest point of feet = peak of jump)
+>     min_bottom = min(fb[1] for fb in frame_bottom)
+>     peak_frame = min(fb[0] for fb in frame_bottom if fb[1] == min_bottom)
+>
+>     # The ground level threshold: feet are considered "on ground" when
+>     # bottom is within some tolerance of ground level
+>     # Use a threshold based on the difference between ground and peak
+>     jump_height = ground_level - min_bottom
+>
+>     # Threshold: consider feet "off ground" when bottom is more than 15% of jump height above ground
+>     # This helps handle noise in the running frames
+>     off_ground_threshold = ground_level - jump_height * 0.15
+>
+>     # Find takeoff: last frame before peak where bottom is at ground level
+>     # (i.e., the last frame where the athlete's feet are on the ground before the jump)
+>     takeoff_frame = None
+>     for fb in frame_bottom:
+>         if fb[0] >= peak_frame:
+>             break
+>         if fb[1] >= off_ground_threshold:
+>             takeoff_frame = fb[0]
+>
+>     # Find landing: first frame after peak where bottom returns to ground level
+>     landing_frame = None
+>     for fb in frame_bottom:
+>         if fb[0] <= peak_frame:
+>             continue
+>         if fb[1] >= off_ground_threshold:
+>             landing_frame = fb[0]
+>             break
+>
+>     # If takeoff not found, use the first athlete frame
+>     if takeoff_frame is None:
+>         takeoff_frame = first_athlete_frame
+>
+>     # If landing not found, use the last athlete frame
+>     if landing_frame is None:
+>         landing_frame = last_athlete_frame
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@3a3bf8bd-e854-4f44-925c-870aa5d31848:/app#

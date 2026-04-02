@@ -1,0 +1,209 @@
+New Terminal Output:
+
+>
+>     # Close the polyline (first point = last point)
+>     if len(coords_x) > 0 and (coords_x[0] != coords_x[-1] or coords_y[0] != coords_y[-1]):
+>         coords_x.append(coords_x[0])
+>         coords_y.append(coords_y[0])
+>
+>     return coords_x, coords_y
+>
+>
+> def get_largest_connected_component(mask):
+>     """Keep only the largest connected component in a binary mask."""
+>     mask_uint8 = mask.astype(np.uint8)
+>     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+>
+>     if num_labels <= 1:
+>         return mask
+>
+>     # Find largest component (skip background label 0)
+>     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>     return (labels == largest_label).astype(bool)
+>
+>
+> def main():
+>     parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+>     parser.add_argument('output_path', type=str, help='Path to the output CSV file')
+>     parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+>     parser.add_argument('csv_path', type=str, help='Path to metadata CSV')
+>     args = parser.parse_args()
+>
+>     # Detect if CSV has an unnamed index column
+>     with open(args.csv_path, 'r') as f:
+>         first_line = f.readline()
+>     has_index_col = first_line.startswith(',')
+>
+>     # Load CSV
+>     if has_index_col:
+>         df = pd.read_csv(args.csv_path, index_col=0)
+>     else:
+>         df = pd.read_csv(args.csv_path)
+>
+>     # Load image
+>     image = cv2.imread(args.rgb_path)
+>     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+>     h, w = image.shape[:2]
+>
+>     # Initialize MobileSAM
+>     model_type = 'vit_t'
+>     device = 'cpu'
+>     sam = sam_model_registry[model_type](checkpoint=args.weights_path)
+>     sam.to(device=device)
+>     sam.eval()
+>
+>     predictor = SamPredictor(sam)
+>     predictor.set_image(image_rgb)
+>
+>     # Step 1: Generate masks for all cells using bounding box prompts
+>     all_masks = []
+>     all_scores = []
+>
+>     for idx, row in df.iterrows():
+>         xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>
+>         # Use bounding box as prompt
+>         input_box = np.array([xmin, ymin, xmax, ymax])
+>
+>         masks, scores, logits = predictor.predict(
+>             point_coords=None,
+>             point_labels=None,
+>             box=input_box[None, :],
+>             multimask_output=True,
+>         )
+>
+>         # Select the mask with the highest score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]
+>         best_score = scores[best_idx]
+>
+>         # Keep only the largest connected component
+>         best_mask = get_largest_connected_component(best_mask)
+>
+>         all_masks.append(best_mask)
+>         all_scores.append(best_score)
+>
+>     # Step 2: Resolve overlaps - assign each pixel to the mask with the highest score
+>     score_map = np.full((h, w), -1.0, dtype=np.float64)
+>     assignment_map = np.full((h, w), -1, dtype=np.int32)
+>
+>     # Sort masks by score (lowest first so highest score overwrites)
+>     sorted_indices = np.argsort(all_scores)
+>
+>     for idx in sorted_indices:
+>         mask = all_masks[idx]
+>         score = all_scores[idx]
+>         # Only assign pixels where this mask exists and has higher/equal score
+>         overlap = mask & (score_map >= score)
+>         assign_pixels = mask & ~overlap
+>         assignment_map[assign_pixels] = idx
+>         score_map[assign_pixels] = score
+>
+>     # Step 3: Extract final non-overlapping masks and convert to polylines
+>     new_xmin = []
+>     new_ymin = []
+>     new_xmax = []
+>     new_ymax = []
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_types = []
+>
+>     for idx in range(len(df)):
+>         final_mask = (assignment_map == idx)
+>
+>         # Keep only largest connected component
+>         final_mask = get_largest_connected_component(final_mask)
+>
+>         # If mask is empty (completely taken by overlaps), fall back with point+box prompt
+>         if not np.any(final_mask):
+>             row = df.iloc[idx]
+>             xmin = int(row['xmin'])
+>             ymin = int(row['ymin'])
+>             xmax = int(row['xmax'])
+>             ymax = int(row['ymax'])
+>             cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
+>
+>             masks, scores, _ = predictor.predict(
+>                 point_coords=np.array([[cx, cy]]),
+>                 point_labels=np.array([1]),
+>                 box=np.array([xmin, ymin, xmax, ymax])[None, :],
+>                 multimask_output=True,
+>             )
+>             best_idx_inner = np.argmax(scores)
+>             final_mask = get_largest_connected_component(masks[best_idx_inner])
+>
+>         if not np.any(final_mask):
+>             # Last resort: use original coordinates
+>             row = df.iloc[idx]
+>             new_xmin.append(int(row['xmin']))
+>             new_ymin.append(int(row['ymin']))
+>             new_xmax.append(int(row['xmax']))
+>             new_ymax.append(int(row['ymax']))
+>             new_coords_x.append(row['coords_x'])
+>             new_coords_y.append(row['coords_y'])
+>             new_types.append('polyline')
+>             continue
+>
+>         # Convert mask to polyline
+>         coords_x, coords_y = mask_to_polyline(final_mask)
+>
+>         if len(coords_x) == 0:
+>             row = df.iloc[idx]
+>             new_xmin.append(int(row['xmin']))
+>             new_ymin.append(int(row['ymin']))
+>             new_xmax.append(int(row['xmax']))
+>             new_ymax.append(int(row['ymax']))
+>             new_coords_x.append(row['coords_x'])
+>             new_coords_y.append(row['coords_y'])
+>             new_types.append('polyline')
+>             continue
+>
+>         # Compute bounding box from polyline
+>         xmin_new = min(coords_x)
+>         xmax_new = max(coords_x)
+>         ymin_new = min(coords_y)
+>         ymax_new = max(coords_y)
+>
+>         new_xmin.append(xmin_new)
+>         new_ymin.append(ymin_new)
+>         new_xmax.append(xmax_new)
+>         new_ymax.append(ymax_new)
+>         new_coords_x.append(','.join(str(x) for x in coords_x))
+>         new_coords_y.append(','.join(str(y) for y in coords_y))
+>         new_types.append('polyline')
+>
+>     # Update dataframe
+>     df['xmin'] = new_xmin
+>     df['ymin'] = new_ymin
+>     df['xmax'] = new_xmax
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = new_types
+>
+>     # Save output - match input format
+>     output_dir = os.path.dirname(args.output_path)
+>     if output_dir and not os.path.exists(output_dir):
+>         os.makedirs(output_dir, exist_ok=True)
+>
+>     if has_index_col:
+>         df.to_csv(args.output_path, index=True)
+>     else:
+>         df.to_csv(args.output_path, index=False)
+>
+>     print(f'Saved output to {args.output_path}')
+>     print(f'Total masks: {len(df)}')
+>     print(f'All types: {df["type"].value_counts().to_dict()}')
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT_EOF
+root@90c2169a-2765-4ba1-b895-9e20e8aad6db:/app# PYTHONUNBUFFERED=1 python3 /app/convert_masks.py /app/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.pn
+g /app/demo_metadata.csv > /tmp/final_run.log 2>&1 &
+[1] 6516
+root@90c2169a-2765-4ba1-b895-9e20e8aad6db:/app# echo "Started PID: $!"
+Started PID: 6516
+root@90c2169a-2765-4ba1-b895-9e20e8aad6db:/app# sleep 60 && jobs
+

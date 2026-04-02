@@ -1,0 +1,245 @@
+New Terminal Output:
+
+root@fe30c015-f053-4111-816f-cabd16f6b8bc:/app# cat > /tmp/ref.py << 'PYEOF'
+> import struct, array, math, sys
+>
+> f = open('gpt2-124M.ckpt','rb')
+> w = array.array('f')
+> w.fromfile(f, 124439808)
+> f.close()
+>
+> V=50257; C=1024; E=768; L=12; H=12; D=64
+>
+> # Layer order in file (alphabetical): 0,1,10,11,2,3,4,5,6,7,8,9
+> layer_order = [0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9]
+> BLOCK = 3*E + E*3*E + E + E*E + E + E + E + E + 4*E + E*4*E + E + 4*E*E
+> # = 2304 + 1769472 + 768 + 589824 + 768 + 768 + 768 + 768 + 3072 + 2359296 + 768 + 2359296 = 7087872
+>
+> # Compute offsets for each logical layer (0-11)
+> layer_off = [0]*12
+> for file_idx, logical_idx in enumerate(layer_order):
+>     layer_off[logical_idx] = file_idx * BLOCK
+>
+> LNF_B = L * BLOCK
+> LNF_G = LNF_B + E
+> WPE = LNF_G + E
+> WTE = WPE + C*E
+>
+> print(f'BLOCK={BLOCK}')
+> print(f'LNF_B={LNF_B}, LNF_G={LNF_G}, WPE={WPE}, WTE={WTE}')
+> print(f'Total={WTE+V*E}')
+>
+> def get(off, n):
+>     return list(w[off:off+n])
+>
+> def layer_norm(x, g_off, b_off):
+>     n = len(x)
+>     mu = sum(x)/n
+>     var = sum((xi-mu)**2 for xi in x)/n
+>     std = math.sqrt(var + 1e-5)
+>     g = get(g_off, n)
+>     b = get(b_off, n)
+>     return [(x[i]-mu)/std * g[i] + b[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x*x*x)))
+>
+> def matmul_add(x, w_off, b_off, in_dim, out_dim):
+>     # w is [in_dim, out_dim] row-major
+>     ww = get(w_off, in_dim*out_dim)
+>     bb = get(b_off, out_dim)
+>     out = [0.0]*out_dim
+>     for j in range(out_dim):
+>         s = bb[j]
+>         for i in range(in_dim):
+>             s += x[i] * ww[i*out_dim + j]
+>         out[j] = s
+>     return out
+>
+> # BPE tokenizer
+> def load_bpe():
+>     merges = []
+>     with open('vocab.bpe','r',encoding='utf-8') as f:
+>         f.readline()  # skip header
+>         for line in f:
+>             parts = line.rstrip('\n').split(' ')
+>             if len(parts) == 2:
+>                 merges.append((parts[0], parts[1]))
+>     return merges
+>
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = list(bs)
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return {b: chr(c) for b, c in zip(bs, cs)}
+>
+> def tokenize(text, merges):
+>     b2u = bytes_to_unicode()
+>     # Convert text to unicode representation
+>     tokens = [b2u[b] for b in text.encode('utf-8')]
+>
+>     # Build merge ranking
+>     merge_rank = {(m[0],m[1]): i for i,m in enumerate(merges)}
+>
+>     # Apply BPE
+>     while len(tokens) > 1:
+>         # Find best pair
+>         best = None
+>         best_rank = float('inf')
+>         best_idx = -1
+>         for i in range(len(tokens)-1):
+>             pair = (tokens[i], tokens[i+1])
+>             if pair in merge_rank and merge_rank[pair] < best_rank:
+>                 best_rank = merge_rank[pair]
+>                 best = pair
+>                 best_idx = i
+>         if best is None:
+>             break
+>         # Merge all occurrences of best pair
+>         new_tokens = []
+>         i = 0
+>         while i < len(tokens):
+>             if i < len(tokens)-1 and tokens[i] == best[0] and tokens[i+1] == best[1]:
+>                 new_tokens.append(best[0]+best[1])
+>                 i += 2
+>             else:
+>                 new_tokens.append(tokens[i])
+>                 i += 1
+>         tokens = new_tokens
+>
+>     # Build vocab: first 256 byte tokens, then merge results
+>     vocab = {b2u[b]: b for b in range(256)}
+>     for i,(a,b) in enumerate(merges):
+>         vocab[a+b] = 256+i
+>
+>     return [vocab[t] for t in tokens]
+>
+> def decode_token(tok_id, merges):
+>     b2u = bytes_to_unicode()
+>     u2b = {v:k for k,v in b2u.items()}
+>     # Build reverse vocab
+>     vocab_r = {b: b2u[b] for b in range(256)}
+>     for i,(a,b) in enumerate(merges):
+>         vocab_r[256+i] = a+b
+>     s = vocab_r.get(tok_id, '')
+>     return bytes([u2b[c] for c in s]).decode('utf-8', errors='replace')
+>
+> merges = load_bpe()
+> print(f'Loaded {len(merges)} merges')
+>
+> text = "Hello"
+> tokens = tokenize(text, merges)
+> print(f'Tokenized "{text}": {tokens}')
+> for t in tokens:
+>     print(f'  {t} -> "{decode_token(t, merges)}"')
+>
+> # Now run forward pass for just 1 token to verify
+> def forward(token_ids):
+>     T = len(token_ids)
+>     assert T <= C
+>
+>     # Build input: token embeddings + position embeddings
+>     x = [[0.0]*E for _ in range(T)]
+>     for t in range(T):
+>         wte = get(WTE + token_ids[t]*E, E)
+>         wpe = get(WPE + t*E, E)
+>         for i in range(E):
+>             x[t][i] = wte[i] + wpe[i]
+>
+>     # Process each layer
+>     for layer in range(L):
+>         lo = layer_off[layer]
+>         # Offsets within layer block
+>         ab = lo  # c_attn/b
+>         aw = lo + 3*E  # c_attn/w
+>         pb = lo + 3*E + E*3*E  # c_proj/b
+>         pw = lo + 3*E + E*3*E + E  # c_proj/w
+>         l1b = lo + 3*E + E*3*E + E + E*E  # ln_1/b
+>         l1g = l1b + E  # ln_1/g
+>         l2b = l1g + E  # ln_2/b
+>         l2g = l2b + E  # ln_2/g
+>         fb = l2g + E  # mlp/c_fc/b
+>         fw = fb + 4*E  # mlp/c_fc/w
+>         mpb = fw + E*4*E  # mlp/c_proj/b
+>         mpw = mpb + E  # mlp/c_proj/w
+>
+>         # Layer norm 1
+>         ln1 = [layer_norm(x[t], l1g, l1b) for t in range(T)]
+>
+>         # Attention: compute Q, K, V
+>         qkv = [matmul_add(ln1[t], aw, ab, E, 3*E) for t in range(T)]
+>
+>         # Split into Q, K, V and compute attention
+>         # For each head
+>         attn_out = [[0.0]*E for _ in range(T)]
+>         for h in range(H):
+>             for t in range(T):
+>                 # Query for this position
+>                 q = [qkv[t][h*D+d] for d in range(D)]
+>                 # Compute attention scores
+>                 scores = []
+>                 for s in range(t+1):  # causal mask
+>                     k = [qkv[s][E+h*D+d] for d in range(D)]
+>                     score = sum(q[d]*k[d] for d in range(D)) / math.sqrt(D)
+>                     scores.append(score)
+>                 # Softmax
+>                 mx = max(scores)
+>                 exps = [math.exp(s-mx) for s in scores]
+>                 sm = sum(exps)
+>                 probs = [e/sm for e in exps]
+>                 # Weighted sum of values
+>                 for d in range(D):
+>                     val = sum(probs[s]*qkv[s][2*E+h*D+d] for s in range(t+1))
+>                     attn_out[t][h*D+d] = val
+>
+>         # Project attention output
+>         proj = [matmul_add(attn_out[t], pw, pb, E, E) for t in range(T)]
+>
+>         # Residual
+>         for t in range(T):
+>             for i in range(E):
+>                 x[t][i] += proj[t][i]
+>
+>         # Layer norm 2
+>         ln2 = [layer_norm(x[t], l2g, l2b) for t in range(T)]
+>
+>         # MLP
+>         fc = [matmul_add(ln2[t], fw, fb, E, 4*E) for t in range(T)]
+>         for t in range(T):
+>             fc[t] = [gelu(v) for v in fc[t]]
+>         mlp_out = [matmul_add(fc[t], mpw, mpb, 4*E, E) for t in range(T)]
+>
+>         # Residual
+>         for t in range(T):
+>             for i in range(E):
+>                 x[t][i] += mlp_out[t][i]
+>
+>         print(f'Layer {layer} done, x[0][:5]={x[0][:5]}')
+>
+>     # Final layer norm
+>     x_last = layer_norm(x[T-1], LNF_G, LNF_B)
+>
+>     # Logits: multiply by wte transposed
+>     logits = [0.0]*V
+>     wte_data = get(WTE, V*E)
+>     for v in range(V):
+>         s = 0
+>         for i in range(E):
+>             s += x_last[i] * wte_data[v*E+i]
+>         logits[v] = s
+>
+>     # Argmax
+>     best = max(range(V), key=lambda v: logits[v])
+>     return best, logits[best]
+>
+> print('\nRunning forward pass...')
+> best, score = forward(tokens)
+> print(f'\nNext token: {best} "{decode_token(best, merges)}" score={score}')
+> PYEOF
+root@fe30c015-f053-4111-816f-cabd16f6b8bc:/app# python3 /tmp/ref.py 2>&1 | head -30
+
