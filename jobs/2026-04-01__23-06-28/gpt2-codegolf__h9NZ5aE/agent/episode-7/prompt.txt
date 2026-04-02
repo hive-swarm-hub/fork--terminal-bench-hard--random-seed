@@ -1,0 +1,52 @@
+New Terminal Output:
+
+python3 << 'EOF'
+import array, os
+
+total = os.path.getsize('gpt2-124M.ckpt') // 4
+data = array.array('f')
+with open('gpt2-124M.ckpt','rb') as f:
+    data.fromfile(f, total)
+
+V, C, T, L = 50257, 768, 1024, 12
+
+# Try layout: wte, wpe, ln1w[L*C], ln1b[L*C], qkvw[L*3C*C], qkvb[L*3C], ...
+off = V*C + T*C  # after wte and wpe
+print(f'After wte+wpe: offset {off}')
+
+# Check if next L*C values are ln1 weights (should be ~1.0)
+block = data[off:off+C]  # first layer's ln1w
+mean = sum(block)/C
+print(f'First {C} after wte+wpe: mean={mean:.4f}, min={min(block):.4f}, max={max(block):.4f}')
+
+# Maybe the order is different. Let me try: wte, wpe, then per-layer blocks
+# But what if the per-layer order starts with qkv weights?
+
+# Let me check if there's a 256-byte header (64 ints)
+header = data[:64]
+print('First 64 as potential header ints:', [int(x) for x in header[:20]])
+
+# Actually, let me just try the Karpathy gpt2_124M.bin format
+# which has a 256-byte header with magic number 20240326
+import struct
+with open('gpt2-124M.ckpt','rb') as f:
+    h = struct.unpack('<7i', f.read(28))
+    print('First 7 ints:', h)
+
+# Not a header format. Let me try to find ln weights by checking
+# blocks of 12*768 = 9216 floats with mean ~1.0
+for start in range(V*C, V*C + T*C + 100000, 1):
+    block = data[start:start+C]
+    mean = sum(block)/C
+    if 0.85 < mean < 1.15:
+        mn = min(block)
+        mx = max(block)
+        if mn > 0.3:
+            print(f'Possible LN at offset {start} mean={mean:.4f} min={mn:.4f} max={mx:.4f}')
+            # Check next 768 too
+            block2 = data[start+C:start+2*C]
+            print(f'  Next block: mean={sum(block2)/C:.4f}')
+            break
+
+EOF
+

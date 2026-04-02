@@ -1,0 +1,169 @@
+New Terminal Output:
+
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# cat > /tmp/design_primers2.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def get_circular_subseq(seq, start, length):
+>     result = []
+>     for i in range(length):
+>         result.append(seq[(start + i) % len(seq)])
+>     return ''.join(result)
+>
+> # Parse sequences
+> with open('sequences.fasta') as f:
+>     content = f.read()
+>
+> seqs = {}
+> for block in content.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip()
+>     seqs[name] = seq
+>
+> inp = seqs['input']
+> out = seqs['output']
+>
+> MIN_LEN = 15
+> MAX_LEN = 36  # oligotm limit
+> MIN_TM = 58.0
+> MAX_TM = 72.0
+> MAX_TM_DIFF = 5.0
+>
+> # Valid insertion points
+> insertion_points = [
+>     (213, 'agtagattagaagaagaattaagaagaagattaacagaa'),
+>     (214, 'gtagattagaagaagaattaagaagaagattaacagaaa'),
+>     (215, 'tagattagaagaagaattaagaagaagattaacagaaag'),
+> ]
+>
+> best_pair = None
+> best_score = float('inf')
+>
+> # Pre-compute Tm values for all possible annealing sequences
+> # Forward annealing: starts at insertion_pos, goes downstream
+> # Reverse annealing: ends at insertion_pos, goes upstream (RC)
+>
+> for ins_pos, ins_seq in insertion_points:
+>     print(f"\nTrying insertion point {ins_pos}: '{ins_seq}'")
+>
+>     # Compute forward Tm values
+>     fwd_tms = {}
+>     for fwd_len in range(MIN_LEN, MAX_LEN + 1):
+>         fwd_anneal = get_circular_subseq(inp, ins_pos, fwd_len)
+>         tm = get_tm(fwd_anneal)
+>         fwd_tms[fwd_len] = (fwd_anneal, tm)
+>
+>     # Compute reverse Tm values
+>     rev_tms = {}
+>     for rev_len in range(MIN_LEN, MAX_LEN + 1):
+>         rev_start = (ins_pos - rev_len) % len(inp)
+>         rev_anneal_template = get_circular_subseq(inp, rev_start, rev_len)
+>         rev_primer_anneal = reverse_complement(rev_anneal_template)
+>         tm = get_tm(rev_primer_anneal)
+>         rev_tms[rev_len] = (rev_primer_anneal, tm)
+>
+>     # Find best pair
+>     for fwd_len, (fwd_anneal, fwd_tm) in fwd_tms.items():
+>         if fwd_tm < MIN_TM or fwd_tm > MAX_TM:
+>             continue
+>         for rev_len, (rev_anneal, rev_tm) in rev_tms.items():
+>             if rev_tm < MIN_TM or rev_tm > MAX_TM:
+>                 continue
+>             tm_diff = abs(fwd_tm - rev_tm)
+>             if tm_diff > MAX_TM_DIFF:
+>                 continue
+>
+>             score = tm_diff
+>             if score < best_score:
+>                 best_score = score
+>                 best_pair = {
+>                     'ins_pos': ins_pos,
+>                     'ins_seq': ins_seq,
+>                     'fwd_anneal': fwd_anneal,
+>                     'fwd_tm': fwd_tm,
+>                     'fwd_len': fwd_len,
+>                     'rev_anneal': rev_anneal,
+>                     'rev_tm': rev_tm,
+>                     'rev_len': rev_len,
+>                     'tm_diff': tm_diff
+>                 }
+>
+> if best_pair is None:
+>     print("ERROR: No valid primer pair found!")
+>     sys.exit(1)
+>
+> print(f"\n=== Best primer pair ===")
+> print(f"Insertion point: {best_pair['ins_pos']}")
+> print(f"Insertion sequence: {best_pair['ins_seq']}")
+> print(f"Forward annealing: {best_pair['fwd_anneal']} (Tm={best_pair['fwd_tm']:.2f}, len={best_pair['fwd_len']})")
+> print(f"Reverse annealing: {best_pair['rev_anneal']} (Tm={best_pair['rev_tm']:.2f}, len={best_pair['rev_len']})")
+> print(f"Tm difference: {best_pair['tm_diff']:.2f}")
+>
+> # Construct full primers
+> fwd_primer = best_pair['ins_seq'] + best_pair['fwd_anneal']
+> rev_primer = best_pair['rev_anneal']
+>
+> print(f"\nFull forward primer: {fwd_primer}")
+> print(f"Full reverse primer: {rev_primer}")
+> print(f"Forward total length: {len(fwd_primer)}")
+> print(f"Reverse total length: {len(rev_primer)}")
+>
+> # Verify: simulate PCR
+> # The PCR product should be the output plasmid
+> # Forward primer anneals at ins_pos on input, extends clockwise
+> # Reverse primer anneals upstream of ins_pos, extends counter-clockwise
+> # The product = ins_seq + downstream from ins_pos to (ins_pos - rev_len) on input
+> # Which should equal the output plasmid linearized
+>
+> print(f"\nVerification:")
+> print(f"Forward primer Tm (annealing only): {get_tm(best_pair['fwd_anneal']):.2f}")
+> print(f"Reverse primer Tm (annealing only): {get_tm(best_pair['rev_anneal']):.2f}")
+>
+> # Write to primers.fasta
+> with open('primers.fasta', 'w') as f:
+>     f.write(f">forward_primer\n{fwd_primer}\n>reverse_primer\n{rev_primer}\n")
+>
+> print("\nPrimers written to primers.fasta")
+> PYEOF
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# python3 /tmp/design_primers2.py
+
+Trying insertion point 213: 'agtagattagaagaagaattaagaagaagattaacagaa'
+
+Trying insertion point 214: 'gtagattagaagaagaattaagaagaagattaacagaaa'
+
+Trying insertion point 215: 'tagattagaagaagaattaagaagaagattaacagaaag'
+
+=== Best primer pair ===
+Insertion point: 215
+Insertion sequence: tagattagaagaagaattaagaagaagattaacagaaag
+Forward annealing: caagggcgaggagctg (Tm=61.24, len=16)
+Reverse annealing: ctcatatgtatatctccttcttaaagttaaacaa (Tm=61.31, len=34)
+Tm difference: 0.07
+
+Full forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+Full reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+Forward total length: 55
+Reverse total length: 34
+
+Verification:
+Forward primer Tm (annealing only): 61.24
+Reverse primer Tm (annealing only): 61.31
+
+Primers written to primers.fasta
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app#

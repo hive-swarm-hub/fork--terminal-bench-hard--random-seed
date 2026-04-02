@@ -1,0 +1,175 @@
+New Terminal Output:
+
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> with open('sequences.fasta') as f:
+>     content = f.read()
+> seqs = {}
+> for block in content.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip()
+>     seqs[name] = seq
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # Parse primers
+> with open('primers.fasta') as f:
+>     pcontent = f.read()
+> print("primers.fasta content:")
+> print(pcontent)
+>
+> primers = {}
+> for block in pcontent.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip()
+>     primers[name] = seq
+>
+> fwd = primers['forward_primer']
+> rev = primers['reverse_primer']
+>
+> print(f"Forward primer: {fwd} (len={len(fwd)})")
+> print(f"Reverse primer: {rev} (len={len(rev)})")
+>
+> # Identify annealing parts
+> # Forward primer: the 3' end anneals to the input template
+> # We need to find the longest suffix of fwd that matches the input
+> fwd_anneal = None
+> fwd_tail = None
+> for i in range(len(fwd)):
+>     candidate = fwd[i:]
+>     if candidate.lower() in inp.lower() or candidate.lower() in (inp+inp).lower():
+>         fwd_anneal = candidate
+>         fwd_tail = fwd[:i]
+>         break
+>
+> print(f"\nForward primer tail (non-annealing): {fwd_tail} (len={len(fwd_tail)})")
+> print(f"Forward primer annealing: {fwd_anneal} (len={len(fwd_anneal)})")
+>
+> # Reverse primer: anneals to the opposite strand of input
+> # The entire reverse primer should anneal (no tail for insertion)
+> rev_rc = reverse_complement(rev)
+> rev_anneal = rev
+> if rev_rc.lower() in inp.lower() or rev_rc.lower() in (inp+inp).lower():
+>     print(f"Reverse primer anneals (RC found in input): {rev_anneal} (len={len(rev_anneal)})")
+> else:
+>     print(f"WARNING: Reverse primer RC not found in input!")
+>     # Try finding partial match
+>     for i in range(len(rev)):
+>         candidate_rc = reverse_complement(rev[i:])
+>         if candidate_rc.lower() in inp.lower() or candidate_rc.lower() in (inp+inp).lower():
+>             rev_anneal = rev[i:]
+>             print(f"Reverse primer annealing part: {rev_anneal} (len={len(rev_anneal)})")
+>             break
+>
+> # Check annealing positions
+> fwd_pos = inp.lower().find(fwd_anneal.lower())
+> if fwd_pos == -1:
+>     fwd_pos = (inp+inp).lower().find(fwd_anneal.lower())
+>     if fwd_pos >= len(inp):
+>         fwd_pos -= len(inp)
+>
+> rev_rc_full = reverse_complement(rev_anneal)
+> rev_pos = inp.lower().find(rev_rc_full.lower())
+> if rev_pos == -1:
+>     rev_pos = (inp+inp).lower().find(rev_rc_full.lower())
+>     if rev_pos >= len(inp):
+>         rev_pos -= len(inp)
+>
+> print(f"\nForward annealing position in input: {fwd_pos}")
+> print(f"Reverse annealing position in input (template strand): {rev_pos} to {rev_pos + len(rev_anneal)}")
+>
+> # Verify back-to-back: reverse should end right where forward starts
+> rev_end = rev_pos + len(rev_anneal)
+> print(f"Reverse annealing end: {rev_end}")
+> print(f"Forward annealing start: {fwd_pos}")
+> print(f"Back-to-back: {rev_end == fwd_pos}")
+>
+> # Compute Tm
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_anneal)
+> print(f"\nForward Tm (annealing only): {fwd_tm:.2f}")
+> print(f"Reverse Tm (annealing only): {rev_tm:.2f}")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}")
+>
+> # Check all constraints
+> print(f"\n=== Constraint Checks ===")
+> print(f"1. Annealing length 15-45: Fwd={len(fwd_anneal)} ({'PASS' if 15<=len(fwd_anneal)<=45 else 'FAIL'}), Rev={len(rev_anneal)} ({'PASS' if 15<=len(rev_anne
+al)<=45 else 'FAIL'})")
+> print(f"2. Tm 58-72: Fwd={fwd_tm:.2f} ({'PASS' if 58<=fwd_tm<=72 else 'FAIL'}), Rev={rev_tm:.2f} ({'PASS' if 58<=rev_tm<=72 else 'FAIL'})")
+> print(f"3. Tm diff <= 5: {abs(fwd_tm-rev_tm):.2f} ({'PASS' if abs(fwd_tm-rev_tm)<=5 else 'FAIL'})")
+> print(f"4. Minimum pairs (1 for single insertion): PASS")
+> print(f"5. Forward listed first: PASS")
+>
+> # Verify product
+> ins_seq = fwd_tail
+> product = inp[:fwd_pos] + ins_seq + inp[fwd_pos:]
+> print(f"\n=== Product Verification ===")
+> print(f"Product length: {len(product)}, Output length: {len(out)}")
+> print(f"Product == Output: {product == out}")
+>
+> if product != out:
+>     for i in range(min(len(product), len(out))):
+>         if product[i] != out[i]:
+>             print(f"First diff at pos {i}")
+>             print(f"  Product: ...{product[max(0,i-20):i+20]}...")
+>             print(f"  Output:  ...{out[max(0,i-20):i+20]}...")
+>             break
+> PYEOF
+primers.fasta content:
+>forward_primer
+tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+>reverse_primer
+ctcatatgtatatctccttcttaaagttaaacaa
+
+Forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg (len=55)
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa (len=34)
+
+Forward primer tail (non-annealing): tagattagaagaagaattaagaagaagattaacagaa (len=37)
+Forward primer annealing: agcaagggcgaggagctg (len=18)
+Reverse primer anneals (RC found in input): ctcatatgtatatctccttcttaaagttaaacaa (len=34)
+
+Forward annealing position in input: 213
+Reverse annealing position in input (template strand): 181 to 215
+Reverse annealing end: 215
+Forward annealing start: 213
+Back-to-back: False
+
+Forward Tm (annealing only): 66.27
+Reverse Tm (annealing only): 61.31
+Tm difference: 4.96
+
+=== Constraint Checks ===
+1. Annealing length 15-45: Fwd=18 (PASS), Rev=34 (PASS)
+2. Tm 58-72: Fwd=66.27 (PASS), Rev=61.31 (PASS)
+3. Tm diff <= 5: 4.96 (PASS)
+4. Minimum pairs (1 for single insertion): PASS
+5. Forward listed first: PASS
+
+=== Product Verification ===
+Product length: 3628, Output length: 3630
+Product == Output: False
+First diff at pos 213
+  Product: ...aagaaggagatatacatatgtagattagaagaagaattaa...
+  Output:  ...aagaaggagatatacatatgagtagattagaagaagaatt...
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app#

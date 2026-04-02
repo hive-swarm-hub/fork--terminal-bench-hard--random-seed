@@ -1,0 +1,113 @@
+New Terminal Output:
+
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# python3 << 'EOF'
+> import struct
+> f = open('gpt2-124M.ckpt','rb')
+> def read_floats(offset, n):
+>     f.seek(offset*4)
+>     return struct.unpack(f'<{n}f', f.read(n*4))
+>
+> V,C,T,L = 50257,768,1024,12
+>
+> # Per-layer format: wte, wpe, then per layer
+> off = V*C + T*C  # = 39383808
+> print(f'Start of layers: {off}')
+>
+> # Layer 0: ln1_w(768), ln1_b(768), qkv_w(768*2304), qkv_b(2304), ...
+> # Check first 768 values
+> v = read_floats(off, 10)
+> print(f'First 10 at layer start: {[round(x,4) for x in v]}')
+>
+> # What if the per-layer order is different?
+> # Maybe: qkv_w, qkv_b, attn_proj_w, attn_proj_b, ln1_w, ln1_b, fc_w, fc_b, fc_proj_w, fc_proj_b, ln2_w, ln2_b
+> # Or maybe the TF checkpoint order from the original GPT-2
+>
+> # In the original TF GPT-2, the variable names are:
+> # model/h0/attn/c_attn/w:0  shape [1, 768, 2304]
+> # model/h0/attn/c_attn/b:0  shape [2304]
+> # model/h0/attn/c_proj/w:0  shape [1, 768, 768]
+> # model/h0/attn/c_proj/b:0  shape [768]
+> # model/h0/ln_1/b:0  shape [768]
+> # model/h0/ln_1/g:0  shape [768]
+> # model/h0/ln_2/b:0  shape [768]
+> # model/h0/ln_2/g:0  shape [768]
+> # model/h0/mlp/c_fc/w:0  shape [1, 768, 3072]
+> # model/h0/mlp/c_fc/b:0  shape [3072]
+> # model/h0/mlp/c_proj/w:0  shape [1, 768, 768]
+> # model/h0/mlp/c_proj/b:0  shape [768]
+> # model/ln_f/b:0  shape [768]
+> # model/ln_f/g:0  shape [768]
+> # model/wpe:0  shape [1024, 768]
+> # model/wte:0  shape [50257, 768]
+>
+> # Alphabetical order of TF variables:
+> # model/h0/attn/c_attn/b -> model/h0/attn/c_attn/w -> model/h0/attn/c_proj/b -> model/h0/attn/c_proj/w
+> # -> model/h0/ln_1/b -> model/h0/ln_1/g -> model/h0/ln_2/b -> model/h0/ln_2/g
+> # -> model/h0/mlp/c_fc/b -> model/h0/mlp/c_fc/w -> model/h0/mlp/c_proj/b -> model/h0/mlp/c_proj/w
+> # ... (h1 through h11)
+> # -> model/ln_f/b -> model/ln_f/g -> model/wpe -> model/wte
+>
+> # Wait! TF checkpoints save variables in alphabetical order!
+> # So the order would be:
+> # h0/attn/c_attn/b (2304)
+> # h0/attn/c_attn/w (768*2304)
+> # h0/attn/c_proj/b (768)
+> # h0/attn/c_proj/w (768*768)
+> # h0/ln_1/b (768)
+> # h0/ln_1/g (768)
+> # h0/ln_2/b (768)
+> # h0/ln_2/g (768)
+> # h0/mlp/c_fc/b (3072)
+> # h0/mlp/c_fc/w (768*3072)
+> # h0/mlp/c_proj/b (768)
+> # h0/mlp/c_proj/w (768*3072) -- wait, c_proj is [1,3072,768] for mlp
+> # ... repeat for h1-h11
+> # ln_f/b (768)
+> # ln_f/g (768)
+> # wpe (1024*768)
+> # wte (50257*768)
+>
+> # Let me check if this is alphabetical by checking values at these offsets
+> # First entry: h0/attn/c_attn/b (2304 floats)
+> v = read_floats(0, 10)
+> print(f'File start (h0/attn/c_attn/b?): {[round(x,4) for x in v]}')
+>
+> # After c_attn/b (2304): c_attn/w (768*2304)
+> off2 = 2304
+> v = read_floats(off2, 10)
+> print(f'After 2304 (c_attn/w?): {[round(x,4) for x in v]}')
+>
+> # After c_attn/w: c_proj/b (768)
+> off3 = 2304 + 768*2304
+> v = read_floats(off3, 10)
+> print(f'After c_attn/w (c_proj/b?): {[round(x,4) for x in v]}')
+>
+> # After c_proj/b: c_proj/w (768*768)
+> off4 = off3 + 768
+> v = read_floats(off4, 10)
+> print(f'After c_proj/b (c_proj/w?): {[round(x,4) for x in v]}')
+>
+> # After c_proj/w: ln_1/b (768)
+> off5 = off4 + 768*768
+> v = read_floats(off5, 10)
+> print(f'After c_proj/w (ln_1/b?): {[round(x,4) for x in v]}')
+>
+> # After ln_1/b: ln_1/g (768)
+> off6 = off5 + 768
+> v = read_floats(off6, 10)
+> print(f'After ln_1/b (ln_1/g?): {[round(x,4) for x in v]}')
+> mean6 = sum(read_floats(off6, 768))/768
+> print(f'  mean of 768: {mean6}')
+>
+> f.close()
+> EOF
+Start of layers: 39383808
+First 10 at layer start: [0.0126, 0.1113, -0.019, -0.0797, -0.1945, -0.0229, -0.0454, 0.0487, 0.0393, 0.106]
+File start (h0/attn/c_attn/b?): [0.4803, -0.5254, -0.4293, -0.206, -0.1277, -0.0954, -0.3529, -0.0765, -0.0459, -0.0375]
+After 2304 (c_attn/w?): [-0.4738, -0.2614, -0.0978, -0.3499, 0.2243, -0.0429, 0.4187, 0.1744, -0.1883, 0.1836]
+After c_attn/w (c_proj/b?): [0.1503, -0.1543, -0.1466, -0.0991, 0.0338, -0.0344, -0.0706, -0.0936, 0.0811, 0.0312]
+After c_proj/b (c_proj/w?): [0.3127, -0.1874, 0.098, -0.0303, -0.0216, -0.0211, -0.1794, -0.3298, 0.2946, 0.0167]
+After c_proj/w (ln_1/b?): [-0.0037, 0.0272, -0.064, -0.005, -0.0157, -0.0115, 0.2019, 0.0358, -0.002, -0.0082]
+After ln_1/b (ln_1/g?): [0.2232, 0.182, 0.1534, 0.1917, 0.2036, 0.1948, 0.1467, 0.1865, 0.2143, 0.1956]
+  mean of 768: 0.18035894042016784
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app#

@@ -1,0 +1,96 @@
+New Terminal Output:
+
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# cat > /tmp/test_gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <math.h>
+> #include <string.h>
+>
+> int main() {
+>     int V=50257, C=768, T=1024, L=12, H=12;
+>     FILE *f = fopen("gpt2-124M.ckpt", "rb");
+>     float *data = malloc(497759232);
+>     fread(data, 1, 497759232, f);
+>     fclose(f);
+>
+>     // Offsets (grouped layout)
+>     float *wte = data;
+>     float *wpe = wte + V*C;
+>     float *ln1w = wpe + T*C;
+>     float *ln1b = ln1w + L*C;
+>     float *qkvw = ln1b + L*C;
+>     float *qkvb = qkvw + L*3*C*C;
+>     float *apw = qkvb + L*3*C;
+>     float *apb = apw + L*C*C;
+>     float *ln2w = apb + L*C;
+>     float *ln2b = ln2w + L*C;
+>     float *fcw = ln2b + L*C;
+>     float *fcb = fcw + L*4*C*C;
+>     float *fpw = fcb + L*4*C;
+>     float *fpb = fpw + L*4*C*C;
+>     float *lnfw = fpb + L*C;
+>     float *lnfb = lnfw + C;
+>
+>     printf("ln1w layer0 first5: %f %f %f %f %f\n", ln1w[0], ln1w[1], ln1w[2], ln1w[3], ln1w[4]);
+>     printf("ln1w layer0 mean: ");
+>     float s=0; for(int i=0;i<C;i++) s+=ln1w[i]; printf("%f\n", s/C);
+>
+>     // Try a single token forward pass with token "The" = likely token 464
+>     // Token for "The" in GPT-2 is 464
+>     int tok = 464;
+>     float x[768];
+>     for(int i=0;i<C;i++) x[i] = wte[tok*C+i] + wpe[0*C+i];
+>
+>     // LN1 layer 0
+>     float mean=0;
+>     for(int i=0;i<C;i++) mean+=x[i];
+>     mean/=C;
+>     float var=0;
+>     for(int i=0;i<C;i++) var+=(x[i]-mean)*(x[i]-mean);
+>     var/=C;
+>     float std=sqrtf(var+1e-5);
+>
+>     float xn[768];
+>     // Try both: w*norm+b and (1+w)*norm+b
+>     for(int i=0;i<C;i++) xn[i] = (1.0f+ln1w[i])*(x[i]-mean)/std + ln1b[i];
+>     printf("LN1 (1+w) first5: %f %f %f %f %f\n", xn[0], xn[1], xn[2], xn[3], xn[4]);
+>
+>     for(int i=0;i<C;i++) xn[i] = ln1w[i]*(x[i]-mean)/std + ln1b[i];
+>     printf("LN1 (w) first5: %f %f %f %f %f\n", xn[0], xn[1], xn[2], xn[3], xn[4]);
+>
+>     // Do QKV matmul with (1+w) version
+>     for(int i=0;i<C;i++) xn[i] = (1.0f+ln1w[i])*(x[i]-mean)/std + ln1b[i];
+>
+>     // QKV: try x @ W + b where W is [C, 3C]
+>     float qkv[2304];
+>     for(int i=0;i<2304;i++) {
+>         float s=0;
+>         for(int j=0;j<C;j++) s += xn[j]*qkvw[j*2304+i]; // W[C,3C]
+>         qkv[i] = s + qkvb[i];
+>     }
+>     printf("QKV (x@W[C,3C]) first5: %f %f %f %f %f\n", qkv[0], qkv[1], qkv[2], qkv[3], qkv[4]);
+>
+>     // Also try W[3C,C] @ x
+>     for(int i=0;i<2304;i++) {
+>         float s=0;
+>         for(int j=0;j<C;j++) s += qkvw[i*C+j]*xn[j]; // W[3C,C]
+>         qkv[i] = s + qkvb[i];
+>     }
+>     printf("QKV (W[3C,C]@x) first5: %f %f %f %f %f\n", qkv[0], qkv[1], qkv[2], qkv[3], qkv[4]);
+>
+>     free(data);
+>     return 0;
+> }
+> CEOF
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# gcc -O3 -o /tmp/test_gpt2 /tmp/test_gpt2.c -lm && /tmp/test_gpt2
+/tmp/test_gpt2.c: In function ‘main’:
+/tmp/test_gpt2.c:10:5: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   10 |     fread(data, 1, 497759232, f);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ln1w layer0 first5: 0.012614 0.111258 -0.018961 -0.079713 -0.194477
+ln1w layer0 mean: 0.014674
+LN1 (1+w) first5: 2.124974 -0.027480 -0.853108 0.220834 1.358094
+LN1 (w) first5: 0.050141 0.035832 -0.008031 -0.038610 -0.485687
+QKV (x@W[C,3C]) first5: 0.059294 -1.143080 0.362582 1.650180 -0.490391
+QKV (W[3C,C]@x) first5: 4.029583 1.375852 -2.651548 -5.418897 -0.667051
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app#

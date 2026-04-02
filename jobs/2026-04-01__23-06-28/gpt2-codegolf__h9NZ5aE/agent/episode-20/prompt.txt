@@ -1,0 +1,232 @@
+New Terminal Output:
+
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <math.h>
+> #include <string.h>
+> #define V 50257
+> #define C 768
+> #define T 1024
+> #define L 12
+> #define H 12
+> #define HS 64
+> float *W,*wte,*wpe,*ln1w,*ln1b,*qkvw,*qkvb,*apw,*apb,*ln2w,*ln2b,*fcw,*fcb,*fpw,*fpb,*lnfw,*lnfb;
+> float x[C],xn[C],qkv[2304],att[T],hb[C],hb2[3072],logits[V];
+> float kv[L*T*2*C]; // key-value cache [L][T][2][C]
+> char *vocab[V];
+> int vlen;
+> char bpe[50001][2][256];
+> int nbpe;
+>
+> void ln(float*o,float*i,float*w,float*b){
+>     float m=0,v=0;
+>     for(int j=0;j<C;j++) m+=i[j];
+>     m/=C;
+>     for(int j=0;j<C;j++) v+=(i[j]-m)*(i[j]-m);
+>     v/=C;
+>     float s=1.0f/sqrtf(v+1e-5f);
+>     for(int j=0;j<C;j++) o[j]=(1.0f+w[j])*(i[j]-m)*s+b[j];
+> }
+>
+> void forward(int tok, int pos){
+>     for(int i=0;i<C;i++) x[i]=wte[tok*C+i]+wpe[pos*C+i];
+>     for(int l=0;l<L;l++){
+>         ln(xn,x,ln1w+l*C,ln1b+l*C);
+>         // QKV
+>         for(int i=0;i<2304;i++){
+>             float s=0;
+>             for(int j=0;j<C;j++) s+=xn[j]*qkvw[(long)l*3*C*C+j*2304+i];
+>             qkv[i]=s+qkvb[l*2304+i];
+>         }
+>         // Store K,V in cache
+>         for(int i=0;i<C;i++){
+>             kv[((long)l*T+pos)*2*C+i]=qkv[C+i]; // K
+>             kv[((long)l*T+pos)*2*C+C+i]=qkv[2*C+i]; // V
+>         }
+>         // Multi-head attention
+>         memset(hb,0,C*4);
+>         for(int h=0;h<H;h++){
+>             float*q=qkv+h*HS;
+>             for(int t=0;t<=pos;t++){
+>                 float*k=kv+((long)l*T+t)*2*C+h*HS;
+>                 float s=0;
+>                 for(int i=0;i<HS;i++) s+=q[i]*k[i];
+>                 att[t]=s/sqrtf(HS);
+>             }
+>             float mx=att[0];
+>             for(int t=1;t<=pos;t++) if(att[t]>mx) mx=att[t];
+>             float sum=0;
+>             for(int t=0;t<=pos;t++){att[t]=expf(att[t]-mx);sum+=att[t];}
+>             for(int t=0;t<=pos;t++) att[t]/=sum;
+>             for(int t=0;t<=pos;t++){
+>                 float*v=kv+((long)l*T+t)*2*C+C+h*HS;
+>                 for(int i=0;i<HS;i++) hb[h*HS+i]+=att[t]*v[i];
+>             }
+>         }
+>         // Attention projection
+>         for(int i=0;i<C;i++){
+>             float s=0;
+>             for(int j=0;j<C;j++) s+=hb[j]*apw[(long)l*C*C+j*C+i];
+>             xn[i]=s+apb[l*C+i];
+>         }
+>         for(int i=0;i<C;i++) x[i]+=xn[i]; // residual
+>         // LN2 + MLP
+>         ln(xn,x,ln2w+l*C,ln2b+l*C);
+>         for(int i=0;i<3072;i++){
+>             float s=0;
+>             for(int j=0;j<C;j++) s+=xn[j]*fcw[(long)l*4*C*C+j*3072+i];
+>             s+=fcb[l*3072+i];
+>             hb2[i]=0.5f*s*(1.0f+tanhf(0.7978845608f*(s+0.044715f*s*s*s))); // GELU
+>         }
+>         for(int i=0;i<C;i++){
+>             float s=0;
+>             for(int j=0;j<3072;j++) s+=hb2[j]*fpw[(long)l*4*C*C+j*C+i];
+>             xn[i]=s+fpb[l*C+i];
+>         }
+>         for(int i=0;i<C;i++) x[i]+=xn[i]; // residual
+>     }
+>     ln(x,x,lnfw,lnfb);
+>     // Logits = x @ wte^T
+>     for(int i=0;i<V;i++){
+>         float s=0;
+>         for(int j=0;j<C;j++) s+=x[j]*wte[i*C+j];
+>         logits[i]=s;
+>     }
+> }
+>
+> int argmax(){
+>     int mi=0;
+>     for(int i=1;i<V;i++) if(logits[i]>logits[mi]) mi=i;
+>     return mi;
+> }
+>
+> // BPE tokenizer
+> void load_bpe(char*path){
+>     FILE*f=fopen(path,"r");
+>     char line[1024];
+>     fgets(line,1024,f); // skip header
+>     nbpe=0;
+>     while(fgets(line,1024,f)){
+>         line[strcspn(line,"\n")]=0;
+>         char*sp=strchr(line,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         strcpy(bpe[nbpe][0],line);
+>         strcpy(bpe[nbpe][1],sp+1);
+>         nbpe++;
+>     }
+>     fclose(f);
+> }
+>
+> void load_vocab(){
+>     // Build vocab from BPE merges
+>     // GPT-2 vocab: 256 byte tokens + merges + special
+>     vlen=0;
+>     for(int i=0;i<256;i++){
+>         vocab[vlen]=malloc(8);
+>         if(i=='!')vocab[vlen][0]=i,vocab[vlen][1]=0; // placeholder
+>         vocab[vlen][0]=i;vocab[vlen][1]=0;
+>         vlen++;
+>     }
+>     for(int i=0;i<nbpe;i++){
+>         // Find the two tokens and concatenate
+>         char*s=malloc(512);
+>         // Find token indices for bpe[i][0] and bpe[i][1]
+>         int a=-1,b=-1;
+>         for(int j=0;j<vlen;j++){
+>             if(a<0&&strcmp(vocab[j],bpe[i][0])==0)a=j;
+>             if(b<0&&strcmp(vocab[j],bpe[i][1])==0)b=j;
+>             if(a>=0&&b>=0)break;
+>         }
+>         if(a>=0&&b>=0){
+>             strcpy(s,vocab[a]);
+>             strcat(s,vocab[b]);
+>         }else{
+>             s[0]=0;
+>         }
+>         vocab[vlen++]=s;
+>     }
+> }
+>
+> // Encode text to tokens using BPE
+> int tokens[T];
+> int encode(char*text,int*out){
+>     int n=0;
+>     // Convert chars to byte tokens, with Ġ = space prefix
+>     // GPT-2 uses byte-level BPE with Ġ (0xC4 0xA0) representing space
+>     unsigned char*t=(unsigned char*)text;
+>     // First, convert each byte, replacing space with Ġ
+>     char *parts[T];
+>     int np=0;
+>     for(int i=0;t[i];){
+>         char*s=malloc(8);
+>         if(t[i]==' '){
+>             s[0]=0xC4;s[1]=0xA0;s[2]=0;i++;
+>         } else {
+>             s[0]=t[i];s[1]=0;i++;
+>         }
+>         parts[np++]=s;
+>     }
+>     // Apply BPE merges
+>     for(int m=0;m<nbpe&&np>1;m++){
+>         for(int i=0;i<np-1;i++){
+>             if(strcmp(parts[i],bpe[m][0])==0&&strcmp(parts[i+1],bpe[m][1])==0){
+>                 char*s=malloc(strlen(parts[i])+strlen(parts[i+1])+1);
+>                 strcpy(s,parts[i]);strcat(s,parts[i+1]);
+>                 free(parts[i]);free(parts[i+1]);
+>                 parts[i]=s;
+>                 for(int j=i+1;j<np-1;j++)parts[j]=parts[j+1];
+>                 np--;
+>                 i--;
+>             }
+>         }
+>     }
+>     // Convert parts to token IDs
+>     for(int i=0;i<np;i++){
+>         for(int j=0;j<vlen;j++){
+>             if(strcmp(vocab[j],parts[i])==0){out[n++]=j;break;}
+>         }
+>         free(parts[i]);
+>     }
+>     return n;
+> }
+>
+> // Decode token to string
+> void decode(int tok){
+>     char*s=vocab[tok];
+>     for(int i=0;s[i];i++){
+>         if((unsigned char)s[i]==0xC4&&(unsigned char)s[i+1]==0xA0){putchar(' ');i++;}
+>         else putchar(s[i]);
+>     }
+> }
+>
+> int main(int argc,char**argv){
+>     FILE*f=fopen(argv[1],"rb");
+>     W=malloc(497759232);
+>     fread(W,1,497759232,f);
+>     fclose(f);
+>     wte=W;wpe=wte+V*C;ln1w=wpe+T*C;ln1b=ln1w+L*C;
+>     qkvw=ln1b+L*C;qkvb=qkvw+(long)L*3*C*C;apw=qkvb+L*3*C;
+>     apb=apw+(long)L*C*C;ln2w=apb+L*C;ln2b=ln2w+L*C;
+>     fcw=ln2b+L*C;fcb=fcw+(long)L*4*C*C;fpw=fcb+L*4*C;
+>     fpb=fpw+(long)L*4*C*C;lnfw=fpb+L*C;lnfb=lnfw+C;
+>
+>     load_bpe(argv[2]);
+>     load_vocab();
+>
+>     int nt=encode(argv[3],tokens);
+>     // Forward pass for all input tokens
+>     for(int i=0;i<nt;i++) forward(tokens[i],i);
+>     // Generate 20 tokens
+>     for(int i=0;i<20;i++){
+>         int tok=argmax();
+>         decode(tok);
+>         fflush(stdout);
+>         forward(tok,nt+i);
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app#

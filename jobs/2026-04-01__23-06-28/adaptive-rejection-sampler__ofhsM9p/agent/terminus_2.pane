@@ -1,0 +1,2490 @@
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# asciinema rec --stdin /logs/agent/recording.cast
+[?2004l[0;32masciinema: recording asciicast to /logs/agent/recording.cast[0m
+[0;32masciinema: press <ctrl-d> or type "exit" when you're done[0m
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# clear
+[?2004l[H[J[3J[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS='-F -X'
+[?2004l[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1 &
+[?2004l[1] 3490
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__1__'
+[?2004l__CMDEND__1__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# cat > /app/ars.R << 'REOF'
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Adaptive Rejection Sampling (ARS)
+[?2004l[?2004h> # Based on Gilks, W. R., & Wild, P. (1992)
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> 
+[?2004l[[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate log-density
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density <- function(x, g) {
+[?2004l[?2004h>   # g is the user-provided (possibly unnormalized) density function
+[?2004l[?2004h>   # Returns log(g(x)), handling vectorized input
+[?2004l[?2004h>   vals <- g(x)
+[?2004l[?2004h>   if (any(vals < 0, na.rm = TRUE)) {
+[?2004l[?2004h>     stop("Density function returned negative values. Density must be non-negative.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   result <- ifelse(vals > 0, log(vals), -Inf)
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute derivative of log-density numerically
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   return((h_plus - h_minus) / (2 * eps))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004lu[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Check log-concavity at abscissae
+[?2004l[?2004h> # Returns TRUE if log-concave, FALSE otherwise
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> check_log_concavity <- function(x_sorted, h_vals, h_deriv_vals) {
+[?2004l[?2004h>   n <- length(x_sorted)
+[?2004l[?2004h>   if (n < 2) return(TRUE)
+[?2004l[?2004h>   # Check that derivatives are decreasing (necessary for log-concavity)
+[?2004l[?2004h>   for (i in 2:n) {
+[?2004l[?2004h>     if (h_deriv_vals[i] > h_deriv_vals[i - 1] + 1e-6) {
+[?2004l[?2004h>       return(FALSE)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   # Also check second differences of h
+[?2004l[?2004h>   if (n >= 3) {
+[?2004l[?2004h>     for (i in 2:(n - 1)) {
+[?2004l[?2004h>       # Check concavity via second divided difference
+[?2004l[?2004h>       dd <- ((h_vals[i + 1] - h_vals[i]) / (x_sorted[i + 1] - x_sorted[i]) -
+[?2004l[?2004h>              (h_vals[i] - h_vals[i - 1]) / (x_sorted[i] - x_sorted[i - 1])) /
+[?2004l[?2004h>             (x_sorted[i + 1] - x_sorted[i - 1])
+[?2004l[?2004h>       if (dd > 1e-6) {
+[?2004l[?2004h>         return(FALSE)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute upper hull (piecewise linear tangent lines)
+[?2004l[?2004h> # Returns intercepts and slopes for each tangent, and intersection points z
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   # z[j] = intersection of tangent at x_k[j] and x_k[j+1]
+[?2004l[?2004h>   # z[j] = (h_k[j+1] - h_k[j] - x_k[j+1]*hprime_k[j+1] + x_k[j]*hprime_k[j]) /
+[?2004l[?2004h>   #         (hprime_k[j] - hprime_k[j+1])
+[?2004lt[?2004h>   z <- numeric(k - 1)
+[?2004l[?2004h>   for (j in 1:(k - 1)) {
+[?2004l[?2004h>     denom <- hprime_k[j] - hprime_k[j + 1]
+[?2004l[?2004h>     if (abs(denom) < 1e-14) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       z[j] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hprime_k[j + 1] + x_k[j] * hprime_k[j]) / denom
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   # Full z vector with bounds
+[?2004l[?2004h>   z_full <- c(lb, z, ub)
+[?2004l[?2004h>   return(list(z = z, z_full = z_full))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004lu[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate upper hull u_k(x) at point x
+[?2004l[?2004h> # u_k(x) = h(x_j) + (x - x_j) * h'(x_j) for x in [z_{j-1}, z_j]
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- numeric(n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     # Find which segment x[i] belongs to
+[?2004l[?2004h>     j <- findInterval(x[i], z_full)
+[?2004l[?2004h>     j <- max(1, min(j, k))
+[?2004l[?2004h>     result[i] <- h_k[j] + (x[i] - x_k[j]) * hprime_k[j]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004ln[?2004h> }
+[?2004l[?2004h> 
+[?2004le[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate lower hull l_k(x) at point x
+[?2004l[?2004h> # l_k(x) = ((x_{j+1} - x)*h(x_j) + (x - x_j)*h(x_{j+1})) / (x_{j+1} - x_j)
+[?2004l[?2004h> # for x in [x_j, x_{j+1}], and -Inf outside [x_1, x_k]
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_lower_hull <- function(x, x_k, h_k) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- rep(-Inf, n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     if (x[i] >= x_k[1] && x[i] <= x_k[k]) {
+[?2004l[?2004h>       j <- findInterval(x[i], x_k)
+[?2004l[?2004h>       j <- max(1, min(j, k - 1))
+[?2004l[?2004h>       result[i] <- ((x_k[j + 1] - x[i]) * h_k[j] + (x[i] - x_k[j]) * h_k[j + 1]) /
+[?2004l[?2004h>                    (x_k[j + 1] - x_k[j])
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Sample from the piecewise exponential (upper hull envelope)
+[?2004l[?2004h> # The upper hull defines a piecewise linear function in log-space,
+[?2004l[?2004h> # which is piecewise exponential in the original space.
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> sample_upper_hull <- function(n_samples, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   # Compute the integral of exp(u_k(x)) over each segment [z_full[j], z_full[j+1]]
+[?2004l[?2004h>   # For segment j: integral of exp(h_k[j] + (x - x_k[j]) * hprime_k[j]) dx
+[?2004l[?2004h>   # = exp(h_k[j] - x_k[j]*hprime_k[j]) * integral of exp(hprime_k[j]*x) dx
+[?2004l[?2004h>   # from z_full[j] to z_full[j+1]
+[?2004l[?2004h>   
+[?2004l[?2004h>   log_areas <- numeric(k)
+[?2004l[?2004h>   for (j in 1:k) {
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     intercept <- h_k[j] - x_k[j] * slope  # u(x) = intercept + slope*x
+[?2004l[?2004h>     
+[?2004l[?2004h>     if (abs(slope) < 1e-10) {
+[?2004l[?2004h>       log_areas[j] <- intercept + log(b - a)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # log integral = intercept + log((exp(slope*b) - exp(slope*a)) / slope)
+[?2004l[?2004h>       # Use log-sum-exp for stability
+[?2004l[?2004h>       log_upper <- slope * b
+[?2004l[?2004h>       log_lower <- slope * a
+[?2004l[?2004h>       if (slope > 0) {
+[?2004l[?2004h>         log_areas[j] <- intercept + log_upper + log(1 - exp(log_lower - log_upper)) - log(slope)
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         log_areas[j] <- intercept + log_lower + log(1 - exp(log_upper - log_lower)) - log(-slope)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Normalize to get probabilities for each segment
+[?2004l[?2004h>   max_log_area <- max(log_areas)
+[?2004l[?2004h>   areas <- exp(log_areas - max_log_area)
+[?2004l[?2004h>   probs <- areas / sum(areas)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Sample segments
+[?2004l[?2004h>   segments <- sample(1:k, n_samples, replace = TRUE, prob = probs)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Sample within each segment using inverse CDF of exponential
+[?2004l[?2004h>   samples <- numeric(n_samples)
+[?2004l[?2004h>   for (i in 1:n_samples) {
+[?2004l[?2004h>     j <- segments[i]
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     u_val <- runif(1)
+[?2004l [?2004h>     
+[?2004l[?2004h>     if (abs(slope) < 1e-10) {
+[?2004l[?2004h>       samples[i] <- a + u_val * (b - a)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # Inverse CDF: x = (1/slope) * log(exp(slope*a) + u*(exp(slope*b) - exp(slope*a)))
+[?2004l[?2004h>       # Numerically stable version
+[?2004l[?2004h>       exp_sa <- slope * a
+[?2004l[?2004h>       exp_sb <- slope * b
+[?2004l[?2004h>       if (slope > 0) {
+[?2004l[?2004h>         samples[i] <- a + (1 / slope) * log(1 + u_val * (exp(slope * (b - a)) - 1))
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         samples[i] <- b + (1 / slope) * log(1 + u_val * (exp(slope * (a - b)) - 1))
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Validate inputs for the ARS function
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> validate_inputs <- function(n, g, lb, ub, init_points) {
+[?2004l[?2004h>   # Check n
+[?2004l[?2004h>   if (!is.numeric(n) || length(n) != 1 || n != floor(n) || n <= 0) {
+[?2004l[?2004h>     stop("'n' must be a positive integer.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Check g is a function
+[?2004l[?2004h>   if (!is.function(g)) {
+[?2004l[?2004h>     stop("'g' must be a function that computes the (possibly unnormalized) density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Check bounds
+[?2004l[?2004h>   if (!is.numeric(lb) || !is.numeric(ub) || length(lb) != 1 || length(ub) != 1) {
+[?2004l[?2004h>     stop("'lb' and 'ub' must be single numeric values.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (lb >= ub) {
+[?2004l[?2004h>     stop("Lower bound must be strictly less than upper bound.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Check init_points if provided
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     if (!is.numeric(init_points) || length(init_points) < 2) {
+[?2004l[?2004h>       stop("'init_points' must be a numeric vector of length >= 2.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(init_points <= lb) || any(init_points >= ub)) {
+[?2004l[?2004h>       stop("All initial points must be strictly within (lb, ub).")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Check that g returns valid values
+[?2004l[?2004h>   test_x <- if (!is.null(init_points)) init_points[1] else (lb + ub) / 2
+[?2004l[?2004h>   tryCatch({
+[?2004l[?2004h>     val <- g(test_x)
+[?2004lt[?2004h>     if (!is.numeric(val) || any(is.na(val))) {
+[?2004l[?2004h>       stop("Density function returned non-numeric or NA values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(val < 0)) {
+[?2004l[?2004h>       stop("Density function must return non-negative values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }, error = function(e) {
+[?2004l[?2004h>     stop(paste("Error evaluating density function:", e$message))
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Initialize abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> initialize_abscissae <- function(g, lb, ub, init_points = NULL) {
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     x_k <- sort(init_points)
+[?2004l[?2004h>   } else {
+[?2004l[?2004h>     # Choose initial points adaptively
+[?2004l[?2004h>     if (is.finite(lb) && is.finite(ub)) {
+[?2004l[?2004h>       x_k <- lb + (1:4) * (ub - lb) / 5
+[?2004l[?2004h>     } else if (is.finite(lb)) {
+[?2004l[?2004h>       x_k <- lb + c(0.5, 1.0, 2.0, 4.0)
+[?2004l[?2004h>     } else if (is.finite(ub)) {
+[?2004l[?2004h>       x_k <- ub - c(4.0, 2.0, 1.0, 0.5)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       x_k <- c(-2, -0.5, 0.5, 2)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Verify density is positive at initial points
+[?2004l[?2004h>   h_vals <- eval_log_density(x_k, g)
+[?2004l[?2004h>   if (all(h_vals == -Inf)) {
+[?2004l[?2004h>     stop("Density is zero at all initial abscissae. Provide better initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Remove points where density is zero
+[?2004l[?2004h>   valid <- h_vals > -Inf
+[?2004l[?2004h>   if (sum(valid) < 2) {
+[?2004l[?2004h>     stop("Need at least 2 initial points with positive density. Provide better initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   x_k <- x_k[valid]
+[?2004l[?2004h>   
+[?2004l[?2004h>   return(x_k)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Main ARS function
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> ars <- function(n, g, lb = -Inf, ub = Inf, init_points = NULL) {
+[?2004l[?2004h>   # Validate all inputs
+[?2004l[?2004h>   validate_inputs(n, g, lb, ub, init_points)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Initialize abscissae
+[?2004l[?2004h>   x_k <- initialize_abscissae(g, lb, ub, init_points)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Compute h = log(g) and h' at abscissae
+[?2004l[?2004h>   h_k <- eval_log_density(x_k, g)
+[?2004l[?2004h>   hprime_k <- eval_log_density_deriv(x_k, g)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Check initial log-concavity
+[?2004l[?2004h>   if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>     stop("The density does not appear to be log-concave. ARS requires a log-concave density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004ly[?2004h>   # For unbounded domains, verify derivative conditions
+[?2004l[?2004h>   if (!is.finite(lb)) {
+[?2004l[?2004h>     if (hprime_k[1] <= 0) {
+[?2004l[?2004h>       stop("For unbounded lower domain, the derivative at the leftmost abscissa must be positive.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.finite(ub)) {
+[?2004l[?2004h>     if (hprime_k[length(hprime_k)] >= 0) {
+[?2004l[?2004h>       stop("For unbounded upper domain, the derivative at the rightmost abscissa must be negative.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Main sampling loop
+[?2004l[?2004h>   samples <- numeric(n)
+[?2004l[?2004h>   n_sampled <- 0
+[?2004l[?2004h>   max_iter <- n * 100  # Safety limit
+[?2004l[?2004h>   iter <- 0
+[?2004l[?2004h>   
+[?2004l[?2004h>   while (n_sampled < n && iter < max_iter) {
+[?2004l[?2004h>     iter <- iter + 1
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Compute upper hull intersections
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, lb, ub)
+[?2004l[?2004h>     z_full <- hull$z_full
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Sample x* from the upper hull envelope s_k
+[?2004l[?2004h>     x_star <- sample_upper_hull(1, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Evaluate upper and lower hulls at x*
+[?2004l[?2004h>     u_val <- eval_upper_hull(x_star, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     l_val <- eval_lower_hull(x_star, x_k, h_k)
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Generate w ~ Uniform(0, 1)
+[?2004l[?2004h>     w <- runif(1)
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Squeezing test
+[?2004l[?2004h>     if (w <= exp(l_val - u_val)) {
+[?2004l[?2004h>       # Accept without evaluating h
+[?2004l[?2004h>       n_sampled <- n_sampled + 1
+[?2004l[?2004h>       samples[n_sampled] <- x_star
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # Evaluate h(x*)
+[?2004l[?2004h>       h_star <- eval_log_density(x_star, g)
+[?2004l[?2004h>       hprime_star <- eval_log_density_deriv(x_star, g)
+[?2004l[?2004h>       
+[?2004l[?2004h>       # Rejection test
+[?2004l[?2004h>       if (w <= exp(h_star - u_val)) {
+[?2004l[?2004h>         n_sampled <- n_sampled + 1
+[?2004l[?2004h>         samples[n_sampled] <- x_star
+[?2004l[?2004h>       }
+[?2004l[?2004h>       
+[?2004l[?2004h>       # Update abscissae (add x_star)
+[?2004l[?2004h>       insert_pos <- findInterval(x_star, x_k) + 1
+[?2004l[?2004h>       x_k <- append(x_k, x_star, after = insert_pos - 1)
+[?2004l[?2004h>       h_k <- append(h_k, h_star, after = insert_pos - 1)
+[?2004l[?2004h>       hprime_k <- append(hprime_k, hprime_star, after = insert_pos - 1)
+[?2004l[?2004h>       
+[?2004l[?2004h>       # Check log-concavity with new point
+[?2004l[?2004h>       if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>         stop("Log-concavity violation detected after adding new point. The density is not log-concave.")
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   if (n_sampled < n) {
+[?2004l[?2004h>     warning(paste("Only", n_sampled, "samples generated out of", n, "requested."))
+[?2004l[?2004h>     samples <- samples[1:n_sampled]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Test function
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> test <- function() {
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h>   cat("  Adaptive Rejection Sampling (ARS) - Test Suite\n")
+[?2004l[?2004h>   cat("=============================================================\n\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   pass_count <- 0
+[?2004l[?2004h>   fail_count <- 0
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test <- function(name, expr) {
+[?2004l[?2004h>     result <- tryCatch(expr, error = function(e) {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL (Error: ", e$message, ")\n"))
+[?2004l[?2004h>       return("FAIL")
+[?2004l[?2004h>     })
+[?2004l[?2004h>     if (is.character(result) && result == "FAIL") {
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     } else if (isTRUE(result)) {
+[?2004l[?2004h>       cat(paste0(name, ": PASS\n"))
+[?2004l[?2004h>       pass_count <<- pass_count + 1
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL\n"))
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # ---- Input Validation Tests ----
+[?2004l[?2004h>   cat("--- Input Validation Tests ---\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_negative_n", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(-5, dnorm)
+[?2004l[?2004h>       FALSE  # Should have thrown error
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_zero_n", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(0, dnorm)
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_non_integer_n", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(3.5, dnorm)
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_invalid_bounds", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(100, dnorm, lb = 5, ub = 2)
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_non_function_density", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(100, "not_a_function")
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_init_points_outside_bounds", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       ars(100, dnorm, lb = -5, ub = 5, init_points = c(-10, 0, 10))
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # ---- Log-Concavity Check Tests ----
+[?2004l[?2004h>   cat("\n--- Log-Concavity Check Tests ---\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_log_concavity_normal", {
+[?2004l[?2004h>     # Normal is log-concave, should work
+[?2004l[?2004h>     samples <- ars(100, dnorm, init_points = c(-1, 0, 1))
+[?2004l[?2004h>     length(samples) == 100
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_non_log_concave_cauchy", {
+[?2004l[?2004h>     # Cauchy distribution is NOT log-concave
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       samples <- ars(100, dcauchy, init_points = c(-1, 0, 1))
+[?2004l[?2004h>       FALSE  # Should have thrown error
+[?2004l[?2004h>     }, error = function(e) {
+[?2004l[?2004h>       grepl("log-concav", e$message, ignore.case = TRUE)
+[?2004l[?2004h>     })
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # ---- Module Tests ----
+[?2004l[?2004h>   cat("\n--- Module/Utility Tests ---\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_eval_log_density", {
+[?2004l[?2004h>     # log(dnorm(0)) = log(1/sqrt(2*pi)) ~ -0.9189
+[?2004l[?2004h>     val <- eval_log_density(0, dnorm)
+[?2004l[?2004h>     abs(val - log(dnorm(0))) < 1e-6
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_eval_log_density_vectorized", {
+[?2004l[?2004h>     vals <- eval_log_density(c(-1, 0, 1), dnorm)
+[?2004l[?2004h>     expected <- log(dnorm(c(-1, 0, 1)))
+[?2004l[?2004h>     all(abs(vals - expected) < 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_derivative_at_mode", {
+[?2004l[?2004h>     # Derivative of log(dnorm(x)) at x=0 should be ~0
+[?2004l[?2004h>     d <- eval_log_density_deriv(0, dnorm)
+[?2004l[?2004h>     abs(d) < 1e-4
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_derivative_sign", {
+[?2004l[?2004h>     # Derivative of log(dnorm(x)) should be positive for x < 0, negative for x > 0
+[?2004l[?2004h>     d_neg <- eval_log_density_deriv(-2, dnorm)
+[?2004l[?2004h>     d_pos <- eval_log_density_deriv(2, dnorm)
+[?2004l[?2004h>     d_neg > 0 && d_pos < 0
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_upper_hull_above_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, -Inf, Inf)
+[?2004l[?2004h>     # Upper hull should be >= h at test points
+[?2004l[?2004h>     test_pts <- seq(-3, 3, by = 0.5)
+[?2004l[?2004h>     u_vals <- eval_upper_hull(test_pts, x_k, h_k, hprime_k, hull$z_full)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(u_vals >= h_vals - 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_lower_hull_below_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     test_pts <- seq(-1.9, 1.9, by = 0.5)
+[?2004l[?2004h>     l_vals <- eval_lower_hull(test_pts, x_k, h_k)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(l_vals <= h_vals + 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_check_log_concavity_true", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     check_log_concavity(x_k, h_k, hprime_k)
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_validate_inputs_valid", {
+[?2004l[?2004h>     validate_inputs(100, dnorm, -Inf, Inf, c(-1, 1))
+[?2004l[?2004h>   })
+[?2004l#[?2004h>   
+[?2004l[?2004h>   # ---- Distribution Tests ----
+[?2004l[?2004h>   cat("\n--- Distribution Sampling Tests ---\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   set.seed(42)
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 1: Standard Normal
+[?2004l[?2004h>   run_test("test_standard_normal_mean", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal: sample mean = %.4f, sample sd = %.4f (expected: 0, 1)\n", m, s))
+[?2004l[?2004h>     # Save samples
+[?2004l[?2004h>     write(samples, file = "/app/normal_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m) < 0.1 && abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   run_test("test_standard_normal_sd", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal SD: sample sd = %.4f (expected: 1)\n", s))
+[?2004l[?2004h>     abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 2: Normal(3, 2)
+[?2004l[?2004h>   run_test("test_shifted_normal", {
+[?2004l[?2004h>     g <- function(x) dnorm(x, mean = 3, sd = 2)
+[?2004l[?2004h>     samples <- ars(5000, g, init_points = c(0, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Normal(3,2): sample mean = %.4f, sample sd = %.4f (expected: 3, 2)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.2 && abs(s - 2) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 3: Exponential(1) - bounded below
+[?2004l[?2004h>   run_test("test_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 1, 2, 4))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Exp(1): sample mean = %.4f, sample sd = %.4f (expected: 1, 1)\n", m, s))
+[?2004l[?2004h>     # Save exponential samples
+[?2004l[?2004h>     write(samples, file = "/app/exponential_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m - 1) < 0.15 && abs(s - 1) < 0.2
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 4: Gamma(shape=3, rate=1) - log-concave for shape >= 1
+[?2004l[?2004h>   run_test("test_gamma", {
+[?2004l[?2004h>     g <- function(x) dgamma(x, shape = 3, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Gamma(3,1): sample mean = %.4f, sample sd = %.4f (expected: 3, 1.732)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.3 && abs(s - sqrt(3)) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 5: Beta(2, 5) - log-concave for alpha,beta >= 1
+[?2004l[?2004h>   run_test("test_beta", {
+[?2004l[?2004h>     g <- function(x) dbeta(x, shape1 = 2, shape2 = 5)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.1, 0.25, 0.5, 0.75))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     expected_mean <- 2 / (2 + 5)
+[?2004l[?2004h>     expected_sd <- sqrt(2 * 5 / ((2 + 5)^2 * (2 + 5 + 1)))
+[?2004l[?2004h>     cat(sprintf("  Beta(2,5): sample mean = %.4f, sample sd = %.4f (expected: %.4f, %.4f)\n",
+[?2004l[?2004h>                 m, s, expected_mean, expected_sd))
+[?2004l[?2004h>     abs(m - expected_mean) < 0.05 && abs(s - expected_sd) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 6: Uniform distribution (bounded)
+[?2004l[?2004h>   run_test("test_uniform", {
+[?2004l[?2004h>     g <- function(x) dunif(x, min = 0, max = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.2, 0.4, 0.6, 0.8))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Uniform(0,1): sample mean = %.4f, sample sd = %.4f (expected: 0.5, 0.2887)\n", m, s))
+[?2004l[?2004h>     abs(m - 0.5) < 0.1 && abs(s - 1/sqrt(12)) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 7: KS test for normality
+[?2004l[?2004h>   run_test("test_ks_normal", {
+[?2004l[?2004h>     samples <- ars(2000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pnorm")
+[?2004l[?2004h>     cat(sprintf("  KS test for Normal: p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01  # Should not reject at 1% level
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # Test 8: KS test for exponential
+[?2004l[?2004h>   run_test("test_ks_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 2)
+[?2004l[?2004h>     samples <- ars(2000, g, lb = 0, ub = Inf, init_points = c(0.1, 0.5, 1, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pexp", rate = 2)
+[?2004l[?2004h>     cat(sprintf("  KS test for Exp(2): p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01
+[?2004l[?2004h>   })
+[?2004l[?2004h>   
+[?2004l[?2004h>   # ---- Summary ----
+[?2004l[?2004h>   cat("\n=============================================================\n")
+[?2004l[?2004h>   cat(sprintf("  Results: %d PASSED, %d FAILED out of %d tests\n",
+[?2004l[?2004h>               pass_count, fail_count, pass_count + fail_count))
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h>   
+[?2004l[?2004h>   invisible(list(pass = pass_count, fail = fail_count))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # Run tests if executed directly
+[?2004l[?2004h> if (!interactive() && identical(sys.frame(1)$ofile, NULL)) {
+[?2004l[?2004h>   # Source was called from command line
+[?2004l[?2004h> }
+[?2004l[?2004h> RROF
+[?2004l[?2004h> echo '__CMDEND__2__'
+[?2004l[?2004h> tail -5 /app/ars.R
+[?2004l[?2004h> tail -5 /tmp/r_install.log
+[?2004l[?2004h> wc -l /app/ars.R
+[?2004l[?2004h> jobs
+[?2004l[?2004h> REOF
+[?2004l
+[1]+  Stopped                 apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__3__'
+[?2004l__CMDEND__3__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# wc -l /app/ars.R
+[?2004l624 /app/ars.R
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__4__'
+[?2004l__CMDEND__4__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# apt-get install -y -qq r-base > /tmp/r_install.log 2>&1 &
+[?2004l[2] 7703
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__5__'
+[?2004l__CMDEND__5__
+[2]-  Exit 100                apt-get install -y -qq r-base > /tmp/r_install.log 2>&1
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# cat /tmp/r_install.log
+[?2004lE: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 3711 (apt-get)
+E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# tail -10 /app/ars.R
+[?2004l# Run tests if executed directly
+if (!interactive() && identical(sys.frame(1)$ofile, NULL)) {
+  # Source was called from command line
+}
+RROF
+echo '__CMDEND__2__'
+tail -5 /app/ars.R
+tail -5 /tmp/r_install.log
+wc -l /app/ars.R
+jobs
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# kill -9 3490 3711 2>/dev/null; sleep 1; rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock; dpkg --configure -a 2>/dev/null
+[?2004lecho '__CMDEND__6__'
+[1]+  Killed                  apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__6__'
+[?2004l__CMDEND__6__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1 &
+[?2004l[1] 7865
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__7__'
+[?2004l__CMDEND__7__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# python3 -c "
+[?2004l[?2004h> import textwrap
+[?2004l[?2004h> code = '''
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Adaptive Rejection Sampling (ARS)
+[?2004l[?2004h> # Based on Gilks, W. R., & Wild, P. (1992)
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate log-density
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density <- function(x, g) {
+[?2004l[?2004h>   vals <- g(x)
+[?2004l[?2004h>   if (any(vals < 0, na.rm = TRUE)) {
+[?2004l[?2004h>     stop('Density function returned negative values. Density must be non-negative.')
+[?2004l[?2004h>   }
+[?2004l[?2004h>   result <- ifelse(vals > 0, log(vals), -Inf)
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute derivative of log-density numerically
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   return((h_plus - h_minus) / (2 * eps))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Check log-concavity at abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> check_log_concavity <- function(x_sorted, h_vals, h_deriv_vals) {
+[?2004l[?2004h>   n <- length(x_sorted)
+[?2004l[?2004h>   if (n < 2) return(TRUE)
+[?2004l[?2004h>   for (i in 2:n) {
+[?2004l[?2004h>     if (h_deriv_vals[i] > h_deriv_vals[i - 1] + 1e-6) {
+[?2004l[?2004h>       return(FALSE)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (n >= 3) {
+[?2004l[?2004h>     for (i in 2:(n - 1)) {
+[?2004l[?2004h>       dd <- ((h_vals[i + 1] - h_vals[i]) / (x_sorted[i + 1] - x_sorted[i]) -
+[?2004l[?2004h>              (h_vals[i] - h_vals[i - 1]) / (x_sorted[i] - x_sorted[i - 1])) /
+[?2004l[?2004h>             (x_sorted[i + 1] - x_sorted[i - 1])
+[?2004l[?2004h>       if (dd > 1e-6) {
+[?2004l[?2004h>         return(FALSE)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> '''
+[?2004l[?2004h> with open('/app/ars.R', 'w') as f:
+[?2004l[?2004h>     f.write(code)
+[?2004l[?2004h> print('Part 1 written')
+[?2004l[?2004h> "
+[?2004lPart 1 written
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__8__'
+[?2004l__CMDEND__8__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# cat > /tmp/write_ars.py << 'PYEOF'
+[?2004l[?2004h> import os
+[?2004l[?2004h> 
+[?2004l [?2004h> code = r"""
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Adaptive Rejection Sampling (ARS)
+[?2004l[?2004h> # Based on Gilks, W. R., & Wild, P. (1992)
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate log-density
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density <- function(x, g) {
+[?2004l[?2004h>   vals <- g(x)
+[?2004l[?2004h>   if (any(vals < 0, na.rm = TRUE)) {
+[?2004l[?2004h>     stop("Density function returned negative values. Density must be non-negative.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   result <- ifelse(vals > 0, log(vals), -Inf)
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004la[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute derivative of log-density numerically
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   return((h_plus - h_minus) / (2 * eps))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Check log-concavity at abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> check_log_concavity <- function(x_sorted, h_vals, h_deriv_vals) {
+[?2004l[?2004h>   n <- length(x_sorted)
+[?2004l[?2004h>   if (n < 2) return(TRUE)
+[?2004l[?2004h>   for (i in 2:n) {
+[?2004l[?2004h>     if (h_deriv_vals[i] > h_deriv_vals[i - 1] + 1e-6) {
+[?2004l[?2004h>       return(FALSE)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (n >= 3) {
+[?2004l[?2004h>     for (i in 2:(n - 1)) {
+[?2004l[?2004h>       dd <- ((h_vals[i + 1] - h_vals[i]) / (x_sorted[i + 1] - x_sorted[i]) -
+[?2004l[?2004h>              (h_vals[i] - h_vals[i - 1]) / (x_sorted[i] - x_sorted[i - 1])) /
+[?2004l[?2004h>             (x_sorted[i + 1] - x_sorted[i - 1])
+[?2004l[?2004h>       if (dd > 1e-6) {
+[?2004l[?2004h>         return(FALSE)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute upper hull intersections
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   z <- numeric(k - 1)
+[?2004l[?2004h>   for (j in 1:(k - 1)) {
+[?2004l[?2004h>     denom <- hprime_k[j] - hprime_k[j + 1]
+[?2004l[?2004h>     if (abs(denom) < 1e-14) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       z[j] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hprime_k[j + 1] + x_k[j] * hprime_k[j]) / denom
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   z_full <- c(lb, z, ub)
+[?2004l[?2004h>   return(list(z = z, z_full = z_full))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate upper hull u_k(x) at point x
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- numeric(n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     j <- findInterval(x[i], z_full)
+[?2004l[?2004h>     j <- max(1, min(j, k))
+[?2004l[?2004h>     result[i] <- h_k[j] + (x[i] - x_k[j]) * hprime_k[j]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate lower hull l_k(x) at point x
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_lower_hull <- function(x, x_k, h_k) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- rep(-Inf, n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     if (x[i] >= x_k[1] && x[i] <= x_k[k]) {
+[?2004l[?2004h>       j <- findInterval(x[i], x_k)
+[?2004l[?2004h>       j <- max(1, min(j, k - 1))
+[?2004l[?2004h>       result[i] <- ((x_k[j + 1] - x[i]) * h_k[j] + (x[i] - x_k[j]) * h_k[j + 1]) /
+[?2004l[?2004h>                    (x_k[j + 1] - x_k[j])
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Sample from the piecewise exponential upper hull envelope
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> sample_upper_hull <- function(n_samples, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   log_areas <- numeric(k)
+[?2004l[?2004h>   for (j in 1:k) {
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     intercept <- h_k[j] - x_k[j] * slope
+[?2004l[?2004h> 
+[?2004ls[?2004h>     if (abs(slope) < 1e-10) {
+[?2004l[?2004h>       log_areas[j] <- intercept + log(b - a)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       log_upper <- slope * b
+[?2004l[?2004h>       log_lower <- slope * a
+[?2004l[?2004h>       if (slope > 0) {
+[?2004l[?2004h>         log_areas[j] <- intercept + log_upper + log(1 - exp(log_lower - log_upper)) - log(slope)
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         log_areas[j] <- intercept + log_lower + log(1 - exp(log_upper - log_lower)) - log(-slope)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   max_log_area <- max(log_areas)
+[?2004l[?2004h>   areas <- exp(log_areas - max_log_area)
+[?2004l[?2004h>   probs <- areas / sum(areas)
+[?2004l[?2004h> 
+[?2004ls[?2004h>   segments <- sample(1:k, n_samples, replace = TRUE, prob = probs)
+[?2004l[?2004h> 
+[?2004lo[?2004h>   samples <- numeric(n_samples)
+[?2004l[?2004h>   for (i in 1:n_samples) {
+[?2004l[?2004h>     j <- segments[i]
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     u_val <- runif(1)
+[?2004l[?2004h> 
+[?2004l[?2004h>     if (abs(slope) < 1e-10) {
+[?2004l[?2004h>       samples[i] <- a + u_val * (b - a)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       if (slope > 0) {
+[?2004l[?2004h>         samples[i] <- a + (1 / slope) * log(1 + u_val * (exp(slope * (b - a)) - 1))
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         samples[i] <- b + (1 / slope) * log(1 + u_val * (exp(slope * (a - b)) - 1))
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004lx[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Validate inputs
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> validate_inputs <- function(n, g, lb, ub, init_points) {
+[?2004l[?2004h>   if (!is.numeric(n) || length(n) != 1 || n != floor(n) || n <= 0) {
+[?2004l[?2004h>     stop("'n' must be a positive integer.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.function(g)) {
+[?2004l[?2004h>     stop("'g' must be a function that computes the (possibly unnormalized) density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.numeric(lb) || !is.numeric(ub) || length(lb) != 1 || length(ub) != 1) {
+[?2004l[?2004h>     stop("'lb' and 'ub' must be single numeric values.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (lb >= ub) {
+[?2004l[?2004h>     stop("Lower bound must be strictly less than upper bound.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     if (!is.numeric(init_points) || length(init_points) < 2) {
+[?2004l[?2004h>       stop("'init_points' must be a numeric vector of length >= 2.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(init_points <= lb) || any(init_points >= ub)) {
+[?2004l[?2004h>       stop("All initial points must be strictly within (lb, ub).")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   test_x <- if (!is.null(init_points)) init_points[1] else {
+[?2004l[?2004h>     if (is.finite(lb) && is.finite(ub)) (lb + ub) / 2
+[?2004l[?2004h>     else if (is.finite(lb)) lb + 1
+[?2004l[?2004h>     else if (is.finite(ub)) ub - 1
+[?2004l[?2004h>     else 0
+[?2004l[?2004h>   }
+[?2004l[?2004h>   tryCatch({
+[?2004l[?2004h>     val <- g(test_x)
+[?2004l[?2004h>     if (!is.numeric(val) || any(is.na(val))) {
+[?2004l[?2004h>       stop("Density function returned non-numeric or NA values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(val < 0)) {
+[?2004l[?2004h>       stop("Density function must return non-negative values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }, error = function(e) {
+[?2004l[?2004h>     stop(paste("Error evaluating density function:", e$message))
+[?2004l[?2004h>   })
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Initialize abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> initialize_abscissae <- function(g, lb, ub, init_points = NULL) {
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     x_k <- sort(init_points)
+[?2004l[?2004h>   } else {
+[?2004l[?2004h>     if (is.finite(lb) && is.finite(ub)) {
+[?2004l[?2004h>       x_k <- lb + (1:4) * (ub - lb) / 5
+[?2004l[?2004h>     } else if (is.finite(lb)) {
+[?2004l[?2004h>       x_k <- lb + c(0.5, 1.0, 2.0, 4.0)
+[?2004l[?2004h>     } else if (is.finite(ub)) {
+[?2004l[?2004h>       x_k <- ub - c(4.0, 2.0, 1.0, 0.5)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       x_k <- c(-2, -0.5, 0.5, 2)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   h_vals <- eval_log_density(x_k, g)
+[?2004l[?2004h>   if (all(h_vals == -Inf)) {
+[?2004l[?2004h>     stop("Density is zero at all initial abscissae. Provide better initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   valid <- h_vals > -Inf
+[?2004l[?2004h>   if (sum(valid) < 2) {
+[?2004l[?2004h>     stop("Need at least 2 initial points with positive density. Provide better initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   x_k <- x_k[valid]
+[?2004l[?2004h>   return(x_k)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Main ARS function
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> ars <- function(n, g, lb = -Inf, ub = Inf, init_points = NULL) {
+[?2004l[?2004h>   validate_inputs(n, g, lb, ub, init_points)
+[?2004l[?2004h>   x_k <- initialize_abscissae(g, lb, ub, init_points)
+[?2004l[?2004h>   h_k <- eval_log_density(x_k, g)
+[?2004l[?2004h>   hprime_k <- eval_log_density_deriv(x_k, g)
+[?2004l[?2004h> 
+[?2004l[?2004h>   if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>     stop("The density does not appear to be log-concave. ARS requires a log-concave density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   if (!is.finite(lb)) {
+[?2004l[?2004h>     if (hprime_k[1] <= 0) {
+[?2004l[?2004h>       stop("For unbounded lower domain, the derivative at the leftmost abscissa must be positive.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.finite(ub)) {
+[?2004l[?2004h>     if (hprime_k[length(hprime_k)] >= 0) {
+[?2004l[?2004h>       stop("For unbounded upper domain, the derivative at the rightmost abscissa must be negative.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l [?2004h>   samples <- numeric(n)
+[?2004l[?2004h>   n_sampled <- 0
+[?2004l[?2004h>   max_iter <- n * 100
+[?2004l[?2004h>   iter <- 0
+[?2004l[?2004h> 
+[?2004l[?2004h>   while (n_sampled < n && iter < max_iter) {
+[?2004l[?2004h>     iter <- iter + 1
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, lb, ub)
+[?2004l[?2004h>     z_full <- hull$z_full
+[?2004l[?2004h>     x_star <- sample_upper_hull(1, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     u_val <- eval_upper_hull(x_star, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     l_val <- eval_lower_hull(x_star, x_k, h_k)
+[?2004l[?2004h>     w <- runif(1)
+[?2004l[?2004h> 
+[?2004l[?2004h>     if (w <= exp(l_val - u_val)) {
+[?2004l[?2004h>       n_sampled <- n_sampled + 1
+[?2004l[?2004h>       samples[n_sampled] <- x_star
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       h_star <- eval_log_density(x_star, g)
+[?2004l[?2004h>       hprime_star <- eval_log_density_deriv(x_star, g)
+[?2004l[?2004h> 
+[?2004l[?2004h>       if (w <= exp(h_star - u_val)) {
+[?2004l[?2004h>         n_sampled <- n_sampled + 1
+[?2004l[?2004h>         samples[n_sampled] <- x_star
+[?2004l[?2004h>       }
+[?2004l[?2004h> 
+[?2004l[?2004h>       insert_pos <- findInterval(x_star, x_k) + 1
+[?2004l[?2004h>       x_k <- append(x_k, x_star, after = insert_pos - 1)
+[?2004l[?2004h>       h_k <- append(h_k, h_star, after = insert_pos - 1)
+[?2004l[?2004h>       hprime_k <- append(hprime_k, hprime_star, after = insert_pos - 1)
+[?2004l[?2004h> 
+[?2004l[?2004h>       if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>         stop("Log-concavity violation detected after adding new point. The density is not log-concave.")
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   if (n_sampled < n) {
+[?2004l[?2004h>     warning(paste("Only", n_sampled, "samples generated out of", n, "requested."))
+[?2004l[?2004h>     samples <- samples[1:n_sampled]
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Test function
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> test <- function() {
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h>   cat("  Adaptive Rejection Sampling (ARS) - Test Suite\n")
+[?2004l[?2004h>   cat("=============================================================\n\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   pass_count <- 0
+[?2004l[?2004h>   fail_count <- 0
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test <- function(name, expr) {
+[?2004l[?2004h>     result <- tryCatch(expr, error = function(e) {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL (Error: ", e$message, ")\n"))
+[?2004l[?2004h>       return("FAIL")
+[?2004l[?2004h>     })
+[?2004l[?2004h>     if (is.character(result) && result == "FAIL") {
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     } else if (isTRUE(result)) {
+[?2004l[?2004h>       cat(paste0(name, ": PASS\n"))
+[?2004l[?2004h>       pass_count <<- pass_count + 1
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL\n"))
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Input Validation Tests ----
+[?2004l[?2004h>   cat("--- Input Validation Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_negative_n", {
+[?2004l[?2004h>     tryCatch({ ars(-5, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_zero_n", {
+[?2004l[?2004h>     tryCatch({ ars(0, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_integer_n", {
+[?2004l[?2004h>     tryCatch({ ars(3.5, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_invalid_bounds", {
+[?2004l[?2004h>     tryCatch({ ars(100, dnorm, lb = 5, ub = 2); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_function_density", {
+[?2004l[?2004h>     tryCatch({ ars(100, "not_a_function"); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_init_points_outside_bounds", {
+[?2004l[?2004h>     tryCatch({ ars(100, dnorm, lb = -5, ub = 5, init_points = c(-10, 0, 10)); FALSE },
+[?2004l[?2004h>              error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Log-Concavity Check Tests ----
+[?2004l[?2004h>   cat("\n--- Log-Concavity Check Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_log_concavity_normal", {
+[?2004l[?2004h>     samples <- ars(100, dnorm, init_points = c(-1, 0, 1))
+[?2004l[?2004h>     length(samples) == 100
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_log_concave_cauchy", {
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       samples <- ars(100, dcauchy, init_points = c(-1, 0, 1))
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) {
+[?2004l[?2004h>       grepl("log-concav", e$message, ignore.case = TRUE)
+[?2004l[?2004h>     })
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Module Tests ----
+[?2004l[?2004h>   cat("\n--- Module/Utility Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_eval_log_density", {
+[?2004l[?2004h>     val <- eval_log_density(0, dnorm)
+[?2004l[?2004h>     abs(val - log(dnorm(0))) < 1e-6
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_eval_log_density_vectorized", {
+[?2004l[?2004h>     vals <- eval_log_density(c(-1, 0, 1), dnorm)
+[?2004l[?2004h>     expected <- log(dnorm(c(-1, 0, 1)))
+[?2004l[?2004h>     all(abs(vals - expected) < 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_derivative_at_mode", {
+[?2004l[?2004h>     d <- eval_log_density_deriv(0, dnorm)
+[?2004l[?2004h>     abs(d) < 1e-4
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_derivative_sign", {
+[?2004l[?2004h>     d_neg <- eval_log_density_deriv(-2, dnorm)
+[?2004l[?2004h>     d_pos <- eval_log_density_deriv(2, dnorm)
+[?2004l[?2004h>     d_neg > 0 && d_pos < 0
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_upper_hull_above_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, -Inf, Inf)
+[?2004l[?2004h>     test_pts <- seq(-3, 3, by = 0.5)
+[?2004l[?2004h>     u_vals <- eval_upper_hull(test_pts, x_k, h_k, hprime_k, hull$z_full)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(u_vals >= h_vals - 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_lower_hull_below_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     test_pts <- seq(-1.9, 1.9, by = 0.5)
+[?2004l[?2004h>     l_vals <- eval_lower_hull(test_pts, x_k, h_k)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(l_vals <= h_vals + 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_check_log_concavity_true", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     check_log_concavity(x_k, h_k, hprime_k)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_validate_inputs_valid", {
+[?2004l[?2004h>     validate_inputs(100, dnorm, -Inf, Inf, c(-1, 1))
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Distribution Sampling Tests ----
+[?2004l[?2004h>   cat("\n--- Distribution Sampling Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   set.seed(42)
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_standard_normal_mean", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal: sample mean = %.4f, sample sd = %.4f (expected: 0, 1)\n", m, s))
+[?2004l[?2004h>     write(samples, file = "/app/normal_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m) < 0.1 && abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_standard_normal_sd", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal SD: sample sd = %.4f (expected: 1)\n", s))
+[?2004l[?2004h>     abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_shifted_normal", {
+[?2004l[?2004h>     g <- function(x) dnorm(x, mean = 3, sd = 2)
+[?2004l[?2004h>     samples <- ars(5000, g, init_points = c(0, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Normal(3,2): sample mean = %.4f, sample sd = %.4f (expected: 3, 2)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.2 && abs(s - 2) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 1, 2, 4))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Exp(1): sample mean = %.4f, sample sd = %.4f (expected: 1, 1)\n", m, s))
+[?2004l[?2004h>     write(samples, file = "/app/exponential_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m - 1) < 0.15 && abs(s - 1) < 0.2
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_gamma", {
+[?2004l[?2004h>     g <- function(x) dgamma(x, shape = 3, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Gamma(3,1): sample mean = %.4f, sample sd = %.4f (expected: 3, 1.732)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.3 && abs(s - sqrt(3)) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_beta", {
+[?2004l[?2004h>     g <- function(x) dbeta(x, shape1 = 2, shape2 = 5)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.1, 0.25, 0.5, 0.75))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     expected_mean <- 2 / (2 + 5)
+[?2004l[?2004h>     expected_sd <- sqrt(2 * 5 / ((2 + 5)^2 * (2 + 5 + 1)))
+[?2004l[?2004h>     cat(sprintf("  Beta(2,5): sample mean = %.4f, sample sd = %.4f (expected: %.4f, %.4f)\n",
+[?2004l[?2004h>                 m, s, expected_mean, expected_sd))
+[?2004l[?2004h>     abs(m - expected_mean) < 0.05 && abs(s - expected_sd) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_uniform", {
+[?2004l[?2004h>     g <- function(x) dunif(x, min = 0, max = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.2, 0.4, 0.6, 0.8))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Uniform(0,1): sample mean = %.4f, sample sd = %.4f (expected: 0.5, 0.2887)\n", m, s))
+[?2004l[?2004h>     abs(m - 0.5) < 0.1 && abs(s - 1/sqrt(12)) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_ks_normal", {
+[?2004l[?2004h>     samples <- ars(2000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pnorm")
+[?2004l[?2004h>     cat(sprintf("  KS test for Normal: p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_ks_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 2)
+[?2004l[?2004h>     samples <- ars(2000, g, lb = 0, ub = Inf, init_points = c(0.1, 0.5, 1, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pexp", rate = 2)
+[?2004l[?2004h>     cat(sprintf("  KS test for Exp(2): p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Summary ----
+[?2004l[?2004h>   cat("\n=============================================================\n")
+[?2004l[?2004h>   cat(sprintf("  Results: %d PASSED, %d FAILED out of %d tests\n",
+[?2004l[?2004h>               pass_count, fail_count, pass_count + fail_count))
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   invisible(list(pass = pass_count, fail = fail_count))
+[?2004l[?2004h> }
+[?2004l[?2004h> """
+[?2004l[?2004h> 
+[?2004l[?2004h> with open('/app/ars.R', 'w') as f:
+[?2004l[?2004h>     f.write(code.lstrip())
+[?2004l[?2004h> 
+[?2004l[?2004h> print(f"Written {len(code.splitlines())} lines to /app/ars.R")
+[?2004l[?2004h> PYEOF
+[?2004l[1]+  Done                    apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__9__'
+[?2004l__CMDEND__9__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# python3 /tmp/write_ars.py
+[?2004lWritten 517 lines to /app/ars.R
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__10__'
+[?2004l__CMDEND__10__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# which Rscript
+[?2004l/usr/bin/Rscript
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__11__'
+[?2004l__CMDEND__11__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# head -5 /app/ars.R && echo '---' && tail -5 /app/ars.R
+[?2004l# =============================================================================
+# Adaptive Rejection Sampling (ARS)
+# Based on Gilks, W. R., & Wild, P. (1992)
+# =============================================================================
+
+---
+              pass_count, fail_count, pass_count + fail_count))
+  cat("=============================================================\n")
+
+  invisible(list(pass = pass_count, fail = fail_count))
+}
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__12__'
+[?2004l__CMDEND__12__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e 'source("/app/ars.R"); test()' > /tmp/test_output.log 2>&1 &
+[?2004l[1] 8435
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__13__'
+[?2004l__CMDEND__13__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# sleep 10 && cat /tmp/test_output.log
+[?2004lecho '__CMDEND__14__'
+jobs
+ps aux | grep Rscript
+cat /tmp/test_output.log
+[1]+  Done                    Rscript -e 'source("/app/ars.R"); test()' > /tmp/test_output.log 2>&1
+=============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+test_log_concavity_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_non_log_concave_cauchy: FAIL
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+test_standard_normal_mean: FAIL (Error: missing value where TRUE/FALSE needed)
+test_standard_normal_sd: FAIL (Error: missing value where TRUE/FALSE needed)
+test_shifted_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_exponential: FAIL (Error: NA in probability vector)
+test_gamma: FAIL (Error: missing value where TRUE/FALSE needed)
+  Beta(2,5): sample mean = 0.2842, sample sd = 0.1589 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.5005, sample sd = 0.2882 (expected: 0.5, 0.2887)
+test_uniform: PASS
+test_ks_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_ks_exponential: FAIL (Error: missing value where TRUE/FALSE needed)
+
+=============================================================
+  Results: 16 PASSED, 9 FAILED out of 25 tests
+=============================================================
+Warning message:
+In log(1 - exp(log_upper - log_lower)) : NaNs produced
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__14__'
+[?2004l__CMDEND__14__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# jobs
+[?2004l[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# ps aux | grep Rscript
+[?2004lroot        8598  0.0  0.0   3912  1564 pts/0    S+   06:11   0:00 grep --color=auto [01;31m[KRscript[m[K
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# cat /tmp/test_output.log
+[?2004l=============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+test_log_concavity_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_non_log_concave_cauchy: FAIL
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+test_standard_normal_mean: FAIL (Error: missing value where TRUE/FALSE needed)
+test_standard_normal_sd: FAIL (Error: missing value where TRUE/FALSE needed)
+test_shifted_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_exponential: FAIL (Error: NA in probability vector)
+test_gamma: FAIL (Error: missing value where TRUE/FALSE needed)
+  Beta(2,5): sample mean = 0.2842, sample sd = 0.1589 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.5005, sample sd = 0.2882 (expected: 0.5, 0.2887)
+test_uniform: PASS
+test_ks_normal: FAIL (Error: missing value where TRUE/FALSE needed)
+test_ks_exponential: FAIL (Error: missing value where TRUE/FALSE needed)
+
+=============================================================
+  Results: 16 PASSED, 9 FAILED out of 25 tests
+=============================================================
+Warning message:
+In log(1 - exp(log_upper - log_lower)) : NaNs produced
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__15__'
+[?2004l__CMDEND__15__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# cat > /tmp/write_ars2.py << 'PYEOF'
+[?2004l[?2004h> code = r'''# =============================================================================
+[?2004l[?2004h> # Adaptive Rejection Sampling (ARS)
+[?2004l[?2004h> # Based on Gilks, W. R., & Wild, P. (1992)
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate log-density
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density <- function(x, g) {
+[?2004l[?2004h>   vals <- g(x)
+[?2004l[?2004h>   if (any(is.na(vals))) {
+[?2004l[?2004h>     stop("Density function returned NA values.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (any(vals < 0, na.rm = TRUE)) {
+[?2004l[?2004h>     stop("Density function returned negative values. Density must be non-negative.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   result <- ifelse(vals > 0, log(vals), -Inf)
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute derivative of log-density numerically
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   return((h_plus - h_minus) / (2 * eps))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Check log-concavity at abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> check_log_concavity <- function(x_sorted, h_vals, h_deriv_vals) {
+[?2004l[?2004h>   n <- length(x_sorted)
+[?2004l[?2004h>   if (n < 2) return(TRUE)
+[?2004l[?2004h>   # Check that derivatives are non-increasing
+[?2004l[?2004h>   for (i in 2:n) {
+[?2004l[?2004h>     if (!is.finite(h_deriv_vals[i]) || !is.finite(h_deriv_vals[i-1])) next
+[?2004l[?2004h>     if (h_deriv_vals[i] > h_deriv_vals[i - 1] + 1e-6) {
+[?2004l[?2004h>       return(FALSE)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   # Check second divided differences
+[?2004l[?2004h>   if (n >= 3) {
+[?2004l[?2004h>     for (i in 2:(n - 1)) {
+[?2004l[?2004h>       if (!is.finite(h_vals[i-1]) || !is.finite(h_vals[i]) || !is.finite(h_vals[i+1])) next
+[?2004l[?2004h>       dd <- ((h_vals[i + 1] - h_vals[i]) / (x_sorted[i + 1] - x_sorted[i]) -
+[?2004l[?2004h>              (h_vals[i] - h_vals[i - 1]) / (x_sorted[i] - x_sorted[i - 1])) /
+[?2004l[?2004h>             (x_sorted[i + 1] - x_sorted[i - 1])
+[?2004l[?2004h>       if (dd > 1e-6) {
+[?2004l[?2004h>         return(FALSE)
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute upper hull intersections
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   z <- numeric(k - 1)
+[?2004l[?2004h>   for (j in 1:(k - 1)) {
+[?2004l[?2004h>     denom <- hprime_k[j] - hprime_k[j + 1]
+[?2004l[?2004h>     if (abs(denom) < 1e-14) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       z[j] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hprime_k[j + 1] + x_k[j] * hprime_k[j]) / denom
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   z_full <- c(lb, z, ub)
+[?2004l[?2004h>   return(list(z = z, z_full = z_full))
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate upper hull u_k(x) at point x
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- numeric(n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     j <- findInterval(x[i], z_full)
+[?2004l[?2004h>     j <- max(1, min(j, k))
+[?2004l[?2004h>     result[i] <- h_k[j] + (x[i] - x_k[j]) * hprime_k[j]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Evaluate lower hull l_k(x) at point x
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> eval_lower_hull <- function(x, x_k, h_k) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- rep(-Inf, n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     if (x[i] >= x_k[1] && x[i] <= x_k[k]) {
+[?2004l[?2004h>       j <- findInterval(x[i], x_k)
+[?2004l[?2004h>       j <- max(1, min(j, k - 1))
+[?2004l[?2004h>       result[i] <- ((x_k[j + 1] - x[i]) * h_k[j] + (x[i] - x_k[j]) * h_k[j + 1]) /
+[?2004l[?2004h>                    (x_k[j + 1] - x_k[j])
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Compute log of integral of exp(intercept + slope*x) from a to b
+[?2004l[?2004h> # Handles infinite bounds correctly
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> log_integral_exp_linear <- function(intercept, slope, a, b) {
+[?2004l[?2004h>   if (abs(slope) < 1e-10) {
+[?2004l[?2004h>     # Flat: integral = exp(intercept) * (b - a)
+[?2004l[?2004h>     if (!is.finite(a) || !is.finite(b)) return(-Inf)  # shouldn't happen for flat
+[?2004l[?2004h>     return(intercept + log(b - a))
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   # integral of exp(intercept + slope*x) dx from a to b
+[?2004l[?2004h>   # = (1/slope) * exp(intercept) * [exp(slope*b) - exp(slope*a)]
+[?2004l[?2004h>   # In log: log|1/slope| + intercept + log|exp(slope*b) - exp(slope*a)|
+[?2004l[?2004h>   
+[?2004l[?2004h>   if (is.finite(a) && is.finite(b)) {
+[?2004l[?2004h>     # Both finite
+[?2004l[?2004h>     sa <- slope * a
+[?2004l[?2004h>     sb <- slope * b
+[?2004l[?2004h>     if (slope > 0) {
+[?2004l[?2004h>       # exp(sb) > exp(sa), factor out exp(sb)
+[?2004l[?2004h>       log_diff <- sb + log1p(-exp(sa - sb))
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # exp(sa) > exp(sb), factor out exp(sa)
+[?2004l[?2004h>       log_diff <- sa + log1p(-exp(sb - sa))
+[?2004l[?2004h>     }
+[?2004l[?2004h>     return(intercept + log_diff - log(abs(slope)))
+[?2004l[?2004h>   } else if (!is.finite(a) && is.finite(b)) {
+[?2004l[?2004h>     # a = -Inf, need slope > 0
+[?2004l[?2004h>     if (slope <= 0) return(-Inf)
+[?2004l[?2004h>     # integral = exp(intercept + slope*b) / slope
+[?2004l[?2004h>     return(intercept + slope * b - log(slope))
+[?2004l[?2004h>   } else if (is.finite(a) && !is.finite(b)) {
+[?2004l[?2004h>     # b = Inf, need slope < 0
+[?2004l[?2004h>     if (slope >= 0) return(-Inf)
+[?2004l[?2004h>     # integral = -exp(intercept + slope*a) / slope = exp(intercept + slope*a) / |slope|
+[?2004l[?2004h>     return(intercept + slope * a - log(-slope))
+[?2004l[?2004h>   } else {
+[?2004l[?2004h>     return(-Inf)  # both infinite, shouldn't happen
+[?2004l[?2004h>   }
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Sample from the piecewise exponential upper hull envelope
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> sample_upper_hull <- function(n_samples, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   log_areas <- numeric(k)
+[?2004l[?2004h>   for (j in 1:k) {
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     intercept <- h_k[j] - x_k[j] * slope
+[?2004l[?2004h>     log_areas[j] <- log_integral_exp_linear(intercept, slope, a, b)
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   # Remove any -Inf or NaN segments
+[?2004l[?2004h>   valid_segs <- is.finite(log_areas)
+[?2004l[?2004h>   if (!any(valid_segs)) {
+[?2004l[?2004h>     stop("Cannot compute valid envelope areas. Check bounds and initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   
+[?2004l[?2004h>   max_log_area <- max(log_areas[valid_segs])
+[?2004l[?2004h>   areas <- exp(log_areas - max_log_area)
+[?2004l[?2004h>   areas[!valid_segs] <- 0
+[?2004l[?2004h>   probs <- areas / sum(areas)
+[?2004l[?2004h> 
+[?2004l[?2004h>   segments <- sample(1:k, n_samples, replace = TRUE, prob = probs)
+[?2004l[?2004h> 
+[?2004l[?2004h>   samples <- numeric(n_samples)
+[?2004l[?2004h>   for (i in 1:n_samples) {
+[?2004l[?2004h>     j <- segments[i]
+[?2004l[?2004h>     a <- z_full[j]
+[?2004l[?2004h>     b <- z_full[j + 1]
+[?2004l[?2004h>     slope <- hprime_k[j]
+[?2004l[?2004h>     u_val <- runif(1)
+[?2004l[?2004h> 
+[?2004l[?2004h>     if (abs(slope) < 1e-10) {
+[?2004l[?2004h>       samples[i] <- a + u_val * (b - a)
+[?2004l[?2004h>     } else if (!is.finite(a)) {
+[?2004l[?2004h>       # a = -Inf, slope > 0
+[?2004l[?2004h>       # CDF: F(x) = exp(slope*(x-b)) for x <= b
+[?2004l[?2004h>       # Inverse: x = b + log(u)/slope
+[?2004l[?2004h>       samples[i] <- b + log(u_val) / slope
+[?2004l[?2004h>     } else if (!is.finite(b)) {
+[?2004l[?2004h>       # b = Inf, slope < 0
+[?2004l[?2004h>       # CDF: F(x) = 1 - exp(slope*(x-a)) for x >= a
+[?2004l[?2004h>       # Inverse: x = a - log(1-u)/slope = a + log(1-u)/slope  (slope < 0)
+[?2004l[?2004h>       samples[i] <- a + log(1 - u_val) / slope
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # Both finite
+[?2004l[?2004h>       if (slope > 0) {
+[?2004l[?2004h>         samples[i] <- a + (1 / slope) * log(1 + u_val * (exp(slope * (b - a)) - 1))
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         samples[i] <- b + (1 / slope) * log(1 + u_val * (exp(slope * (a - b)) - 1))
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Validate inputs
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> validate_inputs <- function(n, g, lb, ub, init_points) {
+[?2004l[?2004h>   if (!is.numeric(n) || length(n) != 1 || n != floor(n) || n <= 0) {
+[?2004l[?2004h>     stop("'n' must be a positive integer.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.function(g)) {
+[?2004l[?2004h>     stop("'g' must be a function that computes the (possibly unnormalized) density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.numeric(lb) || !is.numeric(ub) || length(lb) != 1 || length(ub) != 1) {
+[?2004l[?2004h>     stop("'lb' and 'ub' must be single numeric values.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (lb >= ub) {
+[?2004l[?2004h>     stop("Lower bound must be strictly less than upper bound.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     if (!is.numeric(init_points) || length(init_points) < 2) {
+[?2004l[?2004h>       stop("'init_points' must be a numeric vector of length >= 2.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(init_points <= lb) || any(init_points >= ub)) {
+[?2004l[?2004h>       stop("All initial points must be strictly within (lb, ub).")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   test_x <- if (!is.null(init_points)) init_points[1] else {
+[?2004l[?2004h>     if (is.finite(lb) && is.finite(ub)) (lb + ub) / 2
+[?2004l[?2004h>     else if (is.finite(lb)) lb + 1
+[?2004l[?2004h>     else if (is.finite(ub)) ub - 1
+[?2004l[?2004h>     else 0
+[?2004l[?2004h>   }
+[?2004l[?2004h>   tryCatch({
+[?2004l[?2004h>     val <- g(test_x)
+[?2004l[?2004h>     if (!is.numeric(val) || any(is.na(val))) {
+[?2004l[?2004h>       stop("Density function returned non-numeric or NA values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>     if (any(val < 0)) {
+[?2004l[?2004h>       stop("Density function must return non-negative values.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }, error = function(e) {
+[?2004l[?2004h>     stop(paste("Error evaluating density function:", e$message))
+[?2004l[?2004h>   })
+[?2004l[?2004h>   return(TRUE)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Utility: Initialize abscissae
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> initialize_abscissae <- function(g, lb, ub, init_points = NULL) {
+[?2004l[?2004h>   if (!is.null(init_points)) {
+[?2004l[?2004h>     x_k <- sort(init_points)
+[?2004l[?2004h>   } else {
+[?2004l[?2004h>     if (is.finite(lb) && is.finite(ub)) {
+[?2004l[?2004h>       x_k <- lb + (1:4) * (ub - lb) / 5
+[?2004l[?2004h>     } else if (is.finite(lb)) {
+[?2004l[?2004h>       x_k <- lb + c(0.5, 1.0, 2.0, 4.0)
+[?2004l[?2004h>     } else if (is.finite(ub)) {
+[?2004l[?2004h>       x_k <- ub - c(4.0, 2.0, 1.0, 0.5)
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       x_k <- c(-2, -0.5, 0.5, 2)
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   h_vals <- eval_log_density(x_k, g)
+[?2004l[?2004h>   if (all(h_vals == -Inf)) {
+[?2004l[?2004h>     stop("Density is zero at all initial abscissae. Provide better initial points.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   valid <- h_vals > -Inf
+[?2004l[?2004h>   if (sum(valid) < 2) {
+[?2004l[?2004h>     stop("Need at least 2 initial points with positive density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h>   x_k <- x_k[valid]
+[?2004l[?2004h>   return(x_k)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> # Main ARS function
+[?2004l[?2004h> # -----------------------------------------------------------------------------
+[?2004l[?2004h> ars <- function(n, g, lb = -Inf, ub = Inf, init_points = NULL) {
+[?2004l[?2004h>   validate_inputs(n, g, lb, ub, init_points)
+[?2004l[?2004h>   x_k <- initialize_abscissae(g, lb, ub, init_points)
+[?2004l[?2004h>   h_k <- eval_log_density(x_k, g)
+[?2004l[?2004h>   hprime_k <- eval_log_density_deriv(x_k, g)
+[?2004l[?2004h> 
+[?2004l[?2004h>   if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>     stop("The density does not appear to be log-concave. ARS requires a log-concave density.")
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   # For unbounded domains, verify derivative conditions at boundaries
+[?2004l[?2004h>   if (!is.finite(lb)) {
+[?2004l[?2004h>     if (hprime_k[1] <= 0) {
+[?2004l[?2004h>       stop("For unbounded lower domain, the derivative at the leftmost abscissa must be positive.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   if (!is.finite(ub)) {
+[?2004l[?2004h>     if (hprime_k[length(hprime_k)] >= 0) {
+[?2004l[?2004h>       stop("For unbounded upper domain, the derivative at the rightmost abscissa must be negative.")
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   samples <- numeric(n)
+[?2004l[?2004h>   n_sampled <- 0
+[?2004l[?2004h>   max_iter <- n * 100
+[?2004l[?2004h>   iter <- 0
+[?2004l[?2004h> 
+[?2004l[?2004h>   while (n_sampled < n && iter < max_iter) {
+[?2004l[?2004h>     iter <- iter + 1
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, lb, ub)
+[?2004l[?2004h>     z_full <- hull$z_full
+[?2004l[?2004h>     x_star <- sample_upper_hull(1, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     
+[?2004l[?2004h>     # Safety: skip if x_star is outside bounds or not finite
+[?2004l[?2004h>     if (!is.finite(x_star) || x_star <= lb || x_star >= ub) next
+[?2004l[?2004h>     
+[?2004l[?2004h>     u_val <- eval_upper_hull(x_star, x_k, h_k, hprime_k, z_full)
+[?2004l[?2004h>     l_val <- eval_lower_hull(x_star, x_k, h_k)
+[?2004l[?2004h>     w <- runif(1)
+[?2004l[?2004h> 
+[?2004l[?2004h>     if (is.finite(l_val) && is.finite(u_val) && w <= exp(l_val - u_val)) {
+[?2004l[?2004h>       # Accept via squeezing test
+[?2004l[?2004h>       n_sampled <- n_sampled + 1
+[?2004l[?2004h>       samples[n_sampled] <- x_star
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       h_star <- eval_log_density(x_star, g)
+[?2004l[?2004h>       hprime_star <- eval_log_density_deriv(x_star, g)
+[?2004l[?2004h> 
+[?2004l[?2004h>       if (is.finite(h_star) && is.finite(u_val) && w <= exp(h_star - u_val)) {
+[?2004l[?2004h>         n_sampled <- n_sampled + 1
+[?2004l[?2004h>         samples[n_sampled] <- x_star
+[?2004l[?2004h>       }
+[?2004l[?2004h> 
+[?2004l[?2004h>       # Update abscissae
+[?2004l[?2004h>       if (is.finite(h_star)) {
+[?2004l[?2004h>         insert_pos <- findInterval(x_star, x_k) + 1
+[?2004l[?2004h>         x_k <- append(x_k, x_star, after = insert_pos - 1)
+[?2004l[?2004h>         h_k <- append(h_k, h_star, after = insert_pos - 1)
+[?2004l[?2004h>         hprime_k <- append(hprime_k, hprime_star, after = insert_pos - 1)
+[?2004l[?2004h> 
+[?2004l[?2004h>         if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>           stop("Log-concavity violation detected after adding new point. The density is not log-concave.")
+[?2004l[?2004h>         }
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   if (n_sampled < n) {
+[?2004l[?2004h>     warning(paste("Only", n_sampled, "samples generated out of", n, "requested."))
+[?2004l[?2004h>     samples <- samples[1:n_sampled]
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   return(samples)
+[?2004l[?2004h> }
+[?2004l[?2004h> 
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> # Test function
+[?2004l[?2004h> # =============================================================================
+[?2004l[?2004h> test <- function() {
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h>   cat("  Adaptive Rejection Sampling (ARS) - Test Suite\n")
+[?2004l[?2004h>   cat("=============================================================\n\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   pass_count <- 0
+[?2004l[?2004h>   fail_count <- 0
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test <- function(name, expr) {
+[?2004l[?2004h>     result <- tryCatch(expr, error = function(e) {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL (Error: ", e$message, ")\n"))
+[?2004l[?2004h>       return("FAIL")
+[?2004l[?2004h>     })
+[?2004l[?2004h>     if (is.character(result) && result == "FAIL") {
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     } else if (isTRUE(result)) {
+[?2004l[?2004h>       cat(paste0(name, ": PASS\n"))
+[?2004l[?2004h>       pass_count <<- pass_count + 1
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       cat(paste0(name, ": FAIL\n"))
+[?2004l[?2004h>       fail_count <<- fail_count + 1
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Input Validation Tests ----
+[?2004l[?2004h>   cat("--- Input Validation Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_negative_n", {
+[?2004l[?2004h>     tryCatch({ ars(-5, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_zero_n", {
+[?2004l[?2004h>     tryCatch({ ars(0, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_integer_n", {
+[?2004l[?2004h>     tryCatch({ ars(3.5, dnorm); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_invalid_bounds", {
+[?2004l[?2004h>     tryCatch({ ars(100, dnorm, lb = 5, ub = 2); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_function_density", {
+[?2004l[?2004h>     tryCatch({ ars(100, "not_a_function"); FALSE }, error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_init_points_outside_bounds", {
+[?2004l[?2004h>     tryCatch({ ars(100, dnorm, lb = -5, ub = 5, init_points = c(-10, 0, 10)); FALSE },
+[?2004l[?2004h>              error = function(e) TRUE)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Log-Concavity Check Tests ----
+[?2004l[?2004h>   cat("\n--- Log-Concavity Check Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_log_concavity_normal", {
+[?2004l[?2004h>     samples <- ars(100, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     length(samples) == 100
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_non_log_concave_cauchy", {
+[?2004l[?2004h>     # Cauchy distribution is NOT log-concave
+[?2004l[?2004h>     # Use wider initial points to ensure detection
+[?2004l[?2004h>     tryCatch({
+[?2004l[?2004h>       samples <- ars(1000, dcauchy, init_points = c(-5, -1, 1, 5))
+[?2004l[?2004h>       FALSE
+[?2004l[?2004h>     }, error = function(e) {
+[?2004l[?2004h>       grepl("log-concav|Log-concav", e$message)
+[?2004l[?2004h>     })
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Module Tests ----
+[?2004l[?2004h>   cat("\n--- Module/Utility Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_eval_log_density", {
+[?2004l[?2004h>     val <- eval_log_density(0, dnorm)
+[?2004l[?2004h>     abs(val - log(dnorm(0))) < 1e-6
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_eval_log_density_vectorized", {
+[?2004l[?2004h>     vals <- eval_log_density(c(-1, 0, 1), dnorm)
+[?2004l[?2004h>     expected <- log(dnorm(c(-1, 0, 1)))
+[?2004l[?2004h>     all(abs(vals - expected) < 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_derivative_at_mode", {
+[?2004l[?2004h>     d <- eval_log_density_deriv(0, dnorm)
+[?2004l[?2004h>     abs(d) < 1e-4
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_derivative_sign", {
+[?2004l[?2004h>     d_neg <- eval_log_density_deriv(-2, dnorm)
+[?2004l[?2004h>     d_pos <- eval_log_density_deriv(2, dnorm)
+[?2004l[?2004h>     d_neg > 0 && d_pos < 0
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_upper_hull_above_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     hull <- compute_upper_hull(x_k, h_k, hprime_k, -Inf, Inf)
+[?2004l[?2004h>     test_pts <- seq(-3, 3, by = 0.5)
+[?2004l[?2004h>     u_vals <- eval_upper_hull(test_pts, x_k, h_k, hprime_k, hull$z_full)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(u_vals >= h_vals - 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_lower_hull_below_h", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     test_pts <- seq(-1.9, 1.9, by = 0.5)
+[?2004l[?2004h>     l_vals <- eval_lower_hull(test_pts, x_k, h_k)
+[?2004l[?2004h>     h_vals <- eval_log_density(test_pts, dnorm)
+[?2004l[?2004h>     all(l_vals <= h_vals + 1e-6)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_check_log_concavity_true", {
+[?2004l[?2004h>     x_k <- c(-2, -1, 0, 1, 2)
+[?2004l[?2004h>     h_k <- eval_log_density(x_k, dnorm)
+[?2004l[?2004h>     hprime_k <- eval_log_density_deriv(x_k, dnorm)
+[?2004l[?2004h>     check_log_concavity(x_k, h_k, hprime_k)
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_validate_inputs_valid", {
+[?2004l[?2004h>     validate_inputs(100, dnorm, -Inf, Inf, c(-1, 1))
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Distribution Sampling Tests ----
+[?2004l[?2004h>   cat("\n--- Distribution Sampling Tests ---\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   set.seed(42)
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_standard_normal_mean", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal: sample mean = %.4f, sample sd = %.4f (expected: 0, 1)\n", m, s))
+[?2004l[?2004h>     write(samples, file = "/app/normal_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m) < 0.1 && abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_standard_normal_sd", {
+[?2004l[?2004h>     samples <- ars(5000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Standard Normal SD: sample sd = %.4f (expected: 1)\n", s))
+[?2004l[?2004h>     abs(s - 1) < 0.15
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_shifted_normal", {
+[?2004l[?2004h>     g <- function(x) dnorm(x, mean = 3, sd = 2)
+[?2004l[?2004h>     samples <- ars(5000, g, init_points = c(0, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Normal(3,2): sample mean = %.4f, sample sd = %.4f (expected: 3, 2)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.2 && abs(s - 2) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 1, 2, 4))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Exp(1): sample mean = %.4f, sample sd = %.4f (expected: 1, 1)\n", m, s))
+[?2004l[?2004h>     write(samples, file = "/app/exponential_samples.txt", ncolumns = 1)
+[?2004l[?2004h>     abs(m - 1) < 0.15 && abs(s - 1) < 0.2
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_gamma", {
+[?2004l[?2004h>     g <- function(x) dgamma(x, shape = 3, rate = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = Inf, init_points = c(0.5, 2, 4, 6))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Gamma(3,1): sample mean = %.4f, sample sd = %.4f (expected: 3, 1.732)\n", m, s))
+[?2004l[?2004h>     abs(m - 3) < 0.3 && abs(s - sqrt(3)) < 0.3
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_beta", {
+[?2004l[?2004h>     g <- function(x) dbeta(x, shape1 = 2, shape2 = 5)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.1, 0.25, 0.5, 0.75))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     expected_mean <- 2 / (2 + 5)
+[?2004l[?2004h>     expected_sd <- sqrt(2 * 5 / ((2 + 5)^2 * (2 + 5 + 1)))
+[?2004l[?2004h>     cat(sprintf("  Beta(2,5): sample mean = %.4f, sample sd = %.4f (expected: %.4f, %.4f)\n",
+[?2004l[?2004h>                 m, s, expected_mean, expected_sd))
+[?2004l[?2004h>     abs(m - expected_mean) < 0.05 && abs(s - expected_sd) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_uniform", {
+[?2004l[?2004h>     g <- function(x) dunif(x, min = 0, max = 1)
+[?2004l[?2004h>     samples <- ars(5000, g, lb = 0, ub = 1, init_points = c(0.2, 0.4, 0.6, 0.8))
+[?2004l[?2004h>     m <- mean(samples)
+[?2004l[?2004h>     s <- sd(samples)
+[?2004l[?2004h>     cat(sprintf("  Uniform(0,1): sample mean = %.4f, sample sd = %.4f (expected: 0.5, 0.2887)\n", m, s))
+[?2004l[?2004h>     abs(m - 0.5) < 0.1 && abs(s - 1/sqrt(12)) < 0.05
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_ks_normal", {
+[?2004l[?2004h>     samples <- ars(2000, dnorm, init_points = c(-2, -0.5, 0.5, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pnorm")
+[?2004l[?2004h>     cat(sprintf("  KS test for Normal: p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   run_test("test_ks_exponential", {
+[?2004l[?2004h>     g <- function(x) dexp(x, rate = 2)
+[?2004l[?2004h>     samples <- ars(2000, g, lb = 0, ub = Inf, init_points = c(0.1, 0.5, 1, 2))
+[?2004l[?2004h>     ks <- ks.test(samples, "pexp", rate = 2)
+[?2004l[?2004h>     cat(sprintf("  KS test for Exp(2): p-value = %.4f\n", ks$p.value))
+[?2004l[?2004h>     ks$p.value > 0.01
+[?2004l[?2004h>   })
+[?2004l[?2004h> 
+[?2004l[?2004h>   # ---- Summary ----
+[?2004l[?2004h>   cat("\n=============================================================\n")
+[?2004l[?2004h>   cat(sprintf("  Results: %d PASSED, %d FAILED out of %d tests\n",
+[?2004l[?2004h>               pass_count, fail_count, pass_count + fail_count))
+[?2004l[?2004h>   cat("=============================================================\n")
+[?2004l[?2004h> 
+[?2004l[?2004h>   invisible(list(pass = pass_count, fail = fail_count))
+[?2004l[?2004h> }
+[?2004l[?2004h> '''
+[?2004l[?2004h> 
+[?2004l[?2004h> with open('/app/ars.R', 'w') as f:
+[?2004l[?2004h>     f.write(code.lstrip())
+[?2004l[?2004h> 
+[?2004l[?2004h> print(f"Written {len(code.strip().splitlines())} lines to /app/ars.R")
+[?2004l[?2004h> PYEOF
+[?2004l[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__16__'
+[?2004l__CMDEND__16__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# python3 /tmp/write_ars2.py
+[?2004lWritten 583 lines to /app/ars.R
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__17__'
+[?2004l__CMDEND__17__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output2.log &
+[?2004l[1] 8805
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# =============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+echo '__CMDEND__18__'
+[?2004l__CMDEND__18__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# test_log_concavity_normal: PASS
+test_non_log_concave_cauchy: PASS
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+  Standard Normal: sample mean = -0.0058, sample sd = 1.0163 (expected: 0, 1)
+test_standard_normal_mean: PASS
+  Standard Normal SD: sample sd = 1.0004 (expected: 1)
+test_standard_normal_sd: PASS
+  Normal(3,2): sample mean = 3.0258, sample sd = 2.0245 (expected: 3, 2)
+test_shifted_normal: PASS
+test_exponential: FAIL (Error: 'vec' must be sorted non-decreasingly and not contain NAs)
+  Gamma(3,1): sample mean = 2.9778, sample sd = 1.7181 (expected: 3, 1.732)
+test_gamma: PASS
+  Beta(2,5): sample mean = 0.2889, sample sd = 0.1606 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.5008, sample sd = 0.2863 (expected: 0.5, 0.2887)
+test_uniform: PASS
+  KS test for Normal: p-value = 0.6069
+test_ks_normal: PASS
+  KS test for Exp(2): p-value = 0.9920
+test_ks_exponential: PASS
+
+=============================================================
+  Results: 24 PASSED, 1 FAILED out of 25 tests
+=============================================================
+Warning message:
+In log1p(-exp(sb - sa)) : NaNs produced
+echo '__CMDEND__19__'
+[?2004l__CMDEND__19__
+[1]+  Done                    Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output2.log
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# python3 << 'PYEOF'
+[?2004l[?2004h> # Read current file
+[?2004l[?2004h> with open('/app/ars.R', 'r') as f:
+[?2004l[?2004h>     content = f.read()
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix 1: In eval_log_density_deriv, handle boundary cases where density is 0
+[?2004l[?2004h> old = '''eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   return((h_plus - h_minus) / (2 * eps))
+[?2004l[?2004h> }'''
+[?2004l[?2004h> new = '''eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+[?2004l[?2004h>   h_plus <- eval_log_density(x + eps, g)
+[?2004l[?2004h>   h_minus <- eval_log_density(x - eps, g)
+[?2004l[?2004h>   result <- (h_plus - h_minus) / (2 * eps)
+[?2004l[?2004h>   # Handle cases where one side is -Inf (boundary)
+[?2004l[?2004h>   bad <- !is.finite(result)
+[?2004l[?2004h>   if (any(bad)) {
+[?2004l[?2004h>     # Use one-sided derivative
+[?2004l[?2004h>     for (idx in which(bad)) {
+[?2004l[?2004h>       if (is.finite(h_plus[idx]) && !is.finite(h_minus[idx])) {
+[?2004l[?2004h>         h_center <- eval_log_density(x[idx], g)
+[?2004l[?2004h>         result[idx] <- (h_plus[idx] - h_center) / eps
+[?2004l[?2004h>       } else if (!is.finite(h_plus[idx]) && is.finite(h_minus[idx])) {
+[?2004l[?2004h>         h_center <- eval_log_density(x[idx], g)
+[?2004l[?2004h>         result[idx] <- (h_center - h_minus[idx]) / eps
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         result[idx] <- 0
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix 2: In the main loop, add NaN protection for hprime_star
+[?2004l[?2004h> old = '''      # Update abscissae
+[?2004l[?2004h>       if (is.finite(h_star)) {'''
+[?2004l[?2004h> new = '''      # Update abscissae (only if values are valid)
+[?2004l[?2004h>       if (is.finite(h_star) && is.finite(hprime_star)) {'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix 3: Also protect against NaN in x_k after insert
+[?2004l[?2004h> old = '''        if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>           stop("Log-concavity violation detected after adding new point. The density is not log-concave.")'''
+[?2004l[?2004h> new = '''        if (any(!is.finite(h_k)) || any(!is.finite(hprime_k))) {
+[?2004l[?2004h>           # Skip concavity check if we have non-finite values
+[?2004l[?2004h>         } else if (!check_log_concavity(x_k, h_k, hprime_k)) {
+[?2004l[?2004h>           stop("Log-concavity violation detected after adding new point. The density is not log-concave.")'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> with open('/app/ars.R', 'w') as f:
+[?2004l[?2004h>     f.write(content)
+[?2004l[?2004h> 
+[?2004l[?2004h> print('Fixes applied')
+[?2004l[?2004h> PYEOF
+[?2004lFixes applied
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__20__'
+[?2004l__CMDEND__20__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output3.log &
+[?2004l[1] 9001
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# =============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+echo '__CMDEND__21__'
+[?2004l__CMDEND__21__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# test_log_concavity_normal: PASS
+test_non_log_concave_cauchy: PASS
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+  Standard Normal: sample mean = -0.0058, sample sd = 1.0163 (expected: 0, 1)
+test_standard_normal_mean: PASS
+  Standard Normal SD: sample sd = 1.0004 (expected: 1)
+test_standard_normal_sd: PASS
+  Normal(3,2): sample mean = 3.0258, sample sd = 2.0245 (expected: 3, 2)
+test_shifted_normal: PASS
+test_exponential: FAIL (Error: 'vec' must be sorted non-decreasingly and not contain NAs)
+  Gamma(3,1): sample mean = 2.9778, sample sd = 1.7181 (expected: 3, 1.732)
+test_gamma: PASS
+  Beta(2,5): sample mean = 0.2889, sample sd = 0.1606 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.5008, sample sd = 0.2863 (expected: 0.5, 0.2887)
+test_uniform: PASS
+  KS test for Normal: p-value = 0.6069
+test_ks_normal: PASS
+  KS test for Exp(2): p-value = 0.9920
+test_ks_exponential: PASS
+
+=============================================================
+  Results: 24 PASSED, 1 FAILED out of 25 tests
+=============================================================
+Warning message:
+In log1p(-exp(sb - sa)) : NaNs produced
+echo '__CMDEND__22__'
+[?2004l__CMDEND__22__
+[1]+  Done                    Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output3.log
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e '
+[?2004l[?2004h> source("/app/ars.R")
+[?2004l[?2004h> set.seed(42)
+[?2004l[?2004h> tryCatch({
+[?2004l[?2004h>   g <- function(x) dexp(x, rate = 1)
+[?2004l[?2004h>   samples <- ars(100, g, lb = 0, ub = Inf, init_points = c(0.5, 1, 2, 4))
+[?2004l[?2004h>   cat("Success:", length(samples), "samples\n")
+[?2004l[?2004h>   cat("Mean:", mean(samples), "\n")
+[?2004l[?2004h> }, error = function(e) {
+[?2004l[?2004h>   cat("Error:", e$message, "\n")
+[?2004l[?2004h>   cat("Call:", deparse(e$call), "\n")
+[?2004l[?2004h> })
+[?2004l[?2004h> ' 2>&1
+[?2004lError: 'vec' must be sorted non-decreasingly and not contain NAs 
+Call: findInterval(x[i], z_full) 
+Warning message:
+In log1p(-exp(sb - sa)) : NaNs produced
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__23__'
+[?2004l__CMDEND__23__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# python3 << 'PYEOF'
+[?2004l[?2004h> with open('/app/ars.R', 'r') as f:
+[?2004l[?2004h>     content = f.read()
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix compute_upper_hull to handle NaN in z
+[?2004l[?2004h> old = '''compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   z <- numeric(k - 1)
+[?2004l[?2004h>   for (j in 1:(k - 1)) {
+[?2004l[?2004h>     denom <- hprime_k[j] - hprime_k[j + 1]
+[?2004l[?2004h>     if (abs(denom) < 1e-14) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       z[j] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hprime_k[j + 1] + x_k[j] * hprime_k[j]) / denom
+[?2004l[?2004h>     }
+[?2004l[?2004h>   }
+[?2004l[?2004h>   z_full <- c(lb, z, ub)
+[?2004l[?2004h>   return(list(z = z, z_full = z_full))
+[?2004l[?2004h> }'''
+[?2004l[?2004h> new = '''compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   z <- numeric(k - 1)
+[?2004l[?2004h>   for (j in 1:(k - 1)) {
+[?2004l[?2004h>     denom <- hprime_k[j] - hprime_k[j + 1]
+[?2004l[?2004h>     if (!is.finite(denom) || abs(denom) < 1e-14) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       z[j] <- (h_k[j + 1] - h_k[j] - x_k[j + 1] * hprime_k[j + 1] + x_k[j] * hprime_k[j]) / denom
+[?2004l[?2004h>     }
+[?2004l[?2004h>     # Ensure z[j] is between x_k[j] and x_k[j+1]
+[?2004l[?2004h>     if (!is.finite(z[j])) {
+[?2004l[?2004h>       z[j] <- (x_k[j] + x_k[j + 1]) / 2
+[?2004l[?2004h>     }
+[?2004l[?2004h>     z[j] <- max(x_k[j], min(z[j], x_k[j + 1]))
+[?2004l[?2004h>   }
+[?2004l[?2004h>   z_full <- c(lb, z, ub)
+[?2004l[?2004h>   return(list(z = z, z_full = z_full))
+[?2004l[?2004h> }'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix the main loop to be more robust - add NaN check on z_full before sampling
+[?2004l[?2004h> old = '''    hull <- compute_upper_hull(x_k, h_k, hprime_k, lb, ub)
+[?2004l[?2004h>     z_full <- hull$z_full
+[?2004l[?2004h>     x_star <- sample_upper_hull(1, x_k, h_k, hprime_k, z_full)'''
+[?2004l[?2004h> new = '''    hull <- compute_upper_hull(x_k, h_k, hprime_k, lb, ub)
+[?2004l[?2004h>     z_full <- hull$z_full
+[?2004l[?2004h>     # Safety check: z_full must not contain NAs (except bounds which can be Inf)
+[?2004l[?2004h>     if (any(is.na(z_full))) next
+[?2004l[?2004h>     x_star <- sample_upper_hull(1, x_k, h_k, hprime_k, z_full)'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix eval_upper_hull to handle NAs in z_full
+[?2004l[?2004h> old = '''eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- numeric(n)
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     j <- findInterval(x[i], z_full)
+[?2004l[?2004h>     j <- max(1, min(j, k))
+[?2004l[?2004h>     result[i] <- h_k[j] + (x[i] - x_k[j]) * hprime_k[j]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }'''
+[?2004l[?2004h> new = '''eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+[?2004l[?2004h>   k <- length(x_k)
+[?2004l[?2004h>   n <- length(x)
+[?2004l[?2004h>   result <- numeric(n)
+[?2004l[?2004h>   # Ensure z_full has no NAs for findInterval
+[?2004l[?2004h>   z_safe <- z_full
+[?2004l[?2004h>   z_safe[is.na(z_safe)] <- 0
+[?2004l[?2004h>   for (i in 1:n) {
+[?2004l[?2004h>     j <- findInterval(x[i], z_safe)
+[?2004l[?2004h>     j <- max(1, min(j, k))
+[?2004l[?2004h>     result[i] <- h_k[j] + (x[i] - x_k[j]) * hprime_k[j]
+[?2004l[?2004h>   }
+[?2004l[?2004h>   return(result)
+[?2004l[?2004h> }'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> # Fix log_integral_exp_linear to suppress warnings and handle edge cases
+[?2004l[?2004h> old = '''    if (slope > 0) {
+[?2004l[?2004h>       # exp(sb) > exp(sa), factor out exp(sb)
+[?2004l[?2004h>       log_diff <- sb + log1p(-exp(sa - sb))
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # exp(sa) > exp(sb), factor out exp(sa)
+[?2004l[?2004h>       log_diff <- sa + log1p(-exp(sb - sa))
+[?2004l[?2004h>     }'''
+[?2004l[?2004h> new = '''    if (slope > 0) {
+[?2004l[?2004h>       # exp(sb) > exp(sa), factor out exp(sb)
+[?2004l[?2004h>       diff_exp <- sa - sb
+[?2004l[?2004h>       if (diff_exp < -35) {
+[?2004l[?2004h>         log_diff <- sb  # log1p(-exp(very_negative)) ~ sb
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         log_diff <- sb + log1p(-exp(diff_exp))
+[?2004l[?2004h>       }
+[?2004l[?2004h>     } else {
+[?2004l[?2004h>       # exp(sa) > exp(sb), factor out exp(sa)
+[?2004l[?2004h>       diff_exp <- sb - sa
+[?2004l[?2004h>       if (diff_exp < -35) {
+[?2004l[?2004h>         log_diff <- sa  # log1p(-exp(very_negative)) ~ sa
+[?2004l[?2004h>       } else {
+[?2004l[?2004h>         log_diff <- sa + log1p(-exp(diff_exp))
+[?2004l[?2004h>       }
+[?2004l[?2004h>     }'''
+[?2004l[?2004h> content = content.replace(old, new)
+[?2004l[?2004h> 
+[?2004l[?2004h> with open('/app/ars.R', 'w') as f:
+[?2004l[?2004h>     f.write(content)
+[?2004l[?2004h> 
+[?2004l[?2004h> print('Fixes applied')
+[?2004l[?2004h> PYEOF
+[?2004lFixes applied
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__24__'
+[?2004l__CMDEND__24__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e '
+[?2004l[?2004h> source("/app/ars.R")
+[?2004l[?2004h> set.seed(42)
+[?2004l[?2004h> tryCatch({
+[?2004l[?2004h>   g <- function(x) dexp(x, rate = 1)
+[?2004l[?2004h>   samples <- ars(100, g, lb = 0, ub = Inf, init_points = c(0.5, 1, 2, 4))
+[?2004l[?2004h>   cat("Success:", length(samples), "samples\n")
+[?2004l[?2004h>   cat("Mean:", mean(samples), "\n")
+[?2004l[?2004h> }, error = function(e) {
+[?2004l[?2004h>   cat("Error:", e$message, "\n")
+[?2004l[?2004h> })
+[?2004l[?2004h> ' 2>&1
+[?2004lSuccess: 100 samples
+Mean: 1.110407 
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__25__'
+[?2004l__CMDEND__25__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output4.log &
+[?2004l[1] 9337
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# =============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+echo '__CMDEND__26__'
+[?2004l__CMDEND__26__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# test_log_concavity_normal: PASS
+test_non_log_concave_cauchy: PASS
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+  Standard Normal: sample mean = -0.0058, sample sd = 1.0163 (expected: 0, 1)
+test_standard_normal_mean: PASS
+  Standard Normal SD: sample sd = 1.0004 (expected: 1)
+test_standard_normal_sd: PASS
+  Normal(3,2): sample mean = 3.0258, sample sd = 2.0245 (expected: 3, 2)
+test_shifted_normal: PASS
+  Exp(1): sample mean = 1.0096, sample sd = 1.0387 (expected: 1, 1)
+test_exponential: PASS
+  Gamma(3,1): sample mean = 3.0302, sample sd = 1.7481 (expected: 3, 1.732)
+test_gamma: PASS
+  Beta(2,5): sample mean = 0.2878, sample sd = 0.1618 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.4973, sample sd = 0.2884 (expected: 0.5, 0.2887)
+test_uniform: PASS
+  KS test for Normal: p-value = 0.3030
+test_ks_normal: PASS
+  KS test for Exp(2): p-value = 0.9060
+test_ks_exponential: PASS
+
+=============================================================
+  Results: 25 PASSED, 0 FAILED out of 25 tests
+=============================================================
+echo '__CMDEND__27__'
+[?2004l__CMDEND__27__
+[1]+  Done                    Rscript -e 'source("/app/ars.R"); test()' 2>&1 | tee /tmp/test_output4.log
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# ls -la /app/
+[?2004ltotal 124
+drwxr-xr-x 1 root root    92 Apr  2 06:15 [0m[01;34m.[0m
+drwxr-xr-x 1 root root   132 Apr  2 06:09 [01;34m..[0m
+-rw-r--r-- 1 root root 21478 Apr  2 06:15 ars.R
+-rw-r--r-- 1 root root 48182 Apr  2 06:15 exponential_samples.txt
+-rw-r--r-- 1 root root 50742 Apr  2 06:15 normal_samples.txt
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# wc -l /app/ars.R /app/normal_samples.txt /app/exponential_samples.txt
+[?2004l   622 /app/ars.R
+  5000 /app/normal_samples.txt
+  5000 /app/exponential_samples.txt
+ 10622 total
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# head -5 /app/normal_samples.txt && echo '---' && head -5 /app/exponential_samples.txt
+[?2004l-1.282496
+1.763256
+1.028844
+0.5807268
+-1.932406
+---
+0.3268623
+0.4979517
+3.526078
+1.350216
+0.1589473
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# rm -f /tmp/write_ars.py /tmp/write_ars2.py /tmp/test_output.log /tmp/test_output2.log /tmp/test_output3.log /tmp/test_output4.log /tmp/r_install.log
+[?2004l[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '=== Files in /app ===' && ls -la /app/ && echo '=== Check ars function exists ===' && grep -c 'ars <- function' /app/ars.R && echo '=== Check test function exists ===' && grep -c 'test <- function' /app/ars.R && echo '=== Check modular functions ===' && grep 'function(' /app/ars.R | grep '<-' | head -20 && echo '=== Check input validation ===' && grep -c 'validate_inputs' /app/ars.R && echo '=== Check log-concavity ===' && grep -c 'check_log_concavity' /app/ars.R && echo '=== Check error handling ===' && grep -c 'stop(' /app/ars.R && echo '=== Sample files ===' && wc -l /app/normal_samples.txt /app/exponential_samples.txt
+[?2004l=== Files in /app ===
+total 124
+drwxr-xr-x 1 root root    92 Apr  2 06:15 [0m[01;34m.[0m
+drwxr-xr-x 1 root root   132 Apr  2 06:09 [01;34m..[0m
+-rw-r--r-- 1 root root 21478 Apr  2 06:15 ars.R
+-rw-r--r-- 1 root root 48182 Apr  2 06:15 exponential_samples.txt
+-rw-r--r-- 1 root root 50742 Apr  2 06:15 normal_samples.txt
+=== Check ars function exists ===
+1
+=== Check test function exists ===
+2
+=== Check modular functions ===
+eval_log_density <- function(x, g) {
+eval_log_density_deriv <- function(x, g, eps = 1e-8) {
+check_log_concavity <- function(x_sorted, h_vals, h_deriv_vals) {
+compute_upper_hull <- function(x_k, h_k, hprime_k, lb, ub) {
+eval_upper_hull <- function(x, x_k, h_k, hprime_k, z_full) {
+eval_lower_hull <- function(x, x_k, h_k) {
+log_integral_exp_linear <- function(intercept, slope, a, b) {
+sample_upper_hull <- function(n_samples, x_k, h_k, hprime_k, z_full) {
+validate_inputs <- function(n, g, lb, ub, init_points) {
+initialize_abscissae <- function(g, lb, ub, init_points = NULL) {
+ars <- function(n, g, lb = -Inf, ub = Inf, init_points = NULL) {
+test <- function() {
+  run_test <- function(name, expr) {
+    result <- tryCatch(expr, error = function(e) {
+    g <- function(x) dnorm(x, mean = 3, sd = 2)
+    g <- function(x) dexp(x, rate = 1)
+    g <- function(x) dgamma(x, shape = 3, rate = 1)
+    g <- function(x) dbeta(x, shape1 = 2, shape2 = 5)
+    g <- function(x) dunif(x, min = 0, max = 1)
+    g <- function(x) dexp(x, rate = 2)
+=== Check input validation ===
+4
+=== Check log-concavity ===
+5
+=== Check error handling ===
+18
+=== Sample files ===
+ 5000 /app/normal_samples.txt
+ 5000 /app/exponential_samples.txt
+10000 total
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__28__'
+[?2004l__CMDEND__28__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# Rscript -e 'source("/app/ars.R"); test()' 2>&1
+[?2004l=============================================================
+  Adaptive Rejection Sampling (ARS) - Test Suite
+=============================================================
+
+--- Input Validation Tests ---
+test_negative_n: PASS
+test_zero_n: PASS
+test_non_integer_n: PASS
+test_invalid_bounds: PASS
+test_non_function_density: PASS
+test_init_points_outside_bounds: PASS
+
+--- Log-Concavity Check Tests ---
+echo '__CMDEND__29__'
+test_log_concavity_normal: PASS
+test_non_log_concave_cauchy: PASS
+
+--- Module/Utility Tests ---
+test_eval_log_density: PASS
+test_eval_log_density_vectorized: PASS
+test_derivative_at_mode: PASS
+test_derivative_sign: PASS
+test_upper_hull_above_h: PASS
+test_lower_hull_below_h: PASS
+test_check_log_concavity_true: PASS
+test_validate_inputs_valid: PASS
+
+--- Distribution Sampling Tests ---
+  Standard Normal: sample mean = -0.0058, sample sd = 1.0163 (expected: 0, 1)
+test_standard_normal_mean: PASS
+  Standard Normal SD: sample sd = 1.0004 (expected: 1)
+test_standard_normal_sd: PASS
+  Normal(3,2): sample mean = 3.0258, sample sd = 2.0245 (expected: 3, 2)
+test_shifted_normal: PASS
+  Exp(1): sample mean = 1.0096, sample sd = 1.0387 (expected: 1, 1)
+test_exponential: PASS
+  Gamma(3,1): sample mean = 3.0302, sample sd = 1.7481 (expected: 3, 1.732)
+test_gamma: PASS
+  Beta(2,5): sample mean = 0.2878, sample sd = 0.1618 (expected: 0.2857, 0.1597)
+test_beta: PASS
+  Uniform(0,1): sample mean = 0.4973, sample sd = 0.2884 (expected: 0.5, 0.2887)
+test_uniform: PASS
+  KS test for Normal: p-value = 0.3030
+test_ks_normal: PASS
+  KS test for Exp(2): p-value = 0.9060
+test_ks_exponential: PASS
+
+=============================================================
+  Results: 25 PASSED, 0 FAILED out of 25 tests
+=============================================================
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__29__'
+[?2004l__CMDEND__29__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# echo '__CMDEND__30__'
+[?2004l__CMDEND__30__
+[?2004hroot@9a3d7c79-d080-4145-9b89-93fc57ef39a6:/app# 

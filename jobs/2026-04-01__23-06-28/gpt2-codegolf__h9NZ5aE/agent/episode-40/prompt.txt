@@ -1,0 +1,105 @@
+New Terminal Output:
+
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# cat > /tmp/dbg7.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<math.h>
+> #include<string.h>
+> #define V 50257
+> #define C 768
+> #define T 1024
+> #define L 12
+> #define S 64
+> float*W;
+> float x[C],xn[C],qkv[2304],at[T],hb[C],h2[3072],lo[V];
+> float*kvc;
+> // Per-layer pointers
+> float *cab[L],*caw[L],*cpb[L],*cpw[L],*l1b[L],*l1g[L],*l2b[L],*l2g[L];
+> float *fcb[L],*fcw[L],*fpb[L],*fpw[L];
+> float *lnfb,*lnfg,*wpe,*wte;
+>
+> void LN(float*o,float*i,float*g,float*b){float m=0,v=0,s;int j;
+> for(j=0;j<C;j++)m+=i[j];m/=C;
+> for(j=0;j<C;j++)v+=(i[j]-m)*(i[j]-m);s=1/sqrtf(v/C+1e-5f);
+> for(j=0;j<C;j++)o[j]=g[j]*(i[j]-m)*s+b[j];}
+>
+> void fwd(int tk,int ps){int i,j,t,l,h;
+> for(i=0;i<C;i++)x[i]=wte[tk*C+i]+wpe[ps*C+i];
+> for(l=0;l<L;l++){
+> // Pre-LN: ln_1 before attention
+> LN(xn,x,l1g[l],l1b[l]);
+> // QKV: xn @ caw[l] + cab[l], W is [C, 3C]
+> for(i=0;i<2304;i++){float s=0;for(j=0;j<C;j++)s+=xn[j]*caw[l][j*2304+i];qkv[i]=s+cab[l][i];}
+> // Store K,V in cache
+> for(i=0;i<C;i++){kvc[((long)l*T+ps)*2*C+i]=qkv[C+i];kvc[((long)l*T+ps)*2*C+C+i]=qkv[2*C+i];}
+> // Multi-head attention
+> memset(hb,0,C*4);
+> for(h=0;h<12;h++){float*q=qkv+h*S;
+> for(t=0;t<=ps;t++){float*k=kvc+((long)l*T+t)*2*C+h*S,s=0;for(i=0;i<S;i++)s+=q[i]*k[i];at[t]=s/8.0f;}
+> float mx=at[0];for(t=1;t<=ps;t++)if(at[t]>mx)mx=at[t];
+> float sm=0;for(t=0;t<=ps;t++){at[t]=expf(at[t]-mx);sm+=at[t];}
+> for(t=0;t<=ps;t++){at[t]/=sm;float*v=kvc+((long)l*T+t)*2*C+C+h*S;for(i=0;i<S;i++)hb[h*S+i]+=at[t]*v[i];}}
+> // Attn projection: hb @ cpw[l] + cpb[l], W is [C, C]
+> for(i=0;i<C;i++){float s=0;for(j=0;j<C;j++)s+=hb[j]*cpw[l][j*C+i];xn[i]=s+cpb[l][i];}
+> for(i=0;i<C;i++)x[i]+=xn[i];
+> // Pre-LN: ln_2 before MLP
+> LN(xn,x,l2g[l],l2b[l]);
+> // FC: xn @ fcw[l] + fcb[l], W is [C, 4C]
+> for(i=0;i<3072;i++){float s=0;for(j=0;j<C;j++)s+=xn[j]*fcw[l][j*3072+i];s+=fcb[l][i];
+> h2[i]=.5f*s*(1+tanhf(.7978845608f*(s+.044715f*s*s*s)));}
+> // FC proj: h2 @ fpw[l] + fpb[l], W is [4C, C]
+> for(i=0;i<C;i++){float s=0;for(j=0;j<3072;j++)s+=h2[j]*fpw[l][j*C+i];xn[i]=s+fpb[l][i];}
+> for(i=0;i<C;i++)x[i]+=xn[i];}
+> // Final LN
+> LN(x,x,lnfg,lnfb);
+> // Logits = x @ wte^T
+> for(i=0;i<V;i++){float s=0;for(j=0;j<C;j++)s+=x[j]*wte[i*C+j];lo[i]=s;}}
+>
+> int main(){
+> FILE*f=fopen("gpt2-124M.ckpt","rb");W=malloc(497759232);fread(W,1,497759232,f);fclose(f);
+> float*p=W;
+> for(int l=0;l<L;l++){
+> cab[l]=p;p+=2304;
+> caw[l]=p;p+=C*2304;
+> cpb[l]=p;p+=C;
+> cpw[l]=p;p+=C*C;
+> l1b[l]=p;p+=C;
+> l1g[l]=p;p+=C;
+> l2b[l]=p;p+=C;
+> l2g[l]=p;p+=C;
+> fcb[l]=p;p+=3072;
+> fcw[l]=p;p+=C*3072;
+> fpb[l]=p;p+=C;
+> fpw[l]=p;p+=3072*C;
+> }
+> lnfb=p;p+=C;
+> lnfg=p;p+=C;
+> wpe=p;p+=1024*C;
+> wte=p;p+=50257*C;
+> printf("Parsed %ld floats, expected %ld\n",p-W,(long)(497759232/4));
+>
+> kvc=calloc((long)L*T*2*C,4);
+> fwd(15496,0);
+> int mi=0;for(int j=1;j<V;j++)if(lo[j]>lo[mi])mi=j;
+> printf("Top token: %d logit: %f\n",mi,lo[mi]);
+> for(int k=0;k<10;k++){mi=0;for(int j=1;j<V;j++)if(lo[j]>lo[mi])mi=j;printf("  %d: %f\n",mi,lo[mi]);lo[mi]=-1e30;}
+> return 0;}
+> CEOF
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app# gcc -O3 -o /tmp/dbg7 /tmp/dbg7.c -lm && /tmp/dbg7
+/tmp/dbg7.c: In function ‘main’:
+/tmp/dbg7.c:56:57: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   56 | FILE*f=fopen("gpt2-124M.ckpt","rb");W=malloc(497759232);fread(W,1,497759232,f);fclose(f);
+      |                                                         ^~~~~~~~~~~~~~~~~~~~~~
+Parsed 124439808 floats, expected 124439808
+Top token: 11 logit: -7.966474
+  11: -7.966474
+  262: -8.124784
+  13: -8.236646
+  290: -8.350701
+  198: -8.385405
+  12: -8.568913
+  284: -8.617500
+  257: -8.619829
+  287: -8.767352
+  357: -8.918491
+root@f0f8faae-7104-4048-9be0-f5f61d5b5183:/app#

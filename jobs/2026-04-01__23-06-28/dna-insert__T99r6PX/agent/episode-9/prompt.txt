@@ -1,0 +1,194 @@
+New Terminal Output:
+
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# cat > /tmp/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> with open('sequences.fasta') as f:
+>     content = f.read()
+>
+ > seqs = {}
+> for block in content.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip()
+>     seqs[name] = seq
+>
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # Find the exact mutation
+> # Find first difference from start
+> start_diff = None
+> for i in range(min(len(inp), len(out))):
+>     if inp[i] != out[i]:
+>         start_diff = i
+>         break
+>
+> # Find first difference from end
+> end_offset = None
+> for i in range(1, min(len(inp), len(out)) + 1):
+>     if inp[-i] != out[-i]:
+>         end_offset = i
+>         break
+>
+> end_diff_inp = len(inp) - end_offset + 1  # exclusive end in input
+> end_diff_out = len(out) - end_offset + 1  # exclusive end in output
+>
+ > print(f"Mutation region in input: [{start_diff}:{end_diff_inp}] = '{inp[start_diff:end_diff_inp]}'")
+> print(f"Mutation region in output: [{start_diff}:{end_diff_out}] = '{out[start_diff:end_diff_out]}'")
+>
+> # The deleted part from input (what's replaced)
+> deleted = inp[start_diff:end_diff_inp]
+> # The inserted part in output (what replaces it)
+> inserted = out[start_diff:end_diff_out]
+>
+> print(f"Deleted from input: '{deleted}' (len={len(deleted)})")
+> print(f"Inserted in output: '{inserted}' (len={len(inserted)})")
+>
+> # For Q5 SDM:
+> # This is an insertion (deleted is empty or small, inserted is larger)
+> #
+> # If it's a pure insertion (deleted == ''):
+> #   Forward primer: 5'-[inserted]-[annealing downstream]-3'
+> #   Reverse primer: 5'-[RC of annealing upstream]-3'
+> #
+> # If it's a substitution (deleted != '' and inserted != ''):
+> #   Forward primer: 5'-[inserted]-[annealing downstream]-3'
+> #   Reverse primer: 5'-[RC of annealing upstream]-3'
+> #   Where downstream starts after the deleted region, upstream ends before it
+>
+> # Insertion point: between position (start_diff - 1) and end_diff_inp in input
+> # Forward primer anneals starting at end_diff_inp
+> # Reverse primer anneals ending at start_diff - 1 (i.e., RC of inp[start_diff-X:start_diff])
+>
+> # Since the plasmid is circular, handle wrap-around
+> def get_circular_subseq(seq, start, length):
+>     """Get subsequence from circular sequence."""
+>     result = []
+>     for i in range(length):
+>         result.append(seq[(start + i) % len(seq)])
+>     return ''.join(result)
+>
+> # Forward primer annealing region starts at end_diff_inp in input
+> # Reverse primer annealing region: we need RC of region upstream of start_diff
+>
+> print(f"\nForward annealing starts at input position {end_diff_inp}")
+> print(f"Reverse annealing ends at input position {start_diff - 1}")
+> print(f"Input context around insertion:")
+> print(f"  ...{inp[start_diff-10:start_diff]}|{deleted}|{inp[end_diff_inp:end_diff_inp+10]}...")
+>
+> # Try different annealing lengths and find best pair
+> MIN_LEN = 15
+> MAX_LEN = 36  # oligotm limit is 36
+> MIN_TM = 58.0
+> MAX_TM = 72.0
+> MAX_TM_DIFF = 5.0
+>
+> best_pair = None
+> best_score = float('inf')  # minimize Tm difference
+>
+> for fwd_len in range(MIN_LEN, MAX_LEN + 1):
+>     # Forward annealing: starts at end_diff_inp, goes fwd_len bases
+>     fwd_anneal = get_circular_subseq(inp, end_diff_inp, fwd_len)
+>     fwd_tm = get_tm(fwd_anneal)
+>
+>     if fwd_tm < MIN_TM or fwd_tm > MAX_TM:
+>         continue
+>
+>     for rev_len in range(MIN_LEN, MAX_LEN + 1):
+>         # Reverse annealing: the rev primer anneals to the opposite strand
+>         # upstream of the insertion. The annealing region on the template is
+>         # inp[start_diff - rev_len : start_diff]
+>         rev_start = (start_diff - rev_len) % len(inp)
+>         rev_anneal_template = get_circular_subseq(inp, rev_start, rev_len)
+>         rev_primer_anneal = reverse_complement(rev_anneal_template)
+>         rev_tm = get_tm(rev_primer_anneal)
+>
+>         if rev_tm < MIN_TM or rev_tm > MAX_TM:
+>             continue
+>
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > MAX_TM_DIFF:
+>             continue
+>
+>         # Valid pair found
+>         score = tm_diff
+>         if best_pair is None or score < best_score:
+>             best_score = score
+>             best_pair = {
+>                 'fwd_anneal': fwd_anneal,
+>                 'fwd_tm': fwd_tm,
+>                 'fwd_len': fwd_len,
+>                 'rev_anneal': rev_primer_anneal,
+>                 'rev_tm': rev_tm,
+>                 'rev_len': rev_len,
+>                 'tm_diff': tm_diff
+>             }
+>
+> if best_pair is None:
+>     print("ERROR: No valid primer pair found!")
+>     sys.exit(1)
+>
+> print(f"\nBest primer pair:")
+> print(f"  Forward annealing: {best_pair['fwd_anneal']} (Tm={best_pair['fwd_tm']:.2f}, len={best_pair['fwd_len']})")
+> print(f"  Reverse annealing: {best_pair['rev_anneal']} (Tm={best_pair['rev_tm']:.2f}, len={best_pair['rev_len']})")
+> print(f"  Tm difference: {best_pair['tm_diff']:.2f}")
+>
+> # Construct full primers
+> # Forward: 5'-[inserted]-[annealing]-3'
+> fwd_primer = inserted + best_pair['fwd_anneal']
+> # Reverse: just the annealing part (no tail needed for reverse)
+> rev_primer = best_pair['rev_anneal']
+>
+> print(f"\nFull forward primer: {fwd_primer}")
+> print(f"Full reverse primer: {rev_primer}")
+> print(f"Forward primer length: {len(fwd_primer)}")
+> print(f"Reverse primer length: {len(rev_primer)}")
+>
+> # Write to primers.fasta
+> with open('primers.fasta', 'w') as f:
+>     f.write(f">forward_primer\n{fwd_primer}\n>reverse_primer\n{rev_primer}\n")
+>
+> print("\nPrimers written to primers.fasta")
+> PYEOF
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# python3 /tmp/design_primers.py
+Mutation region in input: [215:213] = ''
+Mutation region in output: [215:252] = 'tagattagaagaagaattaagaagaagattaacagaa'
+Deleted from input: '' (len=0)
+Inserted in output: 'tagattagaagaagaattaagaagaagattaacagaa' (len=37)
+
+Forward annealing starts at input position 213
+Reverse annealing ends at input position 214
+Input context around insertion:
+  ...tacatatgag||agcaagggcg...
+
+Best primer pair:
+  Forward annealing: agcaagggcgaggag (Tm=59.54, len=15)
+  Reverse annealing: ctcatatgtatatctccttcttaaagttaaac (Tm=59.84, len=32)
+  Tm difference: 0.30
+
+Full forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag
+Full reverse primer: ctcatatgtatatctccttcttaaagttaaac
+Forward primer length: 52
+Reverse primer length: 32
+
+Primers written to primers.fasta
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app#

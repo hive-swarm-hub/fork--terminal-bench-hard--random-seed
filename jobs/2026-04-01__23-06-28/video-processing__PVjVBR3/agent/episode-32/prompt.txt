@@ -1,0 +1,126 @@
+New Terminal Output:
+
+root@dfdc7a27-066c-4d88-b000-73d95314057d:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> ret, bg_frame = cap.read()
+> bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+> bg_blur = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+> cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+> frame_idx = 0
+> all_data = []
+>
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>     gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>     diff = cv2.absdiff(gray_blur, bg_blur)
+>     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=4)
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+>     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     significant_contours = [c for c in contours if cv2.contourArea(c) > 500]
+>
+>     detected = False
+>     bottom_y = 0
+>     total_area = 0
+>
+>     if significant_contours:
+>         largest = max(significant_contours, key=cv2.contourArea)
+>         lx, ly, lw, lh = cv2.boundingRect(largest)
+>         lcx = lx + lw // 2
+>         combined = []
+>         for c in significant_contours:
+>             x, y, w, h = cv2.boundingRect(c)
+>             ccx = x + w // 2
+>             if abs(ccx - lcx) < max(lw, 200):
+>                 combined.append(c)
+>         if combined:
+>             all_points = np.vstack(combined)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             total_area = sum(cv2.contourArea(c) for c in combined)
+>             if h > 30 and total_area > 800:
+>                 bottom_y = y + h
+>                 detected = True
+>
+>     all_data.append({'frame': frame_idx, 'detected': detected, 'bottom_y': bottom_y, 'area': total_area})
+>     frame_idx += 1
+>
+> cap.release()
+>
+> runner_frames = [d for d in all_data if d['detected'] and d['area'] > 2000]
+> sequences = []
+> current_seq = [runner_frames[0]]
+> for i in range(1, len(runner_frames)):
+>     if runner_frames[i]['frame'] - runner_frames[i-1]['frame'] <= 3:
+>         current_seq.append(runner_frames[i])
+>     else:
+>         sequences.append(current_seq)
+>         current_seq = [runner_frames[i]]
+> sequences.append(current_seq)
+> main_seq = max(sequences, key=len)
+>
+> frames_arr = np.array([d['frame'] for d in main_seq])
+> bottom_y_arr = np.array([d['bottom_y'] for d in main_seq], dtype=float)
+>
+> # Smooth
+> smoothed = np.copy(bottom_y_arr)
+> for i in range(1, len(smoothed) - 1):
+>     smoothed[i] = (bottom_y_arr[i-1] + bottom_y_arr[i] + bottom_y_arr[i+1]) / 3.0
+>
+> ground_level = np.percentile(smoothed, 80)
+> min_bottom = np.min(smoothed)
+> jump_height = ground_level - min_bottom
+> airborne_threshold = ground_level - max(30, jump_height * 0.35)
+> near_ground = ground_level - 30
+>
+> print(f"Ground level: {ground_level:.1f}")
+> print(f"Min bottom_y: {min_bottom:.1f}")
+> print(f"Jump height: {jump_height:.1f}")
+> print(f"Airborne threshold: {airborne_threshold:.1f}")
+> print(f"Near ground: {near_ground:.1f}")
+> print()
+> print("Idx | Frame | Raw_Bot | Smooth_Bot | Airborne | Near_Ground")
+> for i, d in enumerate(main_seq):
+>     air = "*AIR*" if smoothed[i] < airborne_threshold else "     "
+>     ng = "GROUND" if smoothed[i] >= near_ground else "      "
+>     print(f"{i:3d} | {d['frame']:3d} | {d['bottom_y']:6.0f} | {smoothed[i]:9.1f} | {air} | {ng}")
+> PYEOF
+Ground level: 363.3
+Min bottom_y: 221.3
+Jump height: 142.0
+Airborne threshold: 313.6
+Near ground: 333.3
+
+Idx | Frame | Raw_Bot | Smooth_Bot | Airborne | Near_Ground
+  0 |  48 |    336 |     336.0 |       | GROUND
+  1 |  49 |    354 |     350.7 |       | GROUND
+  2 |  50 |    362 |     360.0 |       | GROUND
+  3 |  51 |    364 |     363.3 |       | GROUND
+  4 |  52 |    364 |     363.3 |       | GROUND
+  5 |  53 |    362 |     352.0 |       | GROUND
+  6 |  54 |    330 |     331.0 |       |
+  7 |  55 |    301 |     293.3 | *AIR* |
+  8 |  56 |    249 |     251.3 | *AIR* |
+  9 |  57 |    204 |     221.3 | *AIR* |
+ 10 |  58 |    211 |     229.0 | *AIR* |
+ 11 |  59 |    272 |     263.3 | *AIR* |
+ 12 |  60 |    307 |     306.3 | *AIR* |
+ 13 |  61 |    340 |     338.7 |       | GROUND
+ 14 |  62 |    369 |     359.3 |       | GROUND
+ 15 |  63 |    369 |     368.0 |       | GROUND
+ 16 |  64 |    366 |     362.7 |       | GROUND
+ 17 |  65 |    353 |     343.7 |       | GROUND
+ 18 |  66 |    312 |     336.7 |       | GROUND
+ 19 |  67 |    345 |     340.7 |       | GROUND
+ 20 |  68 |    365 |     358.7 |       | GROUND
+ 21 |  69 |    366 |     365.7 |       | GROUND
+ 22 |  70 |    366 |     365.7 |       | GROUND
+ 23 |  71 |    365 |     365.0 |       | GROUND
+root@dfdc7a27-066c-4d88-b000-73d95314057d:/app#

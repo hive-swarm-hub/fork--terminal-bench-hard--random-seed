@@ -1,0 +1,146 @@
+New Terminal Output:
+
+root@8a655745-1e3e-49db-b3c6-5be31205fbad:/app# cat > /app/fit_peaks.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+> import json
+>
+> # Parse the data file
+> wavenumbers = []
+> intensities = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         wavenumbers.append(x)
+>         intensities.append(y)
+>
+> w = np.array(wavenumbers)
+> y = np.array(intensities)
+> idx = np.argsort(w)
+> w = w[idx]
+> y = y[idx]
+>
+> print(f"Data range: x={w.min():.2f} to {w.max():.2f}, {len(w)} points")
+>
+> # Lorentzian function
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # ============ FIT 2D PEAK ============
+> # Clear Lorentzian at x ~ 3745
+> print("\n=== Fitting 2D Peak ===")
+> td_mask = (w > 3200) & (w < 4200)
+> td_x = w[td_mask]
+> td_y = y[td_mask]
+>
+> # Find the peak
+> td_peak_idx = np.argmax(td_y)
+> td_x0_init = td_x[td_peak_idx]
+> td_amp_init = td_y[td_peak_idx] - np.median(td_y)
+> td_offset_init = np.median(td_y)
+> td_gamma_init = 30.0
+>
+> print(f"Initial guess: x0={td_x0_init:.2f}, gamma={td_gamma_init}, amp={td_amp_init:.2f}, offset={td_offset_init:.2f}")
+> print(f"Points in region: {len(td_x)}")
+>
+> td_popt, td_pcov = curve_fit(lorentzian, td_x, td_y,
+>                               p0=[td_x0_init, td_gamma_init, td_amp_init, td_offset_init],
+>                               maxfev=100000)
+> print(f"2D peak fit: x0={td_popt[0]:.4f}, gamma={td_popt[1]:.4f}, amplitude={td_popt[2]:.4f}, offset={td_popt[3]:.4f}")
+>
+> # ============ FIT G PEAK ============
+> # Peak near x ~ 1660, on a declining background
+> # The G peak is at the start of the data
+> print("\n=== Fitting G Peak ===")
+> g_mask = (w > 1648) & (w < 1850)
+> g_x = w[g_mask]
+> g_y = y[g_mask]
+>
+> print(f"Points in region: {len(g_x)}")
+> print(f"x range: {g_x.min():.2f} to {g_x.max():.2f}")
+> print(f"y range: {g_y.min():.2f} to {g_y.max():.2f}")
+>
+> # The G peak appears to be centered around 1580-1590 (below data range)
+> # or could be at ~1660. Let's try fitting with x0 as free parameter
+> g_peak_idx = np.argmax(g_y)
+> g_x0_init = g_x[g_peak_idx]
+> g_offset_init = g_y.min()
+> g_amp_init = g_y.max() - g_offset_init
+> g_gamma_init = 20.0
+>
+> print(f"Initial guess: x0={g_x0_init:.2f}, gamma={g_gamma_init}, amp={g_amp_init:.2f}, offset={g_offset_init:.2f}")
+>
+> # Try fitting - allow x0 to be below data range
+> try:
+>     g_popt, g_pcov = curve_fit(lorentzian, g_x, g_y,
+>                                 p0=[g_x0_init, g_gamma_init, g_amp_init, g_offset_init],
+>                                 bounds=([1500, 1, 0, 0], [1750, 200, 50000, 10000]),
+>                                 maxfev=100000)
+>     print(f"G peak fit: x0={g_popt[0]:.4f}, gamma={g_popt[1]:.4f}, amplitude={g_popt[2]:.4f}, offset={g_popt[3]:.4f}")
+> except Exception as e:
+>     print(f"Bounded fit failed: {e}")
+>     # Try without bounds
+>     g_popt, g_pcov = curve_fit(lorentzian, g_x, g_y,
+>                                 p0=[g_x0_init, g_gamma_init, g_amp_init, g_offset_init],
+>                                 maxfev=100000)
+>     print(f"G peak fit (unbounded): x0={g_popt[0]:.4f}, gamma={g_popt[1]:.4f}, amplitude={g_popt[2]:.4f}, offset={g_popt[3]:.4f}")
+>
+> # ============ SAVE RESULTS ============
+> results = {
+>     "G": {
+>         "x0": round(float(g_popt[0]), 4),
+>         "gamma": round(float(abs(g_popt[1])), 4),
+>         "amplitude": round(float(g_popt[2]), 4),
+>         "offset": round(float(g_popt[3]), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(td_popt[0]), 4),
+>         "gamma": round(float(abs(td_popt[1])), 4),
+>         "amplitude": round(float(td_popt[2]), 4),
+>         "offset": round(float(td_popt[3]), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print("\nResults:")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@8a655745-1e3e-49db-b3c6-5be31205fbad:/app# python3 /app/fit_peaks.py
+Data range: x=1648.72 to 47183.55, 3565 points
+
+=== Fitting 2D Peak ===
+Initial guess: x0=3745.05, gamma=30.0, amp=11404.92, offset=1515.96
+Points in region: 396
+2D peak fit: x0=3745.4001, gamma=24.3063, amplitude=12287.5265, offset=1290.8803
+
+=== Fitting G Peak ===
+Points in region: 633
+x range: 1648.72 to 1849.69
+y range: 3150.92 to 6474.28
+Initial guess: x0=1660.07, gamma=20.0, amp=3323.36, offset=3150.92
+G peak fit: x0=1579.6265, gamma=200.0000, amplitude=5046.7806, offset=1649.2500
+
+Results:
+{
+  "G": {
+    "x0": 1579.6265,
+    "gamma": 200.0,
+    "amplitude": 5046.7806,
+    "offset": 1649.25
+  },
+  "2D": {
+    "x0": 3745.4001,
+    "gamma": 24.3063,
+    "amplitude": 12287.5265,
+    "offset": 1290.8803
+  }
+}
+root@8a655745-1e3e-49db-b3c6-5be31205fbad:/app#

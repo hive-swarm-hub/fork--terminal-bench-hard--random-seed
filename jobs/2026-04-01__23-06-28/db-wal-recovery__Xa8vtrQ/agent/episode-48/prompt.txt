@@ -1,0 +1,66 @@
+New Terminal Output:
+
+root@5fb0393d-5637-4666-a244-1524c585d4d1:/app# cat > /tmp/recover2.c << 'CEOF'
+> #define _GNU_SOURCE
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <fcntl.h>
+> #include <unistd.h>
+> #include <sys/types.h>
+> #include <sys/stat.h>
+> #include <sys/syscall.h>
+> #include <errno.h>
+>
+> int main() {
+>     // Allocate file_handle with extra space
+>     struct file_handle *fh_db = malloc(sizeof(struct file_handle) + 128);
+>     struct file_handle *fh_dir = malloc(sizeof(struct file_handle) + 128);
+>     int mount_id;
+>
+>     fh_db->handle_bytes = 128;
+>     int ret = name_to_handle_at(AT_FDCWD, "/app/main.db", fh_db, &mount_id, 0);
+>     if (ret == 0) {
+>         printf("main.db handle: mount_id=%d, handle_bytes=%u, handle_type=%d\n",
+>                mount_id, fh_db->handle_bytes, fh_db->handle_type);
+>     } else {
+>         printf("name_to_handle_at main.db failed: %s\n", strerror(errno));
+>     }
+>
+>     fh_dir->handle_bytes = 128;
+>     ret = name_to_handle_at(AT_FDCWD, "/app", fh_dir, &mount_id, 0);
+>     if (ret == 0) {
+>         printf("/app handle: mount_id=%d, handle_bytes=%u\n", mount_id, fh_dir->handle_bytes);
+>
+>         int mount_fd = open("/", O_RDONLY);
+>         int dir_fd = open_by_handle_at(mount_fd, fh_dir, O_RDONLY | O_DIRECTORY);
+>         if (dir_fd >= 0) {
+>             printf("Opened /app by handle, fd=%d\n", dir_fd);
+>             int wal_fd = openat(dir_fd, "main.db-wal", O_RDONLY);
+>             if (wal_fd >= 0) {
+>                 printf("Opened main.db-wal! fd=%d\n", wal_fd);
+>                 char buf[16512];
+>                 ssize_t n = read(wal_fd, buf, sizeof(buf));
+>                 printf("Read %zd bytes\n", n);
+>                 int out = open("/tmp/recovered.wal", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+>                 write(out, buf, n);
+>                 close(out);
+>                 close(wal_fd);
+>             } else {
+>                 printf("Failed to open main.db-wal: %s\n", strerror(errno));
+>             }
+>             close(dir_fd);
+>         } else {
+>             printf("open_by_handle_at failed: %s\n", strerror(errno));
+>         }
+>         close(mount_fd);
+>     }
+>
+>     free(fh_db);
+>     free(fh_dir);
+>     return 0;
+> }
+> CEOF
+root@5fb0393d-5637-4666-a244-1524c585d4d1:/app# gcc -o /tmp/recover2 /tmp/recover2.c && /tmp/recover2
+name_to_handle_at main.db failed: Operation not supported
+root@5fb0393d-5637-4666-a244-1524c585d4d1:/app#

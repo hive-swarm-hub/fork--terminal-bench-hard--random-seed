@@ -1,0 +1,222 @@
+New Terminal Output:
+
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# cat > /tmp/design_final.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     seq = seq.upper()
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def get_circular_subseq(seq, start, length):
+>     result = []
+>     for i in range(length):
+>         result.append(seq[(start + i) % len(seq)])
+>     return ''.join(result)
+>
+> # Parse sequences
+> with open('sequences.fasta') as f:
+>     content = f.read()
+> seqs = {}
+> for block in content.strip().split('>'):
+>     if not block.strip():
+>         continue
+>     lines = block.strip().split('\n')
+>     name = lines[0].strip()
+>     seq = ''.join(lines[1:]).strip()
+>     seqs[name] = seq
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # Use insertion point 213 (no overlap)
+> ins_pos = 213
+> ins_seq = 'agtagattagaagaagaattaagaagaagattaacagaa'
+>
+> # Verify insertion produces correct output
+> product = inp[:ins_pos] + ins_seq + inp[ins_pos:]
+> assert product == out, "Insertion verification failed!"
+> print("Insertion at position 213 verified correct.")
+>
+> MIN_LEN = 15
+> MAX_LEN = 36  # oligotm limit
+> MIN_TM = 58.0
+> MAX_TM = 72.0
+> MAX_TM_DIFF = 5.0
+>
+> # Compute all forward Tm values
+> print("\nComputing forward annealing Tms...")
+> fwd_data = {}
+> for fwd_len in range(MIN_LEN, MAX_LEN + 1):
+>     fwd_anneal = get_circular_subseq(inp, ins_pos, fwd_len)
+>     tm = get_tm(fwd_anneal)
+>     fwd_data[fwd_len] = (fwd_anneal, tm)
+>     print(f"  len={fwd_len}: {fwd_anneal[:30]}... Tm={tm:.2f}")
+>
+> # Compute all reverse Tm values
+> print("\nComputing reverse annealing Tms...")
+> rev_data = {}
+> for rev_len in range(MIN_LEN, MAX_LEN + 1):
+>     rev_start = (ins_pos - rev_len) % len(inp)
+>     rev_anneal_template = get_circular_subseq(inp, rev_start, rev_len)
+>     rev_primer = reverse_complement(rev_anneal_template)
+>     tm = get_tm(rev_primer)
+>     rev_data[rev_len] = (rev_primer, tm)
+>     print(f"  len={rev_len}: {rev_primer[:30]}... Tm={tm:.2f}")
+>
+> # Find best pair
+> best_pair = None
+> best_score = float('inf')
+>
+> for fwd_len, (fwd_anneal, fwd_tm) in fwd_data.items():
+>     if fwd_tm < MIN_TM or fwd_tm > MAX_TM:
+>         continue
+>     for rev_len, (rev_primer, rev_tm) in rev_data.items():
+>         if rev_tm < MIN_TM or rev_tm > MAX_TM:
+>             continue
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > MAX_TM_DIFF:
+>             continue
+>         if tm_diff < best_score:
+>             best_score = tm_diff
+>             best_pair = {
+>                 'fwd_anneal': fwd_anneal,
+>                 'fwd_tm': fwd_tm,
+>                 'fwd_len': fwd_len,
+>                 'rev_primer': rev_primer,
+>                 'rev_tm': rev_tm,
+>                 'rev_len': rev_len,
+>                 'tm_diff': tm_diff
+>             }
+>
+> if best_pair is None:
+>     print("ERROR: No valid primer pair found!")
+>     sys.exit(1)
+>
+> print(f"\n=== Best primer pair ===")
+> print(f"Forward annealing: {best_pair['fwd_anneal']} (Tm={best_pair['fwd_tm']:.2f}, len={best_pair['fwd_len']})")
+> print(f"Reverse primer: {best_pair['rev_primer']} (Tm={best_pair['rev_tm']:.2f}, len={best_pair['rev_len']})")
+> print(f"Tm difference: {best_pair['tm_diff']:.2f}")
+>
+> # Full forward primer = insertion tail + annealing
+> fwd_full = ins_seq + best_pair['fwd_anneal']
+> rev_full = best_pair['rev_primer']
+>
+> print(f"\nFull forward primer: {fwd_full} (len={len(fwd_full)})")
+> print(f"Full reverse primer: {rev_full} (len={len(rev_full)})")
+>
+> # Verify: the 3' annealing part of forward primer matches template at ins_pos
+> assert best_pair['fwd_anneal'].lower() == get_circular_subseq(inp, ins_pos, best_pair['fwd_len']).lower()
+> print("Forward annealing verified on template.")
+>
+> # Verify: reverse primer RC matches template upstream of ins_pos
+> rev_rc = reverse_complement(rev_full)
+> rev_start = (ins_pos - best_pair['rev_len']) % len(inp)
+> assert rev_rc.lower() == get_circular_subseq(inp, rev_start, best_pair['rev_len']).lower()
+> print("Reverse annealing verified on template.")
+>
+> # Verify back-to-back
+> print(f"Forward anneals at: {ins_pos} to {ins_pos + best_pair['fwd_len']}")
+> print(f"Reverse anneals at: {rev_start} to {rev_start + best_pair['rev_len']} (= {ins_pos})")
+> assert rev_start + best_pair['rev_len'] == ins_pos, "Not back-to-back!"
+> print("Back-to-back verified.")
+>
+> # Verify no overlap: check that the last base of tail does NOT match template
+> # at position ins_pos-1
+> tail_last = ins_seq[-1]
+> template_before = inp[(ins_pos - 1) % len(inp)]
+> print(f"\nTail last char: '{tail_last}', Template at pos {ins_pos-1}: '{template_before}'")
+> if tail_last.lower() == template_before.lower():
+>     print("WARNING: Tail last char matches template - potential overlap!")
+>     # Check how many overlap
+>     for k in range(1, len(ins_seq)+1):
+>         if ins_seq[-k:].lower() == get_circular_subseq(inp, (ins_pos-k) % len(inp), k).lower():
+>             continue
+>         else:
+>             print(f"  Overlap: {k-1} bases")
+>             break
+> else:
+>     print("No overlap between tail and template. Clean design.")
+>
+> # Write primers
+> with open('primers.fasta', 'w') as f:
+>     f.write(f">forward_primer\n{fwd_full}\n>reverse_primer\n{rev_full}\n")
+> print("\nPrimers written to primers.fasta")
+> PYEOF
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app# python3 /tmp/design_final.py
+Insertion at position 213 verified correct.
+
+Computing forward annealing Tms...
+  len=15: agcaagggcgaggag... Tm=59.54
+  len=16: agcaagggcgaggagc... Tm=63.48
+  len=17: agcaagggcgaggagct... Tm=65.14
+  len=18: agcaagggcgaggagctg... Tm=66.27
+  len=19: agcaagggcgaggagctgt... Tm=67.95
+  len=20: agcaagggcgaggagctgtt... Tm=68.19
+  len=21: agcaagggcgaggagctgttc... Tm=68.71
+  len=22: agcaagggcgaggagctgttca... Tm=70.07
+  len=23: agcaagggcgaggagctgttcac... Tm=70.69
+  len=24: agcaagggcgaggagctgttcacc... Tm=72.39
+  len=25: agcaagggcgaggagctgttcaccg... Tm=74.08
+  len=26: agcaagggcgaggagctgttcaccgg... Tm=75.53
+  len=27: agcaagggcgaggagctgttcaccggg... Tm=76.88
+  len=28: agcaagggcgaggagctgttcaccgggg... Tm=78.15
+  len=29: agcaagggcgaggagctgttcaccggggt... Tm=78.96
+  len=30: agcaagggcgaggagctgttcaccggggtg... Tm=79.04
+  len=31: agcaagggcgaggagctgttcaccggggtg... Tm=80.13
+  len=32: agcaagggcgaggagctgttcaccggggtg... Tm=80.82
+  len=33: agcaagggcgaggagctgttcaccggggtg... Tm=80.82
+  len=34: agcaagggcgaggagctgttcaccggggtg... Tm=82.02
+  len=35: agcaagggcgaggagctgttcaccggggtg... Tm=82.91
+  len=36: agcaagggcgaggagctgttcaccggggtg... Tm=83.75
+
+Computing reverse annealing Tms...
+  len=15: catatgtatatctcc... Tm=39.70
+  len=16: catatgtatatctcct... Tm=42.46
+  len=17: catatgtatatctcctt... Tm=44.28
+  len=18: catatgtatatctccttc... Tm=46.62
+  len=19: catatgtatatctccttct... Tm=48.71
+  len=20: catatgtatatctccttctt... Tm=49.94
+  len=21: catatgtatatctccttctta... Tm=50.18
+  len=22: catatgtatatctccttcttaa... Tm=51.23
+  len=23: catatgtatatctccttcttaaa... Tm=52.19
+  len=24: catatgtatatctccttcttaaag... Tm=53.51
+  len=25: catatgtatatctccttcttaaagt... Tm=55.16
+  len=26: catatgtatatctccttcttaaagtt... Tm=55.86
+  len=27: catatgtatatctccttcttaaagtta... Tm=55.83
+  len=28: catatgtatatctccttcttaaagttaa... Tm=56.45
+  len=29: catatgtatatctccttcttaaagttaaa... Tm=57.03
+  len=30: catatgtatatctccttcttaaagttaaac... Tm=58.08
+  len=31: catatgtatatctccttcttaaagttaaac... Tm=59.31
+  len=32: catatgtatatctccttcttaaagttaaac... Tm=59.74
+  len=33: catatgtatatctccttcttaaagttaaac... Tm=60.15
+  len=34: catatgtatatctccttcttaaagttaaac... Tm=60.53
+  len=35: catatgtatatctccttcttaaagttaaac... Tm=60.76
+  len=36: catatgtatatctccttcttaaagttaaac... Tm=61.10
+
+=== Best primer pair ===
+Forward annealing: agcaagggcgaggag (Tm=59.54, len=15)
+Reverse primer: catatgtatatctccttcttaaagttaaacaa (Tm=59.74, len=32)
+Tm difference: 0.21
+
+Full forward primer: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag (len=54)
+Full reverse primer: catatgtatatctccttcttaaagttaaacaa (len=32)
+Forward annealing verified on template.
+Reverse annealing verified on template.
+Forward anneals at: 213 to 228
+Reverse anneals at: 181 to 213 (= 213)
+Back-to-back verified.
+
+Tail last char: 'a', Template at pos 212: 'g'
+No overlap between tail and template. Clean design.
+
+Primers written to primers.fasta
+root@4b699fa7-9827-442c-a0a5-77c6d0005c36:/app#
