@@ -1,0 +1,69 @@
+New Terminal Output:
+
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# python3 << 'PYEOF'
+> import struct
+>
+> # Quick test: run one layer norm and check output
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> buf = f.read()
+> f.close()
+>
+> V, C, L, H = 50257, 768, 12, 12
+>
+> # Parse offsets
+> def get_floats(offset, count):
+>     return list(struct.unpack_from(f'<{count}f', buf, offset*4))
+>
+> pos = 0
+> wte_off = pos; pos += V*C
+> wpe_off = pos; pos += 1024*C
+> ln1w_off = pos; pos += L*C
+> ln1b_off = pos; pos += L*C
+> qkvw_off = pos; pos += L*C*3*C
+> qkvb_off = pos; pos += L*3*C
+> attprojw_off = pos; pos += L*C*C
+> attprojb_off = pos; pos += L*C
+> ln2w_off = pos; pos += L*C
+> ln2b_off = pos; pos += L*C
+> fcw_off = pos; pos += L*C*4*C
+> fcb_off = pos; pos += L*4*C
+> fcprojw_off = pos; pos += L*4*C*C
+> fcprojb_off = pos; pos += L*C
+> lnfw_off = pos; pos += C
+> lnfb_off = pos; pos += C
+>
+> # Get wte for token 0
+> wte = get_floats(wte_off, V*C)
+> wpe = get_floats(wpe_off, 1024*C)
+>
+> # Token "Hello" - let's use token 15496 which is "Hello" in GPT-2
+> # Actually let's just use token 0 for testing
+> tok = 0
+> x = [wte[tok*C + i] + wpe[i] for i in range(C)]
+>
+> # Layer norm
+> ln1w = get_floats(ln1w_off, C)  # layer 0
+> ln1b = get_floats(ln1b_off, C)  # layer 0
+>
+> # Compute layer norm of x
+> mean_x = sum(x) / C
+> var_x = sum((xi - mean_x)**2 for xi in x) / C
+> std_x = (var_x + 1e-5) ** 0.5
+>
+> # Try with ln1w as-is (no +1)
+> ln_out_raw = [(x[i] - mean_x) / std_x * ln1w[i] + ln1b[i] for i in range(C)]
+> print(f'LN output (raw weights): mean={sum(ln_out_raw)/C:.6f}, std={sum((v-sum(ln_out_raw)/C)**2 for v in ln_out_raw)/C:.6f}')
+> print(f'  first 5: {ln_out_raw[:5]}')
+>
+> # Try with ln1w + 1.0
+> ln_out_plus1 = [(x[i] - mean_x) / std_x * (ln1w[i] + 1.0) + ln1b[i] for i in range(C)]
+> print(f'LN output (weights+1): mean={sum(ln_out_plus1)/C:.6f}')
+> print(f'  first 5: {ln_out_plus1[:5]}')
+>
+> # The raw weights version gives very small outputs, the +1 version should give more reasonable values
+> PYEOF
+LN output (raw weights): mean=-0.013522, std=0.034300
+  first 5: [0.04986428931134235, -0.09609910899480426, 0.0041037100562835195, 0.039793110897123396, -0.15323324281799844]
+LN output (weights+1): mean=-0.013522
+  first 5: [2.1027682147917814, -1.3452254969916413, -1.4809682843408438, -0.6843306907333039, -0.018925371020289003]
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app#

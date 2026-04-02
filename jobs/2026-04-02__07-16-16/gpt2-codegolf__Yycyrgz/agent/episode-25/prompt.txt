@@ -1,0 +1,107 @@
+New Terminal Output:
+
+Layer 0: x magnitude = 297.2680, first 3: 33.1348, -216.9451, 461.3674
+Layer 1: x magnitude = 601.3136, first 3: 39.8975, -427.2010, 933.1532
+Layer 2: x magnitude = 972.8449, first 3: 8.6038, -725.0087, 1564.4322
+Layer 3: x magnitude = 1238.0213, first 3: -13.1645, -905.4695, 1970.3748
+DIVERGED!
+Done
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# python3 << 'EOF'
+> import struct, math
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> buf = f.read()
+> f.close()
+>
+> V, C, L, H, D, M = 50257, 768, 12, 12, 64, 3072
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'<{n}f', buf, off*4))
+>
+> p = 0
+> wte = p; p += V*C
+> wpe = p; p += 1024*C
+> ln1w = p; p += L*C
+> ln1b = p; p += L*C
+> qkvw = p; p += L*C*3*C
+> qkvb = p; p += L*3*C
+> apw = p; p += L*C*C
+> apb = p; p += L*C
+> ln2w = p; p += L*C
+> ln2b = p; p += L*C
+> fcw = p; p += L*C*M
+> fcb = p; p += L*M
+> fpw = p; p += L*M*C
+> fpb = p; p += L*C
+> lfw = p; p += C
+> lfb = p; p += C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/(v+1e-5)**0.5
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(1.0+w[i])+b[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> tokens = [464]
+> x = [F(wte + tokens[0]*C, C)[i] + F(wpe, C)[i] for i in range(C)]
+>
+> # Try all 4 combinations of transpose for fc_up and fc_down
+> for fc_trans in [False, True]:
+>     for fp_trans in [False, True]:
+>         xt = x[:]
+>         for layer in range(1):
+>             ln_out = layernorm(xt, ln1w + layer*C, ln1b + layer*C)
+>             w = F(qkvw + layer*C*3*C, C*3*C)
+>             b_vals = F(qkvb + layer*3*C, 3*C)
+>             qkv_out = b_vals[:]
+>             for j in range(3*C):
+>                 for i in range(C):
+>                     qkv_out[j] += ln_out[i] * w[i*3*C + j]
+>             attn_out = qkv_out[2*C:3*C]
+>             pw = F(apw + layer*C*C, C*C)
+>             pb = F(apb + layer*C, C)
+>             proj = pb[:]
+>             for i in range(C):
+>                 for j in range(C):
+>                     proj[i] += attn_out[j] * pw[j*C + i]
+>             xt = [xt[i] + proj[i] for i in range(C)]
+>             ln2_out = layernorm(xt, ln2w + layer*C, ln2b + layer*C)
+>
+>             fw = F(fcw + layer*C*M, C*M)
+>             fb = F(fcb + layer*M, M)
+>             fc_out = fb[:]
+>             for j in range(M):
+>                 s = fb[j]
+>                 for i in range(C):
+>                     if fc_trans:
+>                         s += ln2_out[i] * fw[j*C + i]  # transposed
+>                     else:
+>                         s += ln2_out[i] * fw[i*M + j]  # original
+>                 fc_out[j] = gelu(s)
+>
+>             fpw_vals = F(fpw + layer*M*C, M*C)
+>             fpb_vals = F(fpb + layer*C, C)
+>             fc_down = fpb_vals[:]
+>             for i in range(C):
+>                 s = fpb_vals[i]
+>                 for j in range(M):
+>                     if fp_trans:
+>                         s += fc_out[j] * fpw_vals[i*M + j]  # transposed
+>                     else:
+>                         s += fc_out[j] * fpw_vals[j*C + i]  # original
+>                 fc_down[i] = s
+>             xt = [xt[i] + fc_down[i] for i in range(C)]
+>
+>         xmag = (sum(v*v for v in xt)/C)**0.5
+>         print(f"fc_trans={fc_trans}, fp_trans={fp_trans}: magnitude = {xmag:.4f}")
+>
+> EOF
+fc_trans=False, fp_trans=False: magnitude = 297.2680
+fc_trans=False, fp_trans=True: magnitude = 18.3635
+

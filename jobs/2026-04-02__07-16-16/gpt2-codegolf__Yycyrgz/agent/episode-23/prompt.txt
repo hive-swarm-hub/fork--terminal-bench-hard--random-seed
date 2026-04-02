@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# python3 << 'EOF'
+> import struct, math
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> buf = f.read()
+> f.close()
+>
+> V, C, L, H, D, M = 50257, 768, 12, 12, 64, 3072
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'<{n}f', buf, off*4))
+>
+> p = 0
+> wte = p; p += V*C
+> wpe = p; p += 1024*C
+> ln1w = p; p += L*C
+> ln1b = p; p += L*C
+> qkvw = p; p += L*C*3*C
+> qkvb = p; p += L*3*C
+> apw = p; p += L*C*C
+> apb = p; p += L*C
+> ln2w = p; p += L*C
+> ln2b = p; p += L*C
+> fcw = p; p += L*C*4*C
+> fcb = p; p += L*4*C
+> fpw = p; p += L*4*C*C
+> fpb = p; p += L*C
+> lfw = p; p += C
+> lfb = p; p += C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/(v+1e-5)**0.5
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(1.0+w[i])+b[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> # Forward pass for single token "The" = 464
+> tokens = [464]  # "The"
+> T = 1
+>
+> # Embedding
+> x = [F(wte + tokens[0]*C, C)[i] + F(wpe, C)[i] for i in range(C)]
+> print(f"Embedding first 5: {x[:5]}")
+>
+> # Layer 0
+> for layer in range(1):  # just first layer
+>     # LN1
+>     ln_out = layernorm(x, ln1w + layer*C, ln1b + layer*C)
+>     print(f"LN1 first 5: {ln_out[:5]}")
+>
+>     # QKV
+>     w = F(qkvw + layer*C*3*C, C*3*C)
+>     b_vals = F(qkvb + layer*3*C, 3*C)
+>     qkv_out = b_vals[:]
+>     for j in range(3*C):
+>         for i in range(C):
+>             qkv_out[j] += ln_out[i] * w[i*3*C + j]
+>     print(f"Q first 5: {qkv_out[:5]}")
+>     print(f"K first 5: {qkv_out[C:C+5]}")
+>     print(f"V first 5: {qkv_out[2*C:2*C+5]}")
+>
+>     # For single token, attention is just the value (softmax of single element = 1)
+>     attn_out = qkv_out[2*C:3*C]  # just V
+>
+>     # Attention projection
+>     pw = F(apw + layer*C*C, C*C)
+>     pb = F(apb + layer*C, C)
+>     proj = pb[:]
+>     for i in range(C):
+>         for j in range(C):
+>             proj[i] += attn_out[j] * pw[j*C + i]
+>
+>     # Residual
+>     x = [x[i] + proj[i] for i in range(C)]
+>     print(f"After attn+res first 5: {x[:5]}")
+>
+>     # LN2
+>     ln2_out = layernorm(x, ln2w + layer*C, ln2b + layer*C)
+>     print(f"LN2 first 5: {ln2_out[:5]}")
+>
+>     # MLP FC up
+>     fw = F(fcw + layer*C*M, C*M)
+>     fb = F(fcb + layer*M, M)
+>     fc_out = fb[:]
+>     for j in range(M):
+>         for i in range(C):
+>             fc_out[j] += ln2_out[i] * fw[i*M + j]
+>         fc_out[j] = gelu(fc_out[j])
+>     print(f"FC up first 5: {fc_out[:5]}")
+>
+>     # MLP FC down
+>     fpw_vals = F(fpw + layer*M*C, M*C)
+>     fpb_vals = F(fpb + layer*C, C)
+>     fc_down = fpb_vals[:]
+>     for i in range(C):
+>         for j in range(M):
+>             fc_down[i] += fc_out[j] * fpw_vals[j*C + i]
+>
+>     # Residual
+>     x = [x[i] + fc_down[i] for i in range(C)]
+>     print(f"After MLP+res first 5: {x[:5]}")
+>
+> print("Done layer 0")
+> EOF
+Embedding first 5: [0.2452052067965269, -0.04250799119472504, -0.14770378777757287, 0.0009227916598320007, 0.21411432325839996]
+LN1 first 5: [2.124973532848167, -0.027480362358704477, -0.8531075761888117, 0.22083442163056463, 1.358093356280858]
+Q first 5: [0.059293218663319214, -1.1430807498296875, 0.36258218485784377, 1.6501787492124251, -0.4903892411820646]
+K first 5: [5.630062546008223, -3.382120230677637, 0.5582465086325878, 1.8119774848403916, -2.236344011071726]
+V first 5: [-0.19823974752890972, 3.4114865901029323, 2.430660397296092, -5.682283957740895, -2.086846642048127]
+After attn+res first 5: [5.196768439524509, -0.3078055381850488, -11.454428789087979, -6.940028253092838, 7.163732738821924]
+LN2 first 5: [0.5567229694928766, -0.12991757374768484, -1.1563168831899, -0.8794081914688865, 0.5410078004174596]
+FC up first 5: [-0.004443858124112464, 0.8962772418140609, -0.14700007299668863, -0.0, -0.03301273742632114]
+After MLP+res first 5: [33.13477979895741, -216.94510664034678, 461.3673922423269, -85.14485933106715, 29.663999346919802]
+Done layer 0
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app#

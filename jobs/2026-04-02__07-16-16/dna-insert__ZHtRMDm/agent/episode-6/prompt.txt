@@ -1,0 +1,168 @@
+New Terminal Output:
+
+root@4bf3bf66-d675-44c6-9da7-57906220041f:/app# cat > /app/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def rev_comp(seq):
+>     comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G',
+>             'a':'t', 't':'a', 'g':'c', 'c':'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     seq = seq.upper()
+>     # oligotm limit is 36 bases
+>     if len(seq) < 2 or len(seq) > 36:
+>         return None
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     try:
+nt>         return float(result.stdout.strip())
+>     except:
+>         return None
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # The insertion point is at position 215 in the input
+> # Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 nt)
+> insertion_point = 215
+> insertion_seq = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+>
+> # For Q5 SDM kit with insertion:
+> # Forward primer: 5'-[insertion]-[downstream annealing region]
+> # Reverse primer: 5'-[reverse complement of upstream region] (anneals upstream, pointing away)
+> #
+> # The primers are back-to-back at the insertion point.
+> # Forward anneals starting at position 215 (downstream of insertion point)
+> # Reverse anneals ending at position 214 (upstream of insertion point), reverse complement
+>
+> print("=== Designing primers for insertion ===")
+> print(f"Insertion point: {insertion_point}")
+> print(f"Insertion sequence: {insertion_seq}")
+> print(f"Upstream context: ...{input_seq[insertion_point-20:insertion_point]}")
+> print(f"Downstream context: {input_seq[insertion_point:insertion_point+20]}...")
+> print()
+>
+> # Find optimal annealing lengths for forward and reverse primers
+> # Forward annealing: starts at insertion_point, goes downstream
+> # Reverse annealing: ends at insertion_point-1, goes upstream (we take rev comp)
+>
+> best_pairs = []
+>
+> for fwd_len in range(15, 46):
+>     if fwd_len > 36:  # oligotm limit
+>         break
+>     fwd_anneal = input_seq[insertion_point:insertion_point+fwd_len]
+>     if len(fwd_anneal) < fwd_len:
+>         continue
+>     fwd_tm = get_tm(fwd_anneal)
+>     if fwd_tm is None:
+>         continue
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_len in range(15, 46):
+>         if rev_len > 36:  # oligotm limit
+>             break
+>         rev_anneal = input_seq[insertion_point-rev_len:insertion_point]
+>         if len(rev_anneal) < rev_len:
+>             continue
+>         rev_tm = get_tm(rev_anneal)
+>         if rev_tm is None:
+>             continue
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > 5:
+>             continue
+>
+>         # Valid pair!
+>         # Forward primer = insertion + downstream annealing
+>         fwd_primer = insertion_seq + fwd_anneal
+>         # Reverse primer = rev comp of upstream annealing
+>         rev_primer = rev_comp(rev_anneal)
+>
+>         best_pairs.append({
+>             'fwd_primer': fwd_primer,
+>             'rev_primer': rev_primer,
+>             'fwd_anneal': fwd_anneal,
+>             'rev_anneal': rev_anneal,
+>             'fwd_anneal_len': fwd_len,
+>             'rev_anneal_len': rev_len,
+>             'fwd_tm': fwd_tm,
+>             'rev_tm': rev_tm,
+>             'tm_diff': tm_diff
+>         })
+>
+> print(f"Found {len(best_pairs)} valid primer pairs")
+>
+> # Sort by tm_diff, then by total primer length (shorter is better)
+> best_pairs.sort(key=lambda x: (x['tm_diff'], x['fwd_anneal_len'] + x['rev_anneal_len']))
+>
+> if best_pairs:
+>     best = best_pairs[0]
+>     print(f"\nBest pair:")
+>     print(f"  Forward primer: {best['fwd_primer']}")
+>     print(f"  Forward annealing region: {best['fwd_anneal']} (len={best['fwd_anneal_len']}, Tm={best['fwd_tm']:.1f})")
+>     print(f"  Reverse primer: {best['rev_primer']}")
+>     print(f"  Reverse annealing region: {best['rev_anneal']} (len={best['rev_anneal_len']}, Tm={best['rev_tm']:.1f})")
+>     print(f"  Tm difference: {best['tm_diff']:.1f}")
+>
+>     # Write output
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{best['fwd_primer']}\n")
+>         f.write(f">reverse_primer\n{best['rev_primer']}\n")
+>     print("\nPrimers written to primers.fasta")
+> else:
+>     print("No valid primer pairs found!")
+>     # Debug: show Tm values for various lengths
+>     print("\nForward annealing Tm values:")
+>     for l in range(15, 37):
+>         seq = input_seq[insertion_point:insertion_point+l]
+>         tm = get_tm(seq)
+>         if tm:
+>             print(f"  len={l}: Tm={tm:.1f} seq={seq}")
+>     print("\nReverse annealing Tm values:")
+>     for l in range(15, 37):
+>         seq = input_seq[insertion_point-l:insertion_point]
+>         tm = get_tm(seq)
+>         if tm:
+>             print(f"  len={l}: Tm={tm:.1f} seq={seq}")
+> PYEOF
+root@4bf3bf66-d675-44c6-9da7-57906220041f:/app# python3 /app/design_primers.py
+=== Designing primers for insertion ===
+Insertion point: 215
+Insertion sequence: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+Upstream context: ...GAAGGAGATATACATATGAG
+Downstream context: CAAGGGCGAGGAGCTGTTCA...
+
+Found 37 valid primer pairs
+
+Best pair:
+  Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG
+  Forward annealing region: CAAGGGCGAGGAGCTG (len=16, Tm=61.2)
+  Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+  Reverse annealing region: TTGTTTAACTTTAAGAAGGAGATATACATATGAG (len=34, Tm=61.3)
+  Tm difference: 0.1
+
+Primers written to primers.fasta
+root@4bf3bf66-d675-44c6-9da7-57906220041f:/app#

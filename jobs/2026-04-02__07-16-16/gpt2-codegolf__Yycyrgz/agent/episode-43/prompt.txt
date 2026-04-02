@@ -1,0 +1,98 @@
+New Terminal Output:
+
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# cat > /tmp/test_fwd2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<sys/stat.h>
+> #include<fcntl.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define D 64
+> #define M 3072
+> float*W;
+>
+> // Per-layer sequential layout
+> // wte(V*C), wpe(1024*C), then per layer:
+> // ln1w(C), ln1b(C), qkvw(C*3C), qkvb(3C), apw(C*C), apb(C), ln2w(C), ln2b(C), fcw(C*4C), fcb(4C), fpw(4C*C), fpb(C)
+> // then lnfw(C), lnfb(C)
+>
+> int wte_o, wpe_o;
+> struct { int ln1w,ln1b,qkvw,qkvb,apw,apb,ln2w,ln2b,fcw,fcb,fpw,fpb; } lo[12];
+> int lnfw_o, lnfb_o;
+>
+> void init() {
+>     int p = 0;
+>     wte_o = p; p += V*C;
+>     wpe_o = p; p += 1024*C;
+>     for(int l=0;l<L;l++) {
+>         lo[l].ln1w=p; p+=C;
+>         lo[l].ln1b=p; p+=C;
+>         lo[l].qkvw=p; p+=C*3*C;
+>         lo[l].qkvb=p; p+=3*C;
+>         lo[l].apw=p; p+=C*C;
+>         lo[l].apb=p; p+=C;
+>         lo[l].ln2w=p; p+=C;
+>         lo[l].ln2b=p; p+=C;
+>         lo[l].fcw=p; p+=C*4*C;
+>         lo[l].fcb=p; p+=4*C;
+>         lo[l].fpw=p; p+=4*C*C;
+>         lo[l].fpb=p; p+=C;
+>     }
+>     lnfw_o=p; p+=C;
+>     lnfb_o=p; p+=C;
+>     printf("Total params: %d (expected 124439808)\n", p);
+> }
+>
+> void ln(float*o,float*x,int w,int b){
+> float m=0,v=0;for(int i=0;i<C;i++)m+=x[i];m/=C;
+> for(int i=0;i<C;i++)v+=(x[i]-m)*(x[i]-m);float s=1.f/sqrtf(v/C+1e-5f);
+> for(int i=0;i<C;i++)o[i]=(x[i]-m)*s*(1+W[w+i])+W[b+i];}
+> float ge(float x){return .5f*x*(1+tanhf(.7978845608f*(x+.044715f*x*x*x)));}
+>
+> int main(int argc,char**argv){
+> int fd=open(argv[1],0);struct stat st;fstat(fd,&st);W=mmap(0,st.st_size,1,2,fd,0);
+> init();
+>
+> int tk = 464;
+> float*x=calloc(C,4);
+> for(int i=0;i<C;i++) x[i]=W[wte_o+tk*C+i]+W[wpe_o+i];
+>
+> float*r=malloc(C*4),*q=malloc(3*C*4),*ff=malloc(M*4);
+> for(int l=0;l<L;l++){
+> ln(r,x,lo[l].ln1w,lo[l].ln1b);
+> for(int j=0;j<3*C;j++){float s=W[lo[l].qkvb+j];for(int i=0;i<C;i++)s+=r[i]*W[lo[l].qkvw+i*3*C+j];q[j]=s;}
+> float*vo=q+2*C;
+> for(int i=0;i<C;i++){float s=W[lo[l].apb+i];for(int j=0;j<C;j++)s+=vo[j]*W[lo[l].apw+j*C+i];x[i]+=s;}
+> ln(r,x,lo[l].ln2w,lo[l].ln2b);
+> for(int j=0;j<M;j++){float s=W[lo[l].fcb+j];for(int i=0;i<C;i++)s+=r[i]*W[lo[l].fcw+i*M+j];ff[j]=ge(s);}
+> for(int i=0;i<C;i++){float s=W[lo[l].fpb+i];for(int j=0;j<M;j++)s+=ff[j]*W[lo[l].fpw+j*C+i];x[i]+=s;}
+> float mag=0;for(int i=0;i<C;i++)mag+=x[i]*x[i];mag=sqrtf(mag/C);
+> printf("L%d: mag=%.2f\n",l,mag);
+> }
+> ln(r,x,lnfw_o,lnfb_o);
+> float best_v=-1e9;int best_t=0;
+> for(int i=0;i<V;i++){float s=0;for(int j=0;j<C;j++)s+=r[j]*W[wte_o+i*C+j];if(s>best_v){best_v=s;best_t=i;}}
+> printf("Best token: %d logit: %.4f\n",best_t,best_v);
+> }
+> CEOF
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# gcc -O3 -o /tmp/test_fwd2 /tmp/test_fwd2.c -lm && /tmp/test_fwd2 gpt2-124M.ckpt
+Total params: 124439808 (expected 124439808)
+L0: mag=22.95
+L1: mag=37.13
+L2: mag=48.16
+L3: mag=61.53
+L4: mag=72.70
+L5: mag=79.76
+L6: mag=256.77
+L7: mag=612.45
+L8: mag=1050.73
+L9: mag=1549.25
+L10: mag=2119.82
+L11: mag=2705.26
+Best token: 36877 logit: 168.7246
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app#

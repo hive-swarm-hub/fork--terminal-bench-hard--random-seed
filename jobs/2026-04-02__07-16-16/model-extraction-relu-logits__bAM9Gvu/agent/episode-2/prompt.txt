@@ -1,0 +1,155 @@
+New Terminal Output:
+
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app# cat > /app/steal.py << 'PYEOF'
+[i,:]
+recovered_rows = []
+for > import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using finite differences."""
+>     grad = np.zeros(10)
+>     fx = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - fx) / eps
+>     return grad
+>
+> # Step 1: Sample many random points and compute gradients
+> np.random.seed(42)
+> num_samples = 2000
+> gradients = []
+> for s in range(num_samples):
+>     x = np.random.randn(10) * 5.0  # Use large range to explore different activation patterns
+>     g = numerical_gradient(x)
+>     gradients.append(g)
+>
+> gradients = np.array(gradients)
+> print(f"Computed {len(gradients)} gradients")
+>
+> # Step 2: Find unique gradients by clustering similar ones
+> # Two gradients are "the same" if they correspond to the same activation pattern
+> # Use a tolerance-based uniqueness check
+> def find_unique_gradients(grads, tol=1e-4):
+>     unique = [grads[0]]
+>     for g in grads[1:]:
+>         is_new = True
+>         for u in unique:
+>             if np.linalg.norm(g - u) < tol:
+>                 is_new = False
+>                 break
+>         if is_new:
+>             unique.append(g)
+>     return np.array(unique)
+>
+> unique_grads = find_unique_gradients(gradients)
+> print(f"Found {len(unique_grads)} unique gradients")
+>
+> # Step 3: Compute all pairwise differences
+> # When two activation patterns differ by exactly one neuron,
+> # the gradient difference is ±A2[0,i] * A1[i,:]
+> diffs = []
+> for i in range(len(unique_grads)):
+>     for j in range(i+1, len(unique_grads)):
+>         d = unique_grads[i] - unique_grads[j]
+>         if np.linalg.norm(d) > 1e-5:  # Skip near-zero differences
+>             diffs.append(d)
+>
+> diffs = np.array(diffs)
+> print(f"Computed {len(diffs)} pairwise differences")
+>
+> # Step 4: Cluster the differences to find rows of A1 (up to scaling)
+> # Each row of A1 (scaled by A2[0,i]) appears multiple times in the differences
+> # Two differences d1, d2 correspond to the same row if d1/||d1|| ≈ ±d2/||d2||
+>
+> def cluster_directions(diffs, tol=1e-3):
+>     """Cluster differences by direction (ignoring sign and magnitude)."""
+>     # Normalize each difference
+>     norms = np.linalg.norm(diffs, axis=1)
+>     normalized = diffs / norms[:, None]
+>
+>     clusters = []  # Each cluster stores indices
+>     cluster_dirs = []  # Representative direction for each cluster
+>
+>     for i, d in enumerate(normalized):
+>         found = False
+>         for ci, cd in enumerate(cluster_dirs):
+>             # Check if d is parallel to cd (same or opposite direction)
+>             dot = np.abs(np.dot(d, cd))
+>             if dot > 1.0 - tol:
+>                 clusters[ci].append(i)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append([i])
+>             cluster_dirs.append(d)
+>
+>     return clusters, cluster_dirs
+>
+> clusters, cluster_dirs = cluster_directions(diffs)
+> print(f"Found {len(clusters)} direction clusters")
+>
+> # Step 5: For each cluster, the smallest magnitude difference corresponds to
+> # a single neuron switch: ±A2[0,i] * A1[i,:]
+> # We want A1[i,:], so we need to figure out the scaling.
+> # Since we only need A1 up to per-neuron scaling, we can just take the direction.
+>
+> # Sort clusters by size (larger clusters are more likely to be real rows)
+> cluster_info = []
+> for ci, (cluster, cdir) in enumerate(zip(clusters, cluster_dirs)):
+>     # Find the minimum norm difference in this cluster
+>     cluster_diffs = diffs[cluster]
+>     cluster_norms = np.linalg.norm(cluster_diffs, axis=1)
+>     min_idx = np.argmin(cluster_norms)
+>     min_diff = cluster_diffs[min_idx]
+>     min_norm = cluster_norms[min_idx]
+>     cluster_info.append((len(cluster), min_norm, min_diff, cdir))
+>
+> # Sort by cluster size (descending)
+> cluster_info.sort(key=lambda x: -x[0])
+>
+> print("\nTop clusters (size, min_norm):")
+> for i, (size, mn, md, cd) in enumerate(cluster_info[:30]):
+>     print(f"  Cluster {i}: size={size}, min_norm={mn:.6f}")
+>
+> # Take the top 20 clusters as the rows of A1 (scaled)
+> # The minimum-norm difference in each cluster is A2[0,i] * A1[i,:]
+> recovered_rows = []
+> for i in range(min(20, len(cluster_info))):
+>     size, mn, md, cd = cluster_info[i]
+>     recovered_rows.append(md)  # This is A2[0,i] * A1[i,:]
+>
+> recovered_A1 = np.array(recovered_rows)
+> print(f"\nRecovered A1 shape: {recovered_A1.shape}")
+>
+> # Save the result
+> np.save('/app/stolen_A1.npy', recovered_A1)
+> print("Saved stolen_A1 to /app/stolen_A1.npy")
+>
+> # Verify: compare with actual A1 (up to permutation and scaling)
+> # Load actual A1 for comparison
+> from forward import A1 as actual_A1, A2 as actual_A2
+>
+> # Each recovered row should be proportional to some row of actual_A1
+> # Check by computing cosine similarity
+> print("\nVerification:")
+> matched = set()
+> for i, rrow in enumerate(recovered_A1):
+>     rrow_norm = rrow / np.linalg.norm(rrow)
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(actual_A1.shape[0]):
+>         arow_norm = actual_A1[j] / np.linalg.norm(actual_A1[j])
+>         sim = np.abs(np.dot(rrow_norm, arow_norm))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     print(f"  Recovered row {i} matches actual row {best_j} with cosine sim = {best_sim:.6f}")
+>
+> print(f"\nMatched {len(matched)} out of {actual_A1.shape[0]} actual rows")
+> PYEOF
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app#

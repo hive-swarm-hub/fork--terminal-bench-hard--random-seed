@@ -1,0 +1,279 @@
+New Terminal Output:
+
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define D 64
+> #define M 3072
+> float *W; // all weights
+> // Offsets into weight array
+> int wo[16];
+> char *tok_str[V]; // token strings
+> int n_merges;
+> char *merge_a[50000], *merge_b[50000];
+>
+> void init_offsets() {
+>     int p=0,i=0;
+>     wo[i++]=p; p+=V*C;     // wte
+>     wo[i++]=p; p+=1024*C;  // wpe
+>     wo[i++]=p; p+=L*C;     // ln1w
+>     wo[i++]=p; p+=L*C;     // ln1b
+>     wo[i++]=p; p+=L*C*3*C; // qkvw
+>     wo[i++]=p; p+=L*3*C;   // qkvb
+>     wo[i++]=p; p+=L*C*C;   // apw
+>     wo[i++]=p; p+=L*C;     // apb
+>     wo[i++]=p; p+=L*C;     // ln2w
+>     wo[i++]=p; p+=L*C;     // ln2b
+>     wo[i++]=p; p+=L*C*4*C; // fcw
+>     wo[i++]=p; p+=L*4*C;   // fcb
+>     wo[i++]=p; p+=L*4*C*C; // fpw
+>     wo[i++]=p; p+=L*C;     // fpb
+>     wo[i++]=p; p+=C;       // lfw
+>     wo[i++]=p; p+=C;       // lfb
+> }
+>
+> // byte_to_unicode: maps byte b to a unicode codepoint
+> int b2u(int b) {
+>     if(b>=33&&b<=126) return b;
+>     if(b>=161&&b<=172) return b;
+>     if(b>=174&&b<=255) return b;
+>     // count how many "missing" bytes are before b
+>     int n=0;
+>     for(int i=0;i<b;i++) {
+>         if(!((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255))) n++;
+>     }
+>     return 256+n;
+> }
+>
+> int u2b(int u) {
+>     for(int i=0;i<256;i++) if(b2u(i)==u) return i;
+>     return -1;
+> }
+>
+> // Read a UTF-8 character, return codepoint and advance pointer
+> int read_utf8(const char **s) {
+>     unsigned char c = **s; (*s)++;
+>     if(c<0x80) return c;
+>     if(c<0xE0) { int r=(c&0x1F)<<6; r|=(**s)&0x3F; (*s)++; return r; }
+>     if(c<0xF0) { int r=(c&0x0F)<<12; r|=((**s)&0x3F)<<6; (*s)++; r|=(**s)&0x3F; (*s)++; return r; }
+>     return 0;
+> }
+>
+> // Write codepoint as UTF-8
+> int write_utf8(char *buf, int cp) {
+>     if(cp<0x80) { buf[0]=cp; return 1; }
+>     if(cp<0x800) { buf[0]=0xC0|(cp>>6); buf[1]=0x80|(cp&0x3F); return 2; }
+>     buf[0]=0xE0|(cp>>12); buf[1]=0x80|((cp>>6)&0x3F); buf[2]=0x80|(cp&0x3F); return 3;
+> }
+>
+> void load_vocab(const char *fn) {
+>     // Base vocab: 256 single-byte tokens
+>     for(int i=0;i<256;i++) {
+>         char *s=malloc(4); int cp=b2u(i); int n=write_utf8(s,cp); s[n]=0;
+>         tok_str[i]=s;
+>     }
+>     FILE *f=fopen(fn,"r");
+>     char line[256];
+>     fgets(line,256,f); // skip header
+>     n_merges=0;
+>     while(fgets(line,256,f)) {
+>         char *sp=strchr(line,' ');
+>         if(!sp) continue;
+>         *sp=0;
+>         char *a=strdup(line);
+>         char *b2=sp+1;
+>         char *nl=strchr(b2,'\n'); if(nl)*nl=0;
+>         char *b=strdup(b2);
+>         merge_a[n_merges]=a;
+>         merge_b[n_merges]=b;
+>         // New token = a+b
+>         char *merged=malloc(strlen(a)+strlen(b)+1);
+>         strcpy(merged,a); strcat(merged,b);
+>         tok_str[256+n_merges]=merged;
+>         n_merges++;
+>     }
+>     fclose(f);
+>     // Token 50256 = <|endoftext|>
+>     tok_str[50256]=strdup("<|endoftext|>");
+> }
+>
+> // Find token id for a string
+> int find_token(const char *s) {
+>     for(int i=0;i<V;i++) if(tok_str[i]&&strcmp(tok_str[i],s)==0) return i;
+>     return -1;
+> }
+>
+> // BPE encode
+> int encode(const char *text, int *tokens) {
+>     // Convert text bytes to unicode char strings
+>     int n=0;
+>     char **syms=malloc(strlen(text)*sizeof(char*));
+>     for(int i=0;text[i];i++) {
+>         int cp=b2u((unsigned char)text[i]);
+>         char *s=malloc(4); int len=write_utf8(s,cp); s[len]=0;
+>         syms[n++]=s;
+>     }
+>     // Apply merges in priority order
+>     for(int m=0;m<n_merges&&n>1;m++) {
+>         for(int i=0;i<n-1;i++) {
+>             if(strcmp(syms[i],merge_a[m])==0&&strcmp(syms[i+1],merge_b[m])==0) {
+>                 char *merged=malloc(strlen(syms[i])+strlen(syms[i+1])+1);
+>                 strcpy(merged,syms[i]); strcat(merged,syms[i+1]);
+>                 free(syms[i]); free(syms[i+1]);
+>                 syms[i]=merged;
+>                 memmove(syms+i+1,syms+i+2,(n-i-2)*sizeof(char*));
+>                 n--; i--;
+>             }
+>         }
+>     }
+>     int nt=0;
+>     for(int i=0;i<n;i++) { tokens[nt++]=find_token(syms[i]); free(syms[i]); }
+>     free(syms);
+>     return nt;
+> }
+>
+> void decode_token(int t) {
+>     const char *s=tok_str[t];
+>     while(*s) {
+>         int cp=read_utf8(&s);
+>         int b=u2b(cp);
+>         if(b>=0) putchar(b);
+>     }
+> }
+>
+> void layernorm(float *o, float *x, int off_w, int off_b) {
+>     float m=0,v=0;
+>     for(int i=0;i<C;i++) m+=x[i];
+>     m/=C;
+>     for(int i=0;i<C;i++) v+=(x[i]-m)*(x[i]-m);
+>     v=v/C+1e-5f;
+>     float s=1.0f/sqrtf(v);
+>     for(int i=0;i<C;i++) o[i]=(x[i]-m)*s*(1.0f+W[off_w+i])+W[off_b+i];
+> }
+>
+> float gelu(float x) {
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> // Forward pass, returns logits for last token
+> void forward(int *tokens, int T, float *logits) {
+>     float *x=calloc(T*C,sizeof(float));
+>     // Token + position embeddings
+>     for(int t=0;t<T;t++)
+>         for(int i=0;i<C;i++)
+>             x[t*C+i]=W[wo[0]+tokens[t]*C+i]+W[wo[1]+t*C+i];
+>
+>     float *ln=malloc(C*sizeof(float));
+>     float *qkv=malloc(T*3*C*sizeof(float));
+>     float *attn_out=malloc(T*C*sizeof(float));
+>     float *ff=malloc(T*M*sizeof(float));
+>
+>     for(int l=0;l<L;l++) {
+>         // Layer norm 1 + QKV for all positions
+>         for(int t=0;t<T;t++) {
+>             layernorm(ln, x+t*C, wo[2]+l*C, wo[3]+l*C);
+>             // QKV projection
+>             float *qkv_t=qkv+t*3*C;
+>             for(int j=0;j<3*C;j++) {
+>                 float s=W[wo[5]+l*3*C+j];
+>                 for(int i=0;i<C;i++) s+=ln[i]*W[wo[4]+l*C*3*C+i*3*C+j];
+>                 qkv_t[j]=s;
+>             }
+>         }
+>         // Multi-head attention
+>         for(int h=0;h<H;h++) {
+>             for(int t=0;t<T;t++) {
+>                 // Compute attention scores
+>                 float *q=qkv+t*3*C+h*D;
+>                 float mx=-1e9;
+>                 float scores[1024];
+>                 for(int t2=0;t2<=t;t2++) {
+>                     float *k=qkv+t2*3*C+C+h*D;
+>                     float dot=0;
+>                     for(int i=0;i<D;i++) dot+=q[i]*k[i];
+>                     dot/=sqrtf(D);
+>                     scores[t2]=dot;
+>                     if(dot>mx) mx=dot;
+>                 }
+>                 float sum=0;
+>                 for(int t2=0;t2<=t;t2++) { scores[t2]=expf(scores[t2]-mx); sum+=scores[t2]; }
+>                 for(int t2=0;t2<=t;t2++) scores[t2]/=sum;
+>                 // Weighted sum of values
+>                 float *o=attn_out+t*C+h*D;
+>                 for(int i=0;i<D;i++) o[i]=0;
+>                 for(int t2=0;t2<=t;t2++) {
+>                     float *v=qkv+t2*3*C+2*C+h*D;
+>                     for(int i=0;i<D;i++) o[i]+=scores[t2]*v[i];
+>                 }
+>             }
+>         }
+>         // Attention projection + residual
+>         for(int t=0;t<T;t++) {
+>             for(int i=0;i<C;i++) {
+>                 float s=W[wo[7]+l*C+i];
+>                 for(int j=0;j<C;j++) s+=attn_out[t*C+j]*W[wo[6]+l*C*C+j*C+i];
+>                 x[t*C+i]+=s;
+>             }
+>         }
+>         // Layer norm 2 + MLP
+>         for(int t=0;t<T;t++) {
+>             layernorm(ln, x+t*C, wo[8]+l*C, wo[9]+l*C);
+>             // FC up
+>             for(int j=0;j<M;j++) {
+>                 float s=W[wo[11]+l*M+j];
+>                 for(int i=0;i<C;i++) s+=ln[i]*W[wo[10]+l*C*M+i*M+j];
+>                 ff[t*M+j]=gelu(s);
+>             }
+>             // FC down + residual
+>             for(int i=0;i<C;i++) {
+>                 float s=W[wo[13]+l*C+i];
+>                 for(int j=0;j<M;j++) s+=ff[t*M+j]*W[wo[12]+l*M*C+j*C+i];
+>                 x[t*C+i]+=s;
+>             }
+>         }
+>     }
+>     // Final layer norm on last position
+>     layernorm(ln, x+(T-1)*C, wo[14], wo[15]);
+>     // Logits = ln @ wte^T
+>     for(int i=0;i<V;i++) {
+>         float s=0;
+>         for(int j=0;j<C;j++) s+=ln[j]*W[wo[0]+i*C+j];
+>         logits[i]=s;
+>     }
+>     free(x); free(ln); free(qkv); free(attn_out); free(ff);
+> }
+>
+> int main(int argc, char **argv) {
+>     if(argc<4) { printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]); return 1; }
+>     // Load weights
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st; fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     init_offsets();
+>     load_vocab(argv[2]);
+>     // Encode input
+>     int tokens[1024], T;
+>     T=encode(argv[3],tokens);
+>     float *logits=malloc(V*sizeof(float));
+>     for(int g=0;g<20;g++) {
+>         forward(tokens,T,logits);
+>         int best=0;
+>         for(int i=1;i<V;i++) if(logits[i]>logits[best]) best=i;
+>         tokens[T++]=best;
+>         decode_token(best);
+>         fflush(stdout);
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app#

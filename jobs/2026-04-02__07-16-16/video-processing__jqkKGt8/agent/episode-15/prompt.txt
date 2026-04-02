@@ -1,0 +1,161 @@
+New Terminal Output:
+
+root@0bc5a546-567b-4e36-988f-ea5fa37b62ed:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Read first frame as background (no runner)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_gray = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     # Process all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>
+>     frame_bottoms = []  # bottom of athlete bounding box per frame
+>     frame_areas = []    # area of detected motion per frame
+>     frame_tops = []     # top of athlete bounding box
+>     frame_cx = []       # center x of athlete
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(bg_gray, gray)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>         thresh = cv2.dilate(thresh, None, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         bottom = 0
+>         top = height
+>         area = 0
+>         cx = 0
+>
+>         if contours:
+>             # Filter small contours (noise)
+>             significant_contours = [c for c in contours if cv2.contourArea(c) > 100]
+>             if significant_contours:
+>                 all_points = np.vstack(significant_contours)
+>                 x, y, w, h = cv2.boundingRect(all_points)
+>                 area = cv2.contourArea(cv2.convexHull(all_points))
+>                 bottom = y + h
+>                 top = y
+>                 cx = x + w // 2
+>
+>         frame_bottoms.append(bottom)
+>         frame_areas.append(area)
+>         frame_tops.append(top)
+>         frame_cx.append(cx)
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Find frames where athlete is present (significant area)
+>     # The athlete is present when area > some threshold
+>     min_athlete_area = 5000
+>     athlete_frames = [i for i in range(len(frame_areas)) if frame_areas[i] > min_athlete_area]
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Determine ground level: the typical bottom position when athlete is running on ground
+>     # Use the first few frames where athlete is visible (before jump) and last few (after jump)
+>     # The bottom should be at its maximum (lowest point in image = highest y value) when on ground
+>
+>     # Get the bottom values for athlete frames
+>     athlete_bottoms = [(i, frame_bottoms[i]) for i in athlete_frames]
+>
+>     # Find the ground level as the median of the highest bottom values
+>     # When running on ground, bottom should be consistently high
+>     bottom_values = [frame_bottoms[i] for i in athlete_frames]
+>     ground_level = np.percentile(bottom_values, 75)  # Use 75th percentile as ground reference
+>
+>     # The jump is characterized by the bottom rising (decreasing y value) significantly
+>     # Find the period where bottom drops below ground level by a threshold
+>     jump_threshold = ground_level - 30  # At least 30 pixels above ground level
+>
+>     # Find airborne frames: where bottom is significantly above ground
+>     airborne_frames = [i for i in athlete_frames if frame_bottoms[i] < jump_threshold]
+>
+>     if not airborne_frames:
+>         # Try with a smaller threshold
+>         jump_threshold = ground_level - 15
+>         airborne_frames = [i for i in athlete_frames if frame_bottoms[i] < jump_threshold]
+>
+>     if not airborne_frames:
+>         raise ValueError("No jump detected in video")
+>
+>     first_airborne = min(airborne_frames)
+>     last_airborne = max(airborne_frames)
+>
+>     # Takeoff frame: the frame just before the athlete becomes airborne
+>     # This is the last frame where the athlete is on the ground before the jump
+>     # Look backwards from first_airborne to find where bottom starts dropping
+>     takeoff_frame = first_airborne - 1
+>
+>     # Refine: walk back to find the actual start of the upward motion
+>     # The takeoff is when the bottom starts to decrease from ground level
+>     for i in range(first_airborne - 1, max(first_airborne - 10, 0), -1):
+>         if i in athlete_frames and frame_bottoms[i] >= ground_level - 10:
+>             takeoff_frame = i
+>             break
+>
+>     # Landing frame: the first frame where the athlete returns to ground after being airborne
+>     # Look forward from last_airborne
+>     landing_frame = last_airborne + 1
+>
+>     # Refine: find the first frame after the airborne period where bottom returns near ground
+>     for i in range(last_airborne, min(last_airborne + 10, len(frame_bottoms))):
+>         if frame_bottoms[i] >= ground_level - 15:
+>             landing_frame = i
+>             break
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame,
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@0bc5a546-567b-4e36-988f-ea5fa37b62ed:/app#

@@ -1,0 +1,150 @@
+New Terminal Output:
+
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app# cat > /app/steal.py << 'PYEOF'
+==============================> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_boundary_diffs_on_line(x0, direction, t_range=(-5, 5), num_probes=80):
+>     """Walk along a line x0 + t*direction and detect gradient changes at ReLU boundaries.
+>     Each gradient change corresponds to a single neuron switching on/off,
+>     yielding a vector proportional to A2[0,i] * A1[i,:]."""
+>     ts = np.linspace(t_range[0], t_range[1], num_probes)
+>     grads = []
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = numerical_gradient(x)
+>         grads.append(g)
+>
+>     boundary_diffs = []
+>     for i in range(1, len(grads)):
+>         diff = grads[i] - grads[i-1]
+>         if np.linalg.norm(diff) > 1e-4:
+>             boundary_diffs.append(diff)
+>     return boundary_diffs
+>
+> def cluster_by_direction(diffs, tol=0.01):
+>     """Cluster vectors by direction (ignoring sign and magnitude).
+>     Vectors that are parallel (or anti-parallel) are grouped together."""
+>     diffs = np.array(diffs)
+>     norms = np.linalg.norm(diffs, axis=1)
+>     mask = norms > 1e-4
+>     diffs = diffs[mask]
+>     norms = norms[mask]
+>     normalized = diffs / norms[:, None]
+>
+>     clusters = []
+>     representatives = []
+>
+>     for i in range(len(normalized)):
+>         d = normalized[i]
+>         found = False
+>         for ci in range(len(representatives)):
+>             if np.abs(np.dot(d, representatives[ci])) > 1.0 - tol:
+>                 clusters[ci].append(i)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append([i])
+>             representatives.append(d)
+>
+>     return clusters, representatives, diffs
+>
+> # ============================================================
+> # Step 1: Walk along many random lines and collect gradient
+> #         differences at ReLU boundaries
+> # ============================================================
+> print("Step 1: Collecting gradient differences at ReLU boundaries...")
+> np.random.seed(42)
+>
+> all_diffs = []
+> num_lines = 60
+> for line_idx in range(num_lines):
+>     x0 = np.random.randn(10) * 3.0
+>     direction = np.random.randn(10)
+>     direction /= np.linalg.norm(direction)
+>     diffs = find_boundary_diffs_on_line(x0, direction)
+>     all_diffs.extend(diffs)
+>     if (line_idx + 1) % 20 == 0:
+>         print(f"  Lines {line_idx+1}/{num_lines}: total boundary crossings = {len(all_diffs)}")
+>
+> print(f"  Total gradient differences: {len(all_diffs)}")
+>
+> # ============================================================
+> # Step 2: Cluster by direction to identify unique neurons
+> # ============================================================
+> print("\nStep 2: Clustering by direction...")
+> clusters, representatives, diffs_arr = cluster_by_direction(all_diffs)
+>
+> cluster_sizes = [(len(c), ci) for ci, c in enumerate(clusters)]
+> cluster_sizes.sort(key=lambda x: -x[0])
+>
+> print(f"  Found {len(clusters)} direction clusters")
+> print("  Cluster sizes (sorted):")
+> for size, ci in cluster_sizes:
+>     print(f"    size={size}")
+>
+> # ============================================================
+> # Step 3: Determine the number of hidden neurons automatically
+> #         Real neuron clusters will be large; noise clusters small.
+> #         Use a gap-based heuristic.
+> # ============================================================
+> print("\nStep 3: Determining number of hidden neurons...")
+> sorted_sizes = [s for s, _ in cluster_sizes]
+>
+> # Find the biggest gap in cluster sizes
+> num_neurons = len(sorted_sizes)  # default: all clusters
+> for i in range(1, len(sorted_sizes)):
+>     # If there's a large drop (e.g., > 50% decrease), cut here
+>     if sorted_sizes[i] < sorted_sizes[i-1] * 0.4:
+>         num_neurons = i
+>         break
+>
+> print(f"  Detected {num_neurons} hidden neurons")
+>
+> # ============================================================
+> # Step 4: For each neuron cluster, compute a representative
+> #         vector (median of aligned differences)
+> # ============================================================
+> print("\nStep 4: Recovering A1 rows...")
+> recovered_rows = []
+> for rank in range(num_neurons):
+>     size, ci = cluster_sizes[rank]
+>     cluster_diffs = diffs_arr[clusters[ci]]
+>     # Align signs so all vectors point in the same direction
+>     ref = cluster_diffs[0] / np.linalg.norm(cluster_diffs[0])
+>     aligned = []
+>     for d in cluster_diffs:
+>         if np.dot(d, ref) < 0:
+>             aligned.append(-d)
+>         else:
+>             aligned.append(d)
+>     aligned = np.array(aligned)
+>     median_diff = np.median(aligned, axis=0)
+>     recovered_rows.append(median_diff)
+>
+> recovered_A1 = np.array(recovered_rows)
+> print(f"  Recovered A1 shape: {recovered_A1.shape}")
+> print(f"  (Each row is a row of A1 scaled by the corresponding A2 weight)")
+>
+> # ============================================================
+> # Step 5: Save result
+> # ============================================================
+> np.save('/app/stolen_A1.npy', recovered_A1)
+> print(f"\nSaved recovered A1 to /app/stolen_A1.npy")
+> print("\nRecovered A1 matrix:")
+> print(recovered_A1)
+> PYEOF
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app#

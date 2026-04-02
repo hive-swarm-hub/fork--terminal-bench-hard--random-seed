@@ -1,0 +1,106 @@
+New Terminal Output:
+
+fc_trans=False, fp_trans=True: magnitude = 18.3635
+fc_trans=True, fp_trans=False: magnitude = 285.3861
+fc_trans=True, fp_trans=True: magnitude = 26.7692
+root@8df439a3-4a5e-4d59-9699-3f210c1a5d5b:/app# python3 << 'EOF'
+> import struct, math
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> buf = f.read()
+> f.close()
+>
+> V, C, L, H, D, M = 50257, 768, 12, 12, 64, 3072
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'<{n}f', buf, off*4))
+>
+> p = 0
+> wte = p; p += V*C
+> wpe = p; p += 1024*C
+> ln1w = p; p += L*C
+> ln1b = p; p += L*C
+> qkvw = p; p += L*C*3*C
+> qkvb = p; p += L*3*C
+> apw = p; p += L*C*C
+> apb = p; p += L*C
+> ln2w = p; p += L*C
+> ln2b = p; p += L*C
+> fcw = p; p += L*C*M
+> fcb = p; p += L*M
+> fpw = p; p += L*M*C
+> fpb = p; p += L*C
+> lfw = p; p += C
+> lfb = p; p += C
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/(v+1e-5)**0.5
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(1.0+w[i])+b[i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> # Try all 8 combos: qkv_trans, ap_trans, fc_trans, fp_trans
+> # But we know fp_trans=True helps. Let's try ap_trans too
+> for ap_trans in [False, True]:
+>     for qkv_trans in [False, True]:
+>         tokens = [464]
+>         x = [F(wte + tokens[0]*C, C)[i] + F(wpe, C)[i] for i in range(C)]
+>         ok = True
+>         for layer in range(L):
+>             ln_out = layernorm(x, ln1w + layer*C, ln1b + layer*C)
+>             w = F(qkvw + layer*C*3*C, C*3*C)
+>             b_vals = F(qkvb + layer*3*C, 3*C)
+>             qkv_out = b_vals[:]
+>             for j in range(3*C):
+>                 s = b_vals[j]
+>                 for i in range(C):
+>                     if qkv_trans:
+>                         s += ln_out[i] * w[j*C + i]
+>                     else:
+>                         s += ln_out[i] * w[i*3*C + j]
+>                 qkv_out[j] = s
+>             attn_out = qkv_out[2*C:3*C]
+>             pw = F(apw + layer*C*C, C*C)
+>             pb = F(apb + layer*C, C)
+>             proj = pb[:]
+>             for i in range(C):
+>                 s = pb[i]
+>                 for j in range(C):
+>                     if ap_trans:
+>                         s += attn_out[j] * pw[i*C + j]  # transposed
+>                     else:
+>                         s += attn_out[j] * pw[j*C + i]  # original
+>                 proj[i] = s
+>             x = [x[i] + proj[i] for i in range(C)]
+>             ln2_out = layernorm(x, ln2w + layer*C, ln2b + layer*C)
+>             fw = F(fcw + layer*C*M, C*M)
+>             fb = F(fcb + layer*M, M)
+>             fc_out = [0.0]*M
+>             for j in range(M):
+>                 s = fb[j]
+>                 for i in range(C):
+>                     s += ln2_out[i] * fw[i*M + j]
+>                 fc_out[j] = gelu(s)
+>             fpw_vals = F(fpw + layer*M*C, M*C)
+>             fpb_vals = F(fpb + layer*C, C)
+>             for i in range(C):
+>                 s = fpb_vals[i]
+>                 for j in range(M):
+>                     s += fc_out[j] * fpw_vals[i*M + j]  # transposed
+>                 x[i] += s
+>             xmag = (sum(v*v for v in x)/C)**0.5
+>             if xmag > 1000:
+>                 ok = False
+>                 break
+>         if ok:
+>             print(f"ap_trans={ap_trans}, qkv_trans={qkv_trans}: CONVERGED, final mag={xmag:.4f}")
+>         else:
+>             print(f"ap_trans={ap_trans}, qkv_trans={qkv_trans}: DIVERGED at layer {layer}, mag={xmag:.4f}")
+> EOF
+

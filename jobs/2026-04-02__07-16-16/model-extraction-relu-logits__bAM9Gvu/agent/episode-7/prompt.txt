@@ -1,0 +1,153 @@
+New Terminal Output:
+
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def numerical_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) using central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def find_boundary_on_line(x0, direction, t_range=(-10, 10), num_probes=100):
+>     """Find points along a line where the gradient changes (ReLU boundaries).
+>     Returns list of gradient differences at boundaries."""
+>     ts = np.linspace(t_range[0], t_range[1], num_probes)
+>
+>     # Compute gradients at sampled points along the line
+>     grads = []
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = numerical_gradient(x)
+>         grads.append(g)
+>
+>     # Find where gradient changes
+>     boundary_diffs = []
+>     for i in range(1, len(grads)):
+>         diff = grads[i] - grads[i-1]
+>         norm = np.linalg.norm(diff)
+>         if norm > 1e-4:  # Significant gradient change
+>             boundary_diffs.append(diff)
+>
+>     return boundary_diffs
+>
+> print("Collecting gradient differences at ReLU boundaries...")
+> np.random.seed(42)
+>
+> all_diffs = []
+> num_lines = 50
+> for line_idx in range(num_lines):
+>     x0 = np.random.randn(10) * 2.0
+>     direction = np.random.randn(10)
+>     direction /= np.linalg.norm(direction)
+>
+>     diffs = find_boundary_on_line(x0, direction, t_range=(-5, 5), num_probes=80)
+>     all_diffs.extend(diffs)
+>     if (line_idx + 1) % 10 == 0:
+>         print(f"  Line {line_idx+1}/{num_lines}: found {len(diffs)} boundaries, total {len(all_diffs)}")
+>
+> print(f"Total gradient differences found: {len(all_diffs)}")
+>
+> # Now cluster these differences by direction
+> # Each diff should be proportional to A2[0,i] * A1[i,:] for some neuron i
+> # But a single boundary crossing changes exactly one neuron, so each diff is exactly one scaled row
+>
+> def cluster_by_direction(diffs, tol=0.01):
+>     """Cluster vectors by direction (ignoring sign and magnitude)."""
+>     if len(diffs) == 0:
+>         return [], []
+>
+>     diffs = np.array(diffs)
+>     norms = np.linalg.norm(diffs, axis=1)
+>     # Filter out near-zero diffs
+>     mask = norms > 1e-4
+>     diffs = diffs[mask]
+>     norms = norms[mask]
+>     normalized = diffs / norms[:, None]
+>
+>     clusters = []  # list of lists of indices
+>     representatives = []  # representative normalized direction
+>
+>     for i in range(len(normalized)):
+>         d = normalized[i]
+>         found = False
+>         for ci in range(len(representatives)):
+>             dot = np.abs(np.dot(d, representatives[ci]))
+>             if dot > 1.0 - tol:
+>                 clusters[ci].append(i)
+>                 found = True
+>                 break
+>         if not found:
+>             clusters.append([i])
+>             representatives.append(d)
+>
+>     return clusters, representatives, diffs
+>
+> clusters, representatives, diffs_arr = cluster_by_direction(all_diffs)
+> print(f"Found {len(clusters)} direction clusters")
+>
+> # Sort by cluster size
+> cluster_sizes = [(len(c), ci) for ci, c in enumerate(clusters)]
+> cluster_sizes.sort(key=lambda x: -x[0])
+>
+> print("\nCluster sizes:")
+> for size, ci in cluster_sizes[:25]:
+>     print(f"  Cluster {ci}: size={size}")
+>
+> # Take top 20 clusters
+> # For each cluster, compute the median vector (to reduce noise)
+> recovered_rows = []
+> for rank, (size, ci) in enumerate(cluster_sizes[:20]):
+>     cluster_diffs = diffs_arr[clusters[ci]]
+>     # Align signs: make all point in the same direction as the first
+>     ref = cluster_diffs[0] / np.linalg.norm(cluster_diffs[0])
+>     aligned = []
+>     for d in cluster_diffs:
+>         if np.dot(d, ref) < 0:
+>             aligned.append(-d)
+>         else:
+>             aligned.append(d)
+>     aligned = np.array(aligned)
+>     # Take median to reduce noise
+>     median_diff = np.median(aligned, axis=0)
+>     recovered_rows.append(median_diff)
+>
+> recovered_A1 = np.array(recovered_rows)
+> print(f"\nRecovered A1 shape: {recovered_A1.shape}")
+>
+> # Save
+> np.save('/app/stolen_A1.npy', recovered_A1)
+> print("Saved stolen_A1 to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as actual_A1, A2 as actual_A2
+>
+> print("\nVerification (cosine similarity with actual A1 rows):")
+> matched = set()
+> for i, rrow in enumerate(recovered_A1):
+>     rrow_norm = rrow / np.linalg.norm(rrow)
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(actual_A1.shape[0]):
+>         arow_norm = actual_A1[j] / np.linalg.norm(actual_A1[j])
+>         sim = np.abs(np.dot(rrow_norm, arow_norm))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     # Also check the scaling ratio
+>     scale = np.linalg.norm(rrow) / np.linalg.norm(actual_A1[best_j])
+>     expected_scale = np.abs(actual_A2[0, best_j])
+>     print(f"  Row {i} -> actual row {best_j}, cosine_sim={best_sim:.6f}, |scale|={scale:.6f}, |A2[0,{best_j}]|={expected_scale:.6f}")
+>
+> print(f"\nMatched {len(matched)} out of {actual_A1.shape[0]} actual rows")
+> PYEOF
+root@65da4b9e-08f2-441d-872a-564b6d2f81d1:/app#
