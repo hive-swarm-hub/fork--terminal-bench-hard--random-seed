@@ -95,7 +95,7 @@ _PLAN_DESC = (
 )
 
 _COMMANDS_DESC = (
-    "Array of commands to execute. Each command has keystrokes and duration."
+    "The commands array can be empty if you want to wait without taking action."
 )
 
 _KEYSTROKES_DESC = (
