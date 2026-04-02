@@ -1,0 +1,179 @@
+New Terminal Output:
+
+root@ed610881-4085-4a9a-8be7-b3d8c6d55c1f:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def revcomp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Since these are circular plasmids, let's also check if the difference might
+> # span the origin. Double the input and look for the output as a rotation.
+> input_doubled = input_seq + input_seq
+>
+> # Check all rotations of input vs all rotations of output
+> # First check: are they different circular sequences?
+> output_doubled = output_seq + output_seq
+> is_same_rotation = False
+> for i in range(len(input_seq)):
+>     rotated = input_seq[i:] + input_seq[:i]
+>     if rotated == output_seq:
+>         is_same_rotation = True
+>         break
+> print(f"Same circular sequence (just rotated)? {is_same_rotation}")
+>
+> # For circular sequences, we should find the alignment that minimizes the edit.
+> # Let's try all rotations of the input and find the one with minimum differences
+> # compared to the output (considering the output might also be at a different rotation)
+>
+> # But since both start with the same long prefix (215 nt), the alignment is clear.
+> # Let's verify the insertion is correct for the linear representation given.
+>
+> product = input_seq[:215] + 'TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG' + input_seq[215:]
+> print(f"Product == Output: {product == output_seq}")
+> print(f"Product length: {len(product)}, Output length: {len(output_seq)}")
+>
+> # Now verify the Q5 SDM mechanism:
+> # In Q5 SDM, back-to-back primers amplify the entire plasmid
+> # The forward primer anneals downstream of the mutation site
+> # The reverse primer anneals upstream (on the opposite strand)
+> # For an insertion, the forward primer carries the insertion as a 5' tail
+>
+> # After PCR:
+> # The linear product has:
+> #   5' end: fwd_primer (tail + annealing) -> extends through template
+> #   3' end: complement of rev_primer
+> # After KLD (kinase, ligase, DpnI):
+> #   The blunt ends are phosphorylated and ligated
+> #   DpnI digests the methylated template
+> #   Result: circular product with the insertion
+>
+> fwd_primer = 'TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT'
+> rev_primer = 'CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA'
+>
+> fwd_tail = 'TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG'
+> fwd_anneal = 'CAAGGGCGAGGAGCTGTT'
+> rev_anneal_rc = revcomp(rev_primer)  # This is what the rev primer anneals to on the top strand
+>
+> print(f"\nFwd annealing region on input: {input_seq[215:215+18]}")
+> print(f"Fwd annealing primer:          {fwd_anneal}")
+> print(f"Match: {input_seq[215:215+18] == fwd_anneal}")
+>
+> print(f"\nRev primer anneals to (top strand): {rev_anneal_rc}")
+> print(f"Input upstream region:              {input_seq[215-45:215]}")
+> print(f"Match: {input_seq[215-45:215] == rev_anneal_rc}")
+>
+> # The PCR product (linear, top strand) would be:
+> # 5'-[fwd_tail][fwd_anneal][template continues...around circle...][region complementary to rev]
+> # = fwd_tail + input[215:215+18] + input[215+18:] + input[:215-45] + input[215-45:215]
+> # Wait, that's not right. Let me think again.
+>
+> # Actually in PCR of a circular template with back-to-back primers:
+> # Cycle 1:
+> #   Fwd primer anneals to top strand at pos 215-233, extends rightward
+> #   Rev primer anneals to top strand at pos 170-215 (as revcomp), extends leftward on bottom strand
+> # The key insight: the two primers face AWAY from each other on the template
+> # So they amplify everything BETWEEN them going the long way around
+>
+> # The linear PCR product top strand is:
+> # 5'-[fwd full primer]-[template from 233 to end]-[template from 0 to 170]-3'
+> # And the bottom strand (from rev primer) is:
+> # 3'-...-[template complement from 233 to end]-[template complement from 0 to 170]-[rev primer]-5'
+>
+> # After ligation of the blunt ends:
+> # The circular product joins the 5' of fwd to the 3' extended from rev
+> # and the 3' extended from fwd to the 5' of rev
+>
+> # Circular product = fwd_tail + input[215:] + input[:215]
+> # = fwd_tail + input[215:] + input[:215]
+> # Which is the same as inserting fwd_tail at position 215
+>
+> circular_product = fwd_tail + input_seq[215:] + input_seq[:215]
+> # Check if this matches output as a circular sequence
+> cp_doubled = circular_product + circular_product
+> if output_seq in cp_doubled:
+>     offset = cp_doubled.index(output_seq)
+>     print(f"\nCircular product matches output! (rotation offset: {offset})")
+> else:
+>     # Also check direct match
+>     linear_product = input_seq[:215] + fwd_tail + input_seq[215:]
+>     if linear_product == output_seq:
+>         print("\nLinear insertion matches output directly!")
+>     else:
+>         print("\nWARNING: Product does not match output!")
+>
+> print("\n=== Final Primer Summary ===")
+> print(f"Forward: {fwd_primer}")
+> print(f"  Total length: {len(fwd_primer)}")
+> print(f"  Tail (insertion): {fwd_tail} ({len(fwd_tail)} nt)")
+> print(f"  Annealing: {fwd_anneal} ({len(fwd_anneal)} nt, Tm={get_tm(fwd_anneal):.2f})")
+> print(f"Reverse: {rev_primer}")
+> print(f"  Total length: {len(rev_primer)}")
+> print(f"  Annealing: {rev_primer} ({len(rev_primer)} nt, Tm={get_tm(rev_primer):.2f})")
+> print(f"Tm difference: {abs(get_tm(fwd_anneal) - get_tm(rev_primer)):.4f}")
+> print(f"\nAll constraints met:")
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_primer)
+> print(f"  Fwd anneal length 15-45: {15 <= len(fwd_anneal) <= 45} ({len(fwd_anneal)})")
+> print(f"  Rev anneal length 15-45: {15 <= len(rev_primer) <= 45} ({len(rev_primer)})")
+> print(f"  Fwd Tm 58-72: {58 <= fwd_tm <= 72} ({fwd_tm:.2f})")
+> print(f"  Rev Tm 58-72: {58 <= rev_tm <= 72} ({rev_tm:.2f})")
+> print(f"  Tm diff <= 5: {abs(fwd_tm - rev_tm) <= 5} ({abs(fwd_tm - rev_tm):.4f})")
+> print(f"  Min primer pairs: 1 (single insertion)")
+> PYEOF
+Same circular sequence (just rotated)? False
+Product == Output: True
+Product length: 3630, Output length: 3630
+
+Fwd annealing region on input: CAAGGGCGAGGAGCTGTT
+Fwd annealing primer:          CAAGGGCGAGGAGCTGTT
+Match: True
+
+Rev primer anneals to (top strand): TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Input upstream region:              TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Match: True
+
+Circular product matches output! (rotation offset: 3415)
+
+=== Final Primer Summary ===
+Forward: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+  Total length: 57
+  Tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 nt)
+  Annealing: CAAGGGCGAGGAGCTGTT (18 nt, Tm=63.81)
+Reverse: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Total length: 45
+  Annealing: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 nt, Tm=63.81)
+Tm difference: 0.0030
+
+All constraints met:
+  Fwd anneal length 15-45: True (18)
+  Rev anneal length 15-45: True (45)
+  Fwd Tm 58-72: True (63.81)
+  Rev Tm 58-72: True (63.81)
+  Tm diff <= 5: True (0.0030)
+  Min primer pairs: 1 (single insertion)
+root@ed610881-4085-4a9a-8be7-b3d8c6d55c1f:/app#

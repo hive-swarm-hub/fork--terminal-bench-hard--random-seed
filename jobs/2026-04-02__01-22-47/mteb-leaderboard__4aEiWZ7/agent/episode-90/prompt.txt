@@ -1,0 +1,124 @@
+New Terminal Output:
+
+=== to_dataframe ===
+    def to_dataframe(
+        self,
+        aggregation_level: Literal["subset", "split", "task"] = "task",
+        aggregation_fn: Callable[[list[Score]], Any] | None = None,
+        include_model_revision: bool = False,
+        format: Literal["wide", "long"] = "wide",
+    ) -> pd.DataFrame:
+        """Get a DataFrame with the scores for all models and tasks.
+        The DataFrame will have the following columns in addition to the metadata columns:
+
+        - model_name: The name of the model.
+        - task_name: The name of the task.
+        - score: The main score of the model on the task.
+
+        In addition, the DataFrame can have the following columns depending on the aggregation level:
+
+        - split: The split of the task. E.g. "test", "train", "validation".
+        - subset: The subset of the task. E.g. "en", "fr-en".
+
+        Afterwards, the DataFrame will be aggregated according to the aggregation method and pivoted to either a wide format.
+
+        Args:
+            aggregation_level: The aggregation to use. Can be one of:
+                - "subset"/None: No aggregation will be done. The DataFrame will have one row per model, task, split and subset.
+                - "split": Aggregates the scores by split. The DataFrame will have one row per model, task and split.
+                - "task": Aggregates the scores by task. The DataFrame will have one row per model and task.
+            aggregation_fn: The function to use for aggregation. If None, the mean will be used.
+            include_model_revision: If True, the model revision will be included in the DataFrame. If False, it will be excluded.
+                If there are multiple revisions for the same model, they will be joined using the `join_revisions` method.
+            format: The format of the DataFrame. Can be one of:
+                - "wide": The DataFrame will be of shape (number of tasks, number of models). Scores will be in the cells.
+                - "long": The DataFrame will of length (number of tasks * number of model). Scores will be in columns.
+
+        Returns:
+            A DataFrame with the scores for all models and tasks.
+        """
+        bench_results = self
+        if include_model_revision is False:
+            bench_results = bench_results.join_revisions()
+
+        scores_data = []
+        for model_result in bench_results:
+            scores_data.extend(model_result._get_score_for_table())
+
+        if not scores_data:
+            logger.warning("No scores data available. Returning empty DataFrame.")
+            return pd.DataFrame()
+
+        # Create DataFrame
+        df = pd.DataFrame(scores_data)
+
+        _columns = ["model_name"]
+        if include_model_revision is False:
+            df = df.drop(columns=["model_revision"])
+        else:
+            _columns.append("model_revision")
+
+        # Aggregation
+        return _aggregate_and_pivot(
+            df,
+            columns=_columns,
+            aggregation_level=aggregation_level,
+            aggregation_fn=aggregation_fn,
+            format=format,
+        )
+
+
+=== get_scores ===
+    def get_scores(
+        self,
+        splits: list[Split] | None = None,
+        languages: list[ISO_LANGUAGE | ISO_LANGUAGE_SCRIPT] | None = None,
+        scripts: list[ISO_LANGUAGE_SCRIPT] | None = None,
+        getter: Callable[[ScoresDict], Score] | None = None,
+        aggregation: Callable[[list[Score]], Any] | None = None,
+        format: Literal["wide", "long"] = "wide",
+    ) -> list[dict]:
+        # TODO: Convert to private function in v2
+        entries = []
+        if format == "wide":
+            for model_res in self:
+                try:
+                    model_scores = model_res.get_scores(
+                        splits=splits,
+                        languages=languages,
+                        scripts=scripts,
+                        getter=getter,
+                        aggregation=aggregation,
+                        format="wide",
+                    )
+                    entries.append(
+                        {
+                            "model": model_res.model_name,
+                            "revision": model_res.model_revision,
+                            **model_scores,  # type: ignore
+                        }
+                    )
+                except Exception as e:
+                    warnings.warn(
+                        f"Couldn't get scores for {model_res.model_name}({model_res.model_revision}), due to: {e}"
+                    )
+        if format == "long":
+            for model_res in self:
+                try:
+                    entries.extend(
+                        model_res.get_scores(
+                            splits=splits,
+                            languages=languages,
+                            scripts=scripts,
+                            getter=getter,
+                            aggregation=aggregation,
+                            format="long",
+                        )
+                    )
+                except Exception as e:
+                    warnings.warn(
+                        f"Couldn't get scores for {model_res.model_name}({model_res.model_revision}), due to: {e}"
+                    )
+        return entries
+
+root@8f4ad5a9-0b5b-4e72-b10f-f7be4c33cb26:/app#

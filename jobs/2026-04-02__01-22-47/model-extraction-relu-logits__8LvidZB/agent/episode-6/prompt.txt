@@ -1,0 +1,168 @@
+New Terminal Output:
+
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-7):
+>     """Compute gradient via central finite differences."""
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_minus = x.copy()
+>         x_plus[i] += eps
+>         x_minus[i] -= eps
+>         grad[i] = (forward(x_plus) - forward(x_minus)) / (2 * eps)
+>     return grad
+>
+> def normalize(v):
+>     n = np.linalg.norm(v)
+>     if n < 1e-12:
+>         return v, 0.0
+>     return v / n, n
+>
+1> def is_new_direction(v, existing, tol=0.998):
+>     """Check if v is a new direction not already in existing list."""
+>     v_n, v_norm = normalize(v)
+>     if v_norm < 1e-10:
+>         return False
+>     for e in existing:
+>         e_n, e_norm = normalize(e)
+>         if e_norm < 1e-10:
+>             continue
+>         if abs(np.dot(v_n, e_n)) > tol:
+>             return False
+>     return True
+>
+> def grads_equal(g1, g2, tol=1e-7):
+>     return np.linalg.norm(g1 - g2) < tol
+>
+> def find_transitions_on_segment(x1, x2, g1, g2, found_rows, depth=0, max_depth=50):
+>     """Recursively find all single-neuron transitions between x1 and x2."""
+>     if depth > max_depth:
+>         return
+>     if grads_equal(g1, g2):
+>         return
+>
+>     xm = (x1 + x2) / 2.0
+>     gm = compute_gradient(xm)
+>
+>     if grads_equal(gm, g1):
+>         # Transition is in right half
+>         find_transitions_on_segment(xm, x2, gm, g2, found_rows, depth+1, max_depth)
+>     elif grads_equal(gm, g2):
+>         # Transition is in left half
+>         find_transitions_on_segment(x1, xm, g1, gm, found_rows, depth+1, max_depth)
+>     else:
+>         # Multiple transitions: gm differs from both g1 and g2
+>         # Recurse on both halves
+>         find_transitions_on_segment(x1, xm, g1, gm, found_rows, depth+1, max_depth)
+>         find_transitions_on_segment(xm, x2, gm, g2, found_rows, depth+1, max_depth)
+>
+> def find_transitions_on_segment_iterative(x1, x2, g1, g2, found_rows):
+>     """Find all transitions on a segment by recursive subdivision."""
+>     # Use a stack-based approach
+>     stack = [(x1, x2, g1, g2, 0)]
+>
+>     while stack:
+>         xa, xb, ga, gb, depth = stack.pop()
+>         if depth > 55 or grads_equal(ga, gb):
+>             if depth > 55 and not grads_equal(ga, gb):
+>                 # We've converged to a single transition
+>                 diff = gb - ga
+>                 if np.linalg.norm(diff) > 1e-9 and is_new_direction(diff, found_rows):
+>                     found_rows.append(diff.copy())
+>                     print(f"  Found direction {len(found_rows)}: norm={np.linalg.norm(diff):.8f}")
+>             continue
+>
+>         xm = (xa + xb) / 2.0
+>         gm = compute_gradient(xm)
+>
+>         if grads_equal(gm, ga):
+>             stack.append((xm, xb, gm, gb, depth+1))
+>         elif grads_equal(gm, gb):
+>             stack.append((xa, xm, ga, gm, depth+1))
+>         else:
+>             # Multiple transitions
+>             stack.append((xa, xm, ga, gm, depth+1))
+>             stack.append((xm, xb, gm, gb, depth+1))
+>
+> found_rows = []
+> np.random.seed(42)
+>
+> print("Walking along random lines to find neuron boundaries...")
+>
+> for trial in range(300):
+>     if len(found_rows) >= 20:
+>         break
+>
+>     # Pick a random line
+>     x0 = np.random.randn(10) * 2.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Sample along the line
+>     num_steps = 30
+>     ts = np.linspace(-5, 5, num_steps)
+>
+>     prev_g = None
+>     prev_x = None
+>
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = compute_gradient(x)
+>
+>         if prev_g is not None and not grads_equal(prev_g, g):
+>             # Found a gradient change - find exact transitions
+>             find_transitions_on_segment_iterative(prev_x, x, prev_g, g, found_rows)
+>             if len(found_rows) >= 20:
+>                 break
+>
+>         prev_g = g
+>         prev_x = x.copy()
+>
+>     if trial % 10 == 0:
+>         print(f"Trial {trial}: found {len(found_rows)} directions so far")
+>
+> print(f"\nTotal unique directions found: {len(found_rows)}")
+>
+> if len(found_rows) < 20:
+>     print(f"WARNING: Only found {len(found_rows)} directions, expected 20")
+>
+> # Build the stolen A1 matrix
+> # Each found row is A2[0,k] * A1[k,:] for some neuron k
+> # Normalize to unit length (scaling is arbitrary per task)
+> stolen_A1 = np.array(found_rows[:20])
+> for i in range(len(stolen_A1)):
+>     n = np.linalg.norm(stolen_A1[i])
+>     if n > 1e-10:
+>         stolen_A1[i] = stolen_A1[i] / n
+>
+> print(f"Stolen A1 shape: {stolen_A1.shape}")
+> np.save('/app/stolen_A1.npy', stolen_A1)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> from forward import A1 as true_A1
+> true_A1_norm = true_A1.copy()
+> for i in range(true_A1.shape[0]):
+>     true_A1_norm[i] = true_A1[i] / np.linalg.norm(true_A1[i])
+>
+> print("\nVerification (cosine similarity):")
+> matched = set()
+> for i in range(stolen_A1.shape[0]):
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(true_A1_norm.shape[0]):
+>         sim = abs(np.dot(stolen_A1[i], true_A1_norm[j]))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     print(f"  Stolen row {i} -> True row {best_j}: cos_sim = {best_sim:.8f}")
+>
+> print(f"\nMatched {len(matched)} unique true rows out of 20")
+> PYTHON_EOF
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app#

@@ -1,0 +1,247 @@
+New Terminal Output:
+
+root@09298989-065e-4ce0-a378-9d95b4a63341:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+> import html as html_module
+>
+>
+> def decode_entity(match):
+>     text = match.group(0).rstrip(';')
+>     try:
+>         if text.startswith('&#x') or text.startswith('&#X'):
+>             return chr(int(text[3:], 16))
+>         elif text.startswith('&#'):
+>             return chr(int(text[2:]))
+>     except (ValueError, OverflowError):
+>         return match.group(0)
+>     return match.group(0)
+>
+>
+> def decode_named_entity(match):
+>     try:
+>         return html_module.unescape(match.group(0))
+>     except:
+>         return match.group(0)
+>
+>
+> def decode_html_entities(value):
+>     """Decode HTML entities in a string."""
+>     decoded = re.sub(r'&#[xX]?[0-9a-fA-F]+;?', decode_entity, value)
+>     decoded = re.sub(r'&[a-zA-Z]+;', decode_named_entity, decoded)
+>     return decoded
+>
+>
+> def is_dangerous_url(value):
+>     """Check if a URL value contains javascript: or other dangerous protocols."""
+>     decoded = decode_html_entities(value)
+>     # Remove whitespace, tabs, newlines, null bytes and control chars for checking
+>     check = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded)
+>     if re.match(r'(?:javascript|vbscript|livescript|mocha)\s*:', check, re.IGNORECASE):
+>         return True
+>     if re.match(r'data\s*:', check, re.IGNORECASE):
+>         if re.search(r'(?:script|javascript|vbscript|alert|prompt|confirm|eval|expression)', check, re.IGNORECASE):
+>             return True
+>     return False
+>
+>
+> def clean_tag_str(tag_str):
+>     """Remove dangerous attributes from an HTML tag string."""
+>     # Use [\s/]+ to match whitespace or / as attribute separators
+>     # Remove event handler attributes (on*="...")
+>     # Double-quoted
+>     tag_str = re.sub(r'[\s/]+on\w+\s*=\s*"[^"]*"', '', tag_str, flags=re.IGNORECASE)
+>     # Single-quoted
+>     tag_str = re.sub(r"[\s/]+on\w+\s*=\s*'[^']*'", '', tag_str, flags=re.IGNORECASE)
+>     # Unquoted
+>     tag_str = re.sub(r'[\s/]+on\w+\s*=\s*[^\s\'">/][^\s>]*', '', tag_str, flags=re.IGNORECASE)
+>     # Bare attribute (no value)
+>     tag_str = re.sub(r'[\s/]+on\w+(?=[\s/]|/?>|>)', '', tag_str, flags=re.IGNORECASE)
+>
+>     # Clean dangerous URLs in href, src, action, etc.
+>     url_attrs = r'(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite|xlink:href)'
+>
+>     # Double-quoted URL attributes
+>     def clean_dq_url(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + '""'
+>         return m.group(0)
+>
+>     tag_str = re.sub(
+>         r'([\s/]+' + url_attrs + r'\s*=\s*)"([^"]*)"',
+>         clean_dq_url,
+>         tag_str,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Single-quoted URL attributes
+>     def clean_sq_url(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + "''"
+>         return m.group(0)
+>
+>     tag_str = re.sub(
+>         r"([\s/]+" + url_attrs + r"\s*=\s*)'([^']*)'",
+>         clean_sq_url,
+>         tag_str,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Unquoted URL attributes
+>     def clean_uq_url(m):
+>         prefix = m.group(1)
+>         value = m.group(2)
+>         if is_dangerous_url(value):
+>             return prefix + '""'
+>         return m.group(0)
+>
+>     tag_str = re.sub(
+>         r'([\s/]+' + url_attrs + r'\s*=\s*)([^\s\'">/][^\s>]*)',
+>         clean_uq_url,
+>         tag_str,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return tag_str
+>
+>
+> def tokenize_html(html):
+>     """Split HTML into tokens: tags, comments, and text segments.
+>     Returns list of (type, content) tuples.
+>     This properly handles quoted attributes and HTML comments."""
+>     tokens = []
+>     i = 0
+>     n = len(html)
+>     while i < n:
+>         if html[i] == '<':
+>             # Check for HTML comment
+>             if html[i:i+4] == '<!--':
+>                 end = html.find('-->', i + 4)
+>                 if end != -1:
+>                     tokens.append(('comment', html[i:end+3]))
+>                     i = end + 3
+>                 else:
+>                     # Unclosed comment - treat rest as comment
+>                     tokens.append(('comment', html[i:]))
+>                     i = n
+>                 continue
+>
+>             # Check for CDATA
+>             if html[i:i+9] == '<![CDATA[':
+>                 end = html.find(']]>', i + 9)
+>                 if end != -1:
+>                     tokens.append(('text', html[i:end+3]))
+>                     i = end + 3
+>                 else:
+>                     tokens.append(('text', html[i:]))
+>                     i = n
+>                 continue
+>
+>             # Try to parse as a tag
+>             j = i + 1
+>             if j < n and (html[j].isalpha() or html[j] in '!/?' ):
+>                 # Find the end of the tag, respecting quoted attributes
+>                 in_sq = False
+>                 in_dq = False
+>                 while j < n:
+>                     c = html[j]
+>                     if c == '"' and not in_sq:
+>                         in_dq = not in_dq
+>                     elif c == "'" and not in_dq:
+>                         in_sq = not in_sq
+>                     elif c == '>' and not in_sq and not in_dq:
+>                         break
+>                     j += 1
+>                 if j < n:
+>                     tokens.append(('tag', html[i:j+1]))
+>                     i = j + 1
+>                 else:
+>                     tokens.append(('tag', html[i:]))
+>                     i = n
+>             else:
+>                 tokens.append(('text', '<'))
+>                 i += 1
+>         else:
+>             j = html.find('<', i)
+>             if j == -1:
+>                 tokens.append(('text', html[i:]))
+>                 i = n
+>             else:
+>                 tokens.append(('text', html[i:j]))
+>                 i = j
+>     return tokens
+>
+>
+> def remove_javascript(html):
+>     # Tokenize the HTML to properly handle tags vs text vs comments
+>     tokens = tokenize_html(html)
+>
+>     # First pass: clean attributes in all opening tags
+>     cleaned_tokens = []
+>     for ttype, content in tokens:
+>         if ttype == 'tag' and re.match(r'<[a-zA-Z]', content):
+>             content = clean_tag_str(content)
+>         cleaned_tokens.append((ttype, content))
+>
+>     # Second pass: remove script elements (opening tag + content + closing tag)
+>     result = []
+>     in_script = False
+>     for ttype, content in cleaned_tokens:
+>         if ttype == 'tag':
+>             if re.match(r'<script\b', content, re.IGNORECASE):
+>                 in_script = True
+>                 continue
+>             if re.match(r'</script\b', content, re.IGNORECASE):
+>                 in_script = False
+>                 continue
+>         if in_script:
+>             continue
+>         result.append(content)
+>
+>     html = ''.join(result)
+>
+>     # Remove <meta http-equiv="refresh"> with javascript: in content
+>     def clean_meta_refresh(match):
+>         tag = match.group(0)
+>         content_match = re.search(r'content\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+>         if content_match:
+>             content_val = content_match.group(1)
+>             decoded = decode_html_entities(content_val)
+>             if re.search(r'javascript:|vbscript:', decoded, re.IGNORECASE):
+>                 return ''
+>         return tag
+>
+>     html = re.sub(
+>         r'<meta\b[^>]*http-equiv\s*=\s*["\']?refresh["\']?[^>]*>',
+>         clean_meta_refresh,
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@09298989-065e-4ce0-a378-9d95b4a63341:/app#

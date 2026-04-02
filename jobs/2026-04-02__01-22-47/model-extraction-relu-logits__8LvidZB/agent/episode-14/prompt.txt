@@ -1,0 +1,143 @@
+New Terminal Output:
+
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient via forward finite differences (11 calls)."""
+>     f0 = forward(x)
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy()
+>         xp[i] += eps
+>         grad[i] = (forward(xp) - f0) / eps
+>     return grad
+>
+> def normalize(v):
+>     n = np.linalg.norm(v)
+>     if n < 1e-12:
+>         return v
+>     return v / n
+>
+> def cosine_sim(a, b):
+>     na, nb = np.linalg.norm(a), np.linalg.norm(b)
+>     if na < 1e-12 or nb < 1e-12:
+>         return 0.0
+>     return abs(np.dot(a, b)) / (na * nb)
+>
+> def is_new_direction(v, existing, tol=0.995):
+>     if np.linalg.norm(v) < 1e-10:
+>         return False
+>     for e in existing:
+>         if cosine_sim(v, e) > tol:
+>             return False
+>     return True
+>
+> # Strategy: Walk along many random lines with fine steps.
+> # With fine enough steps, each gradient change corresponds to exactly one neuron flip.
+> # The step size needs to be small enough that at most one hyperplane A1[k,:].x + b1[k] = 0
+> # is crossed per step.
+> #
+> # The distance between hyperplane crossings on a random line depends on the geometry.
+> # With A1 having norm ~0.1*sqrt(10) ~ 0.316 per row, and b1 ~ 0.1,
+> # the hyperplanes A1[k,:].x + b1[k] = 0 are at distance ~b1[k]/(A1[k,:].d) from origin
+> # along direction d. The spacing between crossings is typically ~1/(0.316) ~ 3.
+> # So step size of 0.1 should be safe for most cases.
+>
+> found_rows = []
+> np.random.seed(42)
+>
+> print("Phase 1: Walking along random lines with fine steps...")
+> print(flush=True)
+>
+> for trial in range(100):
+>     if len(found_rows) >= 20:
+>         break
+>
+>     x0 = np.random.randn(10) * 1.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Fine steps along the line
+>     ts = np.linspace(-3, 3, 200)  # step size = 0.03
+>
+>     prev_g = None
+>
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = compute_gradient(x)
+>
+>         if prev_g is not None:
+>             diff = g - prev_g
+>             diff_norm = np.linalg.norm(diff)
+>             if diff_norm > 1e-8:
+>                 # Gradient changed - with fine steps, likely single neuron flip
+>                 if is_new_direction(diff, found_rows):
+>                     found_rows.append(diff.copy())
+>                     print(f"Trial {trial}: Found direction {len(found_rows)}, norm={diff_norm:.6f}")
+>                     sys.stdout.flush()
+>
+>         prev_g = g
+>
+>     if trial % 20 == 0:
+>         print(f"  Trial {trial}: {len(found_rows)} directions found so far")
+>         sys.stdout.flush()
+>
+> print(f"\nTotal unique directions found: {len(found_rows)}")
+>
+> if len(found_rows) < 20:
+>     print(f"WARNING: Only found {len(found_rows)} directions, trying more...")
+>     # Try with different random seed and larger range
+>     np.random.seed(999)
+>     for trial in range(200):
+>         if len(found_rows) >= 20:
+>             break
+>         x0 = np.random.randn(10) * 3.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>         ts = np.linspace(-5, 5, 300)
+>         prev_g = None
+>         for t in ts:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             if prev_g is not None:
+>                 diff = g - prev_g
+>                 if np.linalg.norm(diff) > 1e-8 and is_new_direction(diff, found_rows):
+>                     found_rows.append(diff.copy())
+>                     print(f"Phase2 Trial {trial}: Found direction {len(found_rows)}")
+>                     sys.stdout.flush()
+>             prev_g = g
+>
+> print(f"\nFinal: {len(found_rows)} directions found")
+>
+> # Build stolen A1
+> stolen_A1 = np.array(found_rows[:20])
+> for i in range(len(stolen_A1)):
+>     n = np.linalg.norm(stolen_A1[i])
+>     if n > 1e-10:
+>         stolen_A1[i] /= n
+>
+> print(f"Stolen A1 shape: {stolen_A1.shape}")
+> np.save('/app/stolen_A1.npy', stolen_A1)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verification
+> try:
+>     from forward import A1 as true_A1
+>     true_A1_norm = true_A1 / np.linalg.norm(true_A1, axis=1, keepdims=True)
+>
+>     print("\nVerification:")
+>     matched = set()
+>     for i in range(stolen_A1.shape[0]):
+>         sims = np.abs(true_A1_norm @ stolen_A1[i])
+>         best_j = np.argmax(sims)
+>         matched.add(best_j)
+>         print(f"  Row {i} -> True row {best_j}: cos_sim = {sims[best_j]:.8f}")
+>     print(f"\nMatched {len(matched)} unique true rows out of 20")
+> except:
+>     pass
+> PYTHON_EOF
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app#

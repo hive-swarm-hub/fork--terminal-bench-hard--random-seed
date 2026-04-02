@@ -1,0 +1,200 @@
+New Terminal Output:
+
+root@ccf0a644-1547-46e7-a509-5c633f6954d0:/app# cat > /app/jump_analyzer.py << 'SCRIPT'
+ Filter to only frames where athlete is detected with sufficient pixels
+    athlete_frames = [(f, b, cx, px) for f, b, cx, px in frame_data if b > 0 and px > 200]
+
+    if not athlete_frames:
+        raise ValueError("No athlete detected in video")
+
+    # Find the main sequence of athlete frames (longest consecutive run)
+    # Group consecutive frames
+    sequences = []
+    current_seq = [athlete_frames[0]]
+    for i in range(1, len(athlete_frames)):
+        if athlete_frames[i][0] - athlete_frames[i-1][0] <= 2:  # Allow small gaps
+            current_seq.append(athlete_frames[i])
+        else:
+            sequences.append(current_seq)
+            current_seq = [athlete_frames[i]]
+    sequences.append(current_seq)
+
+    # Use the longest sequence (main athlete pass)
+    main_seq = max(sequences, key=len)
+
+    # Extract bot_95 values for the main sequence
+    frames_arr = np.array([f[0] for f in main_seq])
+    bot95_arr = np.array([f[1] for f in main_seq])
+
+    # Determine ground level: the typical bot_95 when athlete is on the ground
+    # Use the maximum bot_95 values (when feet are on ground)
+    # Ground level should be near the top values of bot_95
+    ground_level = np.percentile(bot95_arr, 85)
+
+    # The jump creates a dip in bot_95 (feet rise above ground)
+    # Find the minimum bot_95 (peak of jump)
+    min_bot_idx = np.argmin(bot95_arr)
+    min_bot_val = bot95_arr[min_bot_idx]
+
+    # Threshold for being "in the air": significantly below ground level
+    # Use a threshold that's partway between ground and peak
+    air_threshold = ground_level - (ground_level - min_bot_val) * 0.3
+
+    # Find takeoff: last frame before the dip where bot_95 is near ground level
+    # Search backwards from the minimum
+    takeoff_idx = min_bot_idx
+    for i in range(min_bot_idx, -1, -1):
+        if bot95_arr[i] >= air_threshold:
+            takeoff_idx = i
+            break
+
+    # Find landing: first frame after the dip where bot_95 returns to near ground level
+    landing_idx = min_bot_idx
+ > import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Define ROI for track region (where athlete body/feet would be)
+>     # Roughly the middle portion of the frame
+>     roi_top = int(height * 0.28)  # ~150 for 540
+>     roi_bot = int(height * 0.83)  # ~450 for 540
+>
+>     frame_idx = 0
+>     frame_data = []  # List of (frame_idx, bot_95, cx, pixel_count)
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         diff = cv2.absdiff(gray, bg_gray)
+>         _, thresh = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological cleanup
+>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>
+>         # Focus on track region
+>         track_roi = thresh[roi_top:roi_bot, :]
+>
+>         # Find all non-zero pixels
+>         nonzero = np.nonzero(track_roi)
+>         if len(nonzero[0]) > 100:
+>             ys = nonzero[0] + roi_top  # Convert back to full frame coords
+>             xs = nonzero[1]
+>
+>             bot_95 = int(np.percentile(ys, 95))
+>             cx = int(np.mean(xs))
+>             pixel_count = len(nonzero[0])
+>
+>             frame_data.append((frame_idx, bot_95, cx, pixel_count))
+>         else:
+>             frame_data.append((frame_idx, -1, -1, 0))
+>
+>     cap.release()
+>
+>     # Filter to only frames where athlete is detected with sufficient pixels
+>     athlete_frames = [(f, b, cx, px) for f, b, cx, px in frame_data if b > 0 and px > 200]
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Find the main sequence of athlete frames (longest consecutive run)
+>     # Group consecutive frames
+>     sequences = []
+>     current_seq = [athlete_frames[0]]
+>     for i in range(1, len(athlete_frames)):
+>         if athlete_frames[i][0] - athlete_frames[i-1][0] <= 2:  # Allow small gaps
+>             current_seq.append(athlete_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [athlete_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # Use the longest sequence (main athlete pass)
+>     main_seq = max(sequences, key=len)
+>
+>     # Extract bot_95 values for the main sequence
+>     frames_arr = np.array([f[0] for f in main_seq])
+>     bot95_arr = np.array([f[1] for f in main_seq])
+>
+>     # Determine ground level: the typical bot_95 when athlete is on the ground
+>     # Use the maximum bot_95 values (when feet are on ground)
+>     # Ground level should be near the top values of bot_95
+>     ground_level = np.percentile(bot95_arr, 85)
+>
+>     # The jump creates a dip in bot_95 (feet rise above ground)
+>     # Find the minimum bot_95 (peak of jump)
+>     min_bot_idx = np.argmin(bot95_arr)
+>     min_bot_val = bot95_arr[min_bot_idx]
+>
+>     # Threshold for being "in the air": significantly below ground level
+>     # Use a threshold that's partway between ground and peak
+>     air_threshold = ground_level - (ground_level - min_bot_val) * 0.3
+>
+>     # Find takeoff: last frame before the dip where bot_95 is near ground level
+>     # Search backwards from the minimum
+>     takeoff_idx = min_bot_idx
+>     for i in range(min_bot_idx, -1, -1):
+>         if bot95_arr[i] >= air_threshold:
+>             takeoff_idx = i
+>             break
+>
+>     # Find landing: first frame after the dip where bot_95 returns to near ground level
+>     landing_idx = min_bot_idx
+>     for i in range(min_bot_idx, len(bot95_arr)):
+>         if bot95_arr[i] >= air_threshold:
+>             landing_idx = i
+>             break
+>
+>     takeoff_frame = int(frames_arr[takeoff_idx])
+>     landing_frame = int(frames_arr[landing_idx])
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame,
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT
+root@ccf0a644-1547-46e7-a509-5c633f6954d0:/app#

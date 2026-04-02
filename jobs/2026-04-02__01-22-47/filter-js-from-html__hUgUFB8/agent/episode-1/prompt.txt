@@ -1,0 +1,211 @@
+New Terminal Output:
+root@09298989-065e-4ce0-a378-9d95b4a63341:/app# export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS='-F -X'
+root@09298989-065e-4ce0-a378-9d95b4a63341:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+>
+> def remove_javascript(html):
+>     # 1. Remove <script> tags and their contents (including multiline)
+>     # Handle <script ...>...</script> with any attributes
+>     html = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Handle self-closing <script .../> tags
+>     html = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Handle unclosed <script> tags (no closing tag)
+>     html = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Remove <noscript> tags but keep content? Actually noscript is not dangerous.
+>     # Keep noscript as-is since it's not JavaScript.
+>
+>     # 3. Remove event handler attributes (on*="...") from tags
+>     # We need to find HTML tags and remove on* attributes from them
+>     def remove_event_handlers(match):
+>         tag = match.group(0)
+>         # Remove on* attributes with double quotes
+>         tag = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with single quotes
+>         tag = re.sub(r'\s+on\w+\s*=\s*\'[^\']*\'', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no quotes (value is until whitespace or >)
+>         tag = re.sub(r'\s+on\w+\s*=\s*[^\s\'">][^\s>]*', '', tag, flags=re.IGNORECASE)
+>         # Remove on* attributes with no value (just the attribute name)
+>         # Be careful not to remove legitimate attributes that start with "on" but aren't events
+>         # Actually, all on* attributes in HTML are event handlers
+>         tag = re.sub(r'\s+on\w+(?=\s|/?>)', '', tag, flags=re.IGNORECASE)
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_event_handlers, html)
+>
+>     # 4. Remove javascript: URLs in attributes
+>     def remove_js_urls(match):
+>         tag = match.group(0)
+>         # Handle javascript: in double-quoted attribute values
+>         tag = re.sub(
+>             r'(\s+(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite)\s*=\s*)"\s*javascript:[^"]*"',
+>             r'\1""',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle javascript: in single-quoted attribute values
+>         tag = re.sub(
+>             r"(\s+(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite)\s*=\s*)'\s*javascript:[^']*'",
+>             r"\1''",
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle javascript: in unquoted attribute values
+>         tag = re.sub(
+>             r'(\s+(?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite)\s*=\s*)javascript:[^\s>]*',
+>             r'\1""',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_js_urls, html)
+>
+>     # 5. Remove javascript: with various encodings/obfuscations
+>     # Handle &#106;avascript: and similar HTML entity encoded variants
+>     def remove_encoded_js_urls(match):
+>         tag = match.group(0)
+>         # Decode HTML entities in attribute values and check for javascript:
+>         def check_and_clean_attr(attr_match):
+>             attr_name = attr_match.group(1)
+>             quote = attr_match.group(2)
+>             value = attr_match.group(3)
+>             # Decode HTML entities to check
+>             decoded = re.sub(r'&#[xX]?[0-9a-fA-F]+;?', decode_entity, value)
+>             decoded = re.sub(r'&[a-zA-Z]+;', decode_named_entity, decoded)
+>             # Remove whitespace/control chars for checking
+>             check = re.sub(r'[\s\x00-\x1f]+', '', decoded)
+>             if re.match(r'javascript:', check, re.IGNORECASE):
+>                 return f' {attr_name}={quote}{quote}'
+>             return attr_match.group(0)
+>
+>         tag = re.sub(
+>             r'\s+((?:href|src|action|formaction|data|codebase|dynsrc|lowsrc|background|poster|cite))\s*=\s*(["\'])([^"\']*)\2',
+>             check_and_clean_attr,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         return tag
+>
+>     def decode_entity(match):
+>         text = match.group(0).rstrip(';')
+>         try:
+>             if text.startswith('&#x') or text.startswith('&#X'):
+>                 return chr(int(text[3:], 16))
+>             elif text.startswith('&#'):
+>                 return chr(int(text[2:]))
+>         except (ValueError, OverflowError):
+>             return match.group(0)
+>         return match.group(0)
+>
+>     def decode_named_entity(match):
+>         import html
+>         try:
+>             return html.unescape(match.group(0))
+>         except:
+>             return match.group(0)
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_encoded_js_urls, html)
+>
+>     # 6. Remove <iframe> with javascript: src
+>     # Already handled by the javascript: URL removal above
+>
+>     # 7. Remove SVG-based XSS vectors - <svg onload=...> already handled by event handler removal
+>     # But also handle <svg><script>...</script></svg> - already handled by script removal
+>
+>     # 8. Remove <embed>, <object>, <applet> tags that could execute JS
+>     # Actually, let's be conservative and only remove clearly dangerous things
+>     # The task says "preserve as much HTML as possible"
+>
+>     # 9. Remove <meta http-equiv="refresh" content="0;url=javascript:...">
+>     def clean_meta_refresh(match):
+>         tag = match.group(0)
+>         content_match = re.search(r'content\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+>         if content_match:
+>             content = content_match.group(1)
+>             if re.search(r'javascript:', content, re.IGNORECASE):
+>                 return ''
+>         return tag
+>
+>     html = re.sub(r'<meta\b[^>]*http-equiv\s*=\s*["\']?refresh["\']?[^>]*>', clean_meta_refresh, html, flags=re.IGNORECASE)
+>
+>     # 10. Remove <base> tags with javascript: href (already handled above)
+>
+>     # 11. Handle vbscript: protocol similarly
+>     def remove_vbscript_urls(match):
+>         tag = match.group(0)
+>         tag = re.sub(
+>             r'(\s+(?:href|src|action|formaction|data)\s*=\s*)"\s*vbscript:[^"]*"',
+>             r'\1""',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         tag = re.sub(
+>             r"(\s+(?:href|src|action|formaction|data)\s*=\s*)'\s*vbscript:[^']*'",
+>             r"\1''",
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_vbscript_urls, html)
+>
+>     # 12. Remove data: URLs with script content in relevant attributes
+>     def remove_data_js_urls(match):
+>         tag = match.group(0)
+>         # Remove data:text/html URLs that could contain scripts
+>         tag = re.sub(
+>             r'(\s+(?:href|src|action|formaction)\s*=\s*)"data\s*:[^"]*(?:script|javascript|vbscript)[^"]*"',
+>             r'\1""',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         tag = re.sub(
+>             r"(\s+(?:href|src|action|formaction)\s*=\s*)'data\s*:[^']*(?:script|javascript|vbscript)[^']*'",
+>             r"\1''",
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         return tag
+>
+>     html = re.sub(r'<[a-zA-Z][^>]*>', remove_data_js_urls, html)
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@09298989-065e-4ce0-a378-9d95b4a63341:/app#

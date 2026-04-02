@@ -1,0 +1,220 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+> #define E 768
+> #define H 12
+> #define L 12
+> #define V 50257
+> #define C 1024
+> #define HS 64
+> #define LS 7087872
+> #define M 50000
+> float *W,buf[E],qkv[2304],att[C],fc[3072],x[C][E],ln[E];
+> char *toks[V];
+> int tlen[V],ntok;
+> char merge_a[M][80],merge_b[M][80];
+> int nmerge;
+> float*P(int o){return W+o;}
+> void layernorm(float*o,float*i,float*g,float*b){
+>     float m=0,v=0;int j;
+>     for(j=0;j<E;j++)m+=i[j];
+>     m/=E;
+>     for(j=0;j<E;j++)v+=(i[j]-m)*(i[j]-m);
+>     v=1.0f/sqrtf(v/E+1e-5f);
+>     for(j=0;j<E;j++)o[j]=(i[j]-m)*v*g[j]+b[j];
+> }
+> float gelu(float x){return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> void matvec(float*o,float*i,float*w,float*b,int ni,int no){
+>     int j,k;
+>     for(j=0;j<no;j++){float s=b[j];for(k=0;k<ni;k++)s+=i[k]*w[k*no+j];o[j]=s;}
+> }
+> int byte_map[256];
+> void init_byte_map(){
+>     int bs[]={},n=0,i,c=0;
+>     // GPT-2 byte encoder: printable ASCII + latin supplement
+>     for(i=0;i<256;i++)byte_map[i]=-1;
+>     for(i='!';i<='~';i++)byte_map[i]=i;
+>     for(i=0xa1;i<=0xac;i++)byte_map[i]=i;
+>     for(i=0xae;i<=0xff;i++)byte_map[i]=i;
+>     c=256;
+>     for(i=0;i<256;i++)if(byte_map[i]<0)byte_map[i]=c++;
+> }
+> void init_vocab(){
+>     int i;
+>     init_byte_map();
+>     // First 256 tokens are single bytes
+>     for(i=0;i<256;i++){
+>         char*s=malloc(8);
+>         int u=byte_map[i];
+>         // encode unicode codepoint as UTF-8
+>         if(u<128){s[0]=u;s[1]=0;}
+>         else if(u<2048){s[0]=0xc0|(u>>6);s[1]=0x80|(u&0x3f);s[2]=0;}
+>         toks[i]=s;tlen[i]=strlen(s);
+>     }
+>     ntok=256;
+> }
+> int find_tok(char*s,int l){
+>     int i;
+>     for(i=0;i<ntok;i++)if(tlen[i]==l&&memcmp(toks[i],s,l)==0)return i;
+>     return -1;
+> }
+> void load_bpe(char*path){
+>     FILE*f=fopen(path,"r");
+>     char line[256];
+>     fgets(line,256,f); // skip header
+>     nmerge=0;
+>     while(fgets(line,256,f)&&nmerge<M){
+>         char*sp=strchr(line,' ');
+>         if(!sp)continue;
+>         *sp=0;
+>         char*b=sp+1;
+>         char*nl=strchr(b,'\n');if(nl)*nl=0;
+>         strcpy(merge_a[nmerge],line);
+>         strcpy(merge_b[nmerge],b);
+>         // Create merged token
+>         int la=strlen(line),lb=strlen(b);
+>         char*s=malloc(la+lb+1);
+>         memcpy(s,line,la);memcpy(s+la,b,lb);s[la+lb]=0;
+>         toks[ntok]=s;tlen[ntok]=la+lb;
+>         ntok++;
+>         nmerge++;
+>     }
+>     fclose(f);
+> }
+> // BPE encode: convert text to token IDs
+> int enc_toks[C];
+> char*enc_strs[C];
+> int enc_lens[C];
+> int bpe_encode(char*text){
+>     int n=0,i;
+>     // Convert each byte to its unicode string representation
+>     for(i=0;text[i];i++){
+>         unsigned char c=text[i];
+>         enc_strs[n]=toks[c]; // byte_map maps byte c to unicode, toks[c] is that unicode string
+>         // But we need to find the right base token
+>         // Actually toks[0..255] are the base byte tokens
+>         // We need to find which base token corresponds to byte c
+>         // byte c -> unicode char byte_map[c] -> UTF-8 string = toks[???]
+>         // No: toks[i] for i<256 is the UTF-8 encoding of byte_map[i]
+>         // We want the token for byte c, which is just token index c
+>         // because toks[c] = UTF-8(byte_map[c])
+>         // But the merge rules use the UTF-8 strings
+>         enc_strs[n]=malloc(tlen[c]+1);
+>         memcpy(enc_strs[n],toks[c],tlen[c]+1);
+>         enc_lens[n]=tlen[c];
+>         n++;
+>     }
+>     // Apply merges
+>     int mi;
+>     for(mi=0;mi<nmerge;mi++){
+>         char*a=merge_a[mi],*b=merge_b[mi];
+>         int la=strlen(a),lb=strlen(b);
+>         for(i=0;i<n-1;i++){
+>             if(enc_lens[i]==la&&enc_lens[i+1]==lb&&
+>                memcmp(enc_strs[i],a,la)==0&&memcmp(enc_strs[i+1],b,lb)==0){
+>                 char*s=malloc(la+lb+1);
+>                 memcpy(s,a,la);memcpy(s+la,b,lb);s[la+lb]=0;
+>                 free(enc_strs[i]);
+>                 enc_strs[i]=s;enc_lens[i]=la+lb;
+>                 free(enc_strs[i+1]);
+>                 int j;for(j=i+1;j<n-1;j++){enc_strs[j]=enc_strs[j+1];enc_lens[j]=enc_lens[j+1];}
+>                 n--;
+>                 i--; // recheck this position
+>             }
+>         }
+>     }
+>     // Convert strings to token IDs
+>     for(i=0;i<n;i++){
+>         enc_toks[i]=find_tok(enc_strs[i],enc_lens[i]);
+>     }
+>     return n;
+> }
+> // Decode token to string (reverse byte_map)
+> int rev_byte_map[512];
+> void init_rev_byte_map(){
+>     int i;
+>     for(i=0;i<512;i++)rev_byte_map[i]=-1;
+>     for(i=0;i<256;i++)rev_byte_map[byte_map[i]]=i;
+> }
+> void decode_token(int tok){
+>     char*s=toks[tok];
+>     int i=0;
+>     while(s[i]){
+>         unsigned int u;
+>         unsigned char c=s[i];
+>         if(c<0x80){u=c;i++;}
+>         else if(c<0xe0){u=((c&0x1f)<<6)|(s[i+1]&0x3f);i+=2;}
+>         else{u=((c&0x0f)<<12)|((s[i+1]&0x3f)<<6)|(s[i+2]&0x3f);i+=3;}
+>         if(rev_byte_map[u]>=0)putchar(rev_byte_map[u]);
+>     }
+> }
+> int main(int argc,char**argv){
+>     if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>     // Load model
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=(float*)mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     // Load vocab & BPE
+>     init_vocab();
+>     load_bpe(argv[2]);
+>     init_rev_byte_map();
+>     // Encode input
+>     int T=bpe_encode(argv[3]);
+>     int tokens[C];
+>     int i;for(i=0;i<T;i++)tokens[i]=enc_toks[i];
+>     // Generate 20 tokens
+>     int g;
+>     for(g=0;g<20;g++){
+>         // Build hidden states
+>         int t,j;
+>         float*wte=W+L*LS+1536+C*E;
+>         float*wpe=W+L*LS+1536;
+>         for(t=0;t<T;t++)
+>             for(j=0;j<E;j++)
+>                 x[t][j]=wte[tokens[t]*E+j]+wpe[t*E+j];
+>         // Transformer layers
+>         int l;
+>         for(l=0;l<L;l++){
+>             int base=l*LS;
+>             float*qkvb=W+base;
+>             float*qkvw=W+base+2304;
+>             float*projb=W+base+2304+768*2304;
+>             float*projw=W+base+2304+768*2304+768;
+>             float*ln1b=W+base+2304+768*2304+768+768*768;
+>             float*ln1g=ln1b+768;
+>             float*ln2b=ln1g+768;
+>             float*ln2g=ln2b+768;
+>             float*fcb=ln2g+768;
+>             float*fcw=fcb+3072;
+>             float*fpb=fcw+768*3072;
+>             float*fpw=fpb+768;
+>             for(t=0;t<T;t++){
+>                 layernorm(ln,x[t],ln1g,ln1b);
+>                 // QKV
+>                 matvec(qkv,ln,qkvw,qkvb,E,2304);
+>                 // Attention per head
+>                 for(int h=0;h<H;h++){
+>                     float*q=qkv+h*HS;
+>                     // Compute attention scores
+>                     float mx=-1e9;
+>                     for(int t2=0;t2<=t;t2++){
+>                         float s=0;
+>                         // Need K for t2 - but we only have current QKV
+>                         // We need to store K,V for all positions
+>                         // This is a problem - we need KV cache
+>                     }
+>                 }
+>             }
+>         }
+>     }
+>     return 0;
+> }
+> CEOF
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app#

@@ -1,0 +1,110 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# python3 << 'PYEOF'
+> import mmap, struct, math
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+> HS = E // H  # 64
+> LS = 7087872
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+> w = memoryview(m)
+>
+> import array
+> def F(off, n):
+>     return struct.unpack_from(f'{n}f', m, off*4)
+>
+> # Weight offsets
+> def layer_off(l):
+>     base = l * LS
+>     return {
+>         'qkvb': base,
+>         'qkvw': base + 2304,
+>         'projb': base + 2304 + 768*2304,
+>         'projw': base + 2304 + 768*2304 + 768,
+>         'ln1b': base + 2304 + 768*2304 + 768 + 768*768,
+>         'ln1g': base + 2304 + 768*2304 + 768 + 768*768 + 768,
+>         'ln2b': base + 2304 + 768*2304 + 768 + 768*768 + 2*768,
+>         'ln2g': base + 2304 + 768*2304 + 768 + 768*768 + 3*768,
+>         'fcb': base + 2304 + 768*2304 + 768 + 768*768 + 4*768,
+>         'fcw': base + 2304 + 768*2304 + 768 + 768*768 + 4*768 + 3072,
+>         'fpb': base + 2304 + 768*2304 + 768 + 768*768 + 4*768 + 3072 + 768*3072,
+>         'fpw': base + 2304 + 768*2304 + 768 + 768*768 + 4*768 + 3072 + 768*3072 + 768,
+>     }
+>
+> lnfb_off = L*LS
+> lnfg_off = L*LS + 768
+> wpe_off = L*LS + 1536
+> wte_off = L*LS + 1536 + C*E
+>
+> def layernorm(x, g_off, b_off):
+>     g = F(g_off, E)
+>     b = F(b_off, E)
+>     mean = sum(x) / E
+>     var = sum((xi - mean)**2 for xi in x) / E
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[i] - mean) / std * g[i] + b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matmul(x, w_off, b_off, in_dim, out_dim):
+>     # x: [in_dim], w: [in_dim, out_dim] row-major, b: [out_dim]
+>     b = F(b_off, out_dim)
+>     result = list(b)
+>     for j in range(out_dim):
+>         s = result[j]
+>         for i in range(in_dim):
+>             s += x[i] * struct.unpack_from('f', m, (w_off + i*out_dim + j)*4)[0]
+>         result[j] = s
+>     return result
+>
+> # Encode "Hello" - token 15496 in GPT-2
+> # Actually let me just use a known token
+> tokens = [15496]  # "Hello"
+> T = len(tokens)
+>
+> # Build initial hidden state: wte[token] + wpe[pos]
+> def get_embedding(tok, pos):
+>     te = F(wte_off + tok * E, E)
+>     pe = F(wpe_off + pos * E, E)
+>     return [te[i] + pe[i] for i in range(E)]
+>
+> # For simplicity, just process the last token position
+> # With single token input, we just need one forward pass
+> hidden = [list(get_embedding(tokens[t], t)) for t in range(T)]
+>
+> print(f'Initial hidden[0][0:5]: {hidden[0][0:5]}')
+>
+> # Process through layers
+> for l in range(L):
+>     lo = layer_off(l)
+>     for t in range(T):
+>         # Pre-norm 1
+>         h = layernorm(hidden[t], lo['ln1g'], lo['ln1b'])
+>
+>         # QKV projection: h @ W_qkv + b_qkv
+>         # But matmul is too slow for 768->2304. Let me do it more efficiently
+>         qkvb = F(lo['qkvb'], 2304)
+>         qkv = list(qkvb)
+>         for j in range(2304):
+>             s = qkv[j]
+>             # w[i][j] = w_off + i*2304 + j
+>             for i in range(E):
+>                 s += h[i] * struct.unpack_from('f', m, (lo['qkvw'] + i*2304 + j)*4)[0]
+>             qkv[j] = s
+>
+>         print(f'Layer {l}, qkv[0:5]: {qkv[0:5]}')
+>         break  # just check first layer
+>     break
+>
+> m.close()
+> f.close()
+> PYEOF
+Initial hidden[0][0:5]: [-0.087471479550004, -0.33011239767074585, 0.01523002702742815, -0.13531081657856703, -0.12034638226032257]
+Layer 0, qkv[0:5]: [0.4700907062842915, -0.07750076448039189, 0.5530714876782664, -0.7012008177838145, -0.25255713538909286]
+Traceback (most recent call last):
+  File "<stdin>", line 99, in <module>
+BufferError: cannot close exported pointers exist
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app#

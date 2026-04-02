@@ -1,0 +1,128 @@
+New Terminal Output:
+
+root@ed610881-4085-4a9a-8be7-b3d8c6d55c1f:/app# python3 << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def revcomp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Our primers
+> fwd = 'TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAACAAGGGCGAGGAGCTGTT'
+> rev = 'CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA'
+>
+> # Forward primer annealing part (last 18 nt)
+> fwd_anneal = 'CAAGGGCGAGGAGCTGTT'
+> # Forward primer tail (insertion)
+> fwd_tail = 'TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA'
+>
+> # Verify fwd = tail + anneal
+> assert fwd == fwd_tail + fwd_anneal, "Forward primer structure wrong"
+>
+> # Verify forward annealing binds to input at position 215
+> assert input_seq[215:215+18] == fwd_anneal, f"Fwd anneal mismatch: {input_seq[215:215+18]} vs {fwd_anneal}"
+>
+> # Reverse primer anneals to upstream region (positions 170-215)
+> # The reverse primer is the reverse complement of input[170:215]
+> rev_anneal_region = input_seq[215-45:215]  # 45 bases upstream
+> expected_rev = revcomp(rev_anneal_region)
+> assert rev == expected_rev, f"Rev primer mismatch:\n{rev}\n{expected_rev}"
+>
+> print("Primer structure verified!")
+>
+> # Simulate Q5 SDM:
+> # The PCR amplifies the entire plasmid with back-to-back primers
+> # Forward primer starts at position 215 (annealing), extends through the plasmid
+> # Reverse primer starts at position 214 (going backwards), extends through the plasmid
+> # The linear PCR product is:
+> #   5'-[fwd_tail][fwd_anneal][rest of template from 233 to 214 going around][revcomp of rev]
+> # After ligation (KLD step), the circular product should be:
+> #   [fwd_tail][input from 215 to end][input from 0 to 215] = output
+>
+> # Let me construct what the output would be
+> # The PCR product (linear) top strand:
+> # fwd_primer_full + template from (215+18) to (215-45) going around the circle
+> # Wait, let me think about this differently.
+>
+> # In Q5 SDM on circular template:
+> # Forward primer anneals at position 215, extending rightward
+> # Reverse primer anneals ending at position 215, extending leftward (on opposite strand)
+> # They amplify the entire plasmid
+> # The product is linear: 5'-[fwd full]-[template 233...end...0...170]-[revcomp of rev full]
+> # After KLD ligation, the circular product is:
+> # fwd_tail + input[215:] + input[:215-45+45] = fwd_tail + input[215:] + input[:215]
+> # Wait, the reverse primer anneals to input[170:215], so the amplified region on the other side is input[215+18:] + input[:170]
+> # No wait...
+>
+> # Let me think step by step:
+> # Template is circular: ...input[170:215]...input[215:233]...
+> # Rev primer (revcomp of input[170:215]) anneals to bottom strand at positions 170-215
+> # Fwd primer anneals to top strand at positions 215-233
+> # They face away from each other (back-to-back)
+> # PCR extends:
+> #   From fwd primer: extends rightward from pos 233 around to pos 170 (bottom strand serves as template)
+> #   From rev primer: extends leftward from pos 170... wait no.
+> #   Rev primer on bottom strand extends leftward (5'->3' on bottom = going left on top strand perspective)
+> #   Actually in PCR, the rev primer anneals to the top strand and extends on the bottom strand
+>
+> # Let me just verify the final circular product:
+> # The product after ligation should be:
+> # fwd_tail + input_seq[215:] + input_seq[:215]
+> # Which is the same as inserting fwd_tail at position 215
+>
+> product = input_seq[:215] + fwd_tail + input_seq[215:]
+>
+> # This should match output_seq (possibly with a different rotation since both are circular)
+> # Let's check if they're the same circular sequence
+>
+> # Double the output to check for rotation
+> output_doubled = output_seq + output_seq
+> if product in output_doubled:
+>     print("SUCCESS: Product matches output sequence (circular match)!")
+>     # Find rotation offset
+>     offset = output_doubled.index(product)
+>     print(f"Rotation offset: {offset}")
+> else:
+>     print("CHECKING direct match...")
+>     if product == output_seq:
+>         print("SUCCESS: Product exactly matches output!")
+>     else:
+>         print("FAILURE: Product does not match output!")
+>         # Debug
+>         for i in range(min(len(product), len(output_seq))):
+>             if product[i] != output_seq[i]:
+>                 print(f"First diff at {i}: product={product[i]}, output={output_seq[i]}")
+>                 print(f"Product context: {product[max(0,i-20):i+20]}")
+>                 print(f"Output context:  {output_seq[max(0,i-20):i+20]}")
+>                 break
+>         print(f"Product length: {len(product)}, Output length: {len(output_seq)}")
+>
+> print(f"\nProduct length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> PYEOF
+Primer structure verified!
+CHECKING direct match...
+FAILURE: Product does not match output!
+First diff at 252: product=C, output=A
+Product context: TAAGAAGAAGATTAACAGAACAAGGGCGAGGAGCTGTTCA
+Output context:  TAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+Product length: 3628, Output length: 3630
+
+Product length: 3628
+Output length: 3630
+root@ed610881-4085-4a9a-8be7-b3d8c6d55c1f:/app#

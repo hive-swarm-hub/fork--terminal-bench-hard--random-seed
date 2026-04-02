@@ -1,0 +1,104 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# python3 << 'PYEOF'
+> import struct
+>
+> V, C, E, L = 50257, 1024, 768, 12
+> total = 124439808
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+>
+> def read_floats(offset, count):
+>     f.seek(offset * 4)
+>     return struct.unpack(f'{count}f', f.read(count * 4))
+>
+> # Check last 1536 floats (should be ln_f_w and ln_f_b)
+> vals = read_floats(total - 1536, 768)
+> avg = sum(vals)/768
+> print(f'Last 1536..768 from end (ln_f_w?): avg={avg:.4f}, min={min(vals):.4f}, max={max(vals):.4f}')
+>
+> vals = read_floats(total - 768, 768)
+> avg = sum(vals)/768
+> print(f'Last 768 (ln_f_b?): avg={avg:.4f}, min={min(vals):.4f}, max={max(vals):.4f}')
+>
+> # Maybe the format is from Karpathy's llm.c train_gpt2.py export
+> # That format has a header: magic, version, then config params
+> # But we already saw the first bytes are float values, not a header
+>
+> # Let me check if this might be the format where ln weights are stored
+> # with values like 0.1-0.5 range (pre-trained but not initialized to 1)
+>
+> # Let me try the Karpathy grouped layout:
+> # wte(V*E), wpe(C*E),
+> # ln1w(L*E), ln1b(L*E),
+> # qkvw(L*3E*E), qkvb(L*3E),
+> # attprojw(L*E*E), attprojb(L*E),
+> # ln2w(L*E), ln2b(L*E),
+> # fcw(L*4E*E), fcb(L*4E),
+> # fcprojw(L*4E*E), fcprojb(L*E),
+> # lnfw(E), lnfb(E)
+>
+> base = V*E + C*E
+> print(f'\nKarpathy grouped layout check:')
+>
+> # ln1w: L*E = 12*768 = 9216 values starting at base
+> vals = read_floats(base, 20)
+> print(f'ln1w start: {vals[:5]}')
+> vals = read_floats(base, 768)
+> avg = sum(vals)/768
+> print(f'ln1w layer0 avg: {avg:.4f}')
+>
+> # Try: maybe it starts with attention weights, not layer norm
+> # qkvw at base: L*3*E*E = 12*3*768*768 = 21,233,664
+> print(f'\nChecking if qkvw is at base...')
+>
+> # Actually, let me check the Karpathy format header
+> # In train_gpt2.py, the .bin file starts with a header:
+> # [magic=20240326, version=3, ...]
+> # But this is a .ckpt file, not .bin
+>
+> # Let me check: maybe the file has NO header and follows a specific TF checkpoint order
+> # TF checkpoints typically have variable names. But this is a single .ckpt file (not TF native format)
+>
+> # Could this be the format from picoGPT or similar where weights are just concatenated?
+> # Let me check if it matches the huggingface order
+>
+> # HF GPT-2 order: wte, wpe, then per layer: ln1.w, ln1.b, attn.c_attn.w, attn.c_attn.b, attn.c_proj.w, attn.c_proj.b, ln2.w, ln2.b, mlp.c_fc.w, mlp.c_fc.b, ml
+p.c_proj.w, mlp.c_proj.b
+> # Then ln_f.w, ln_f.b
+>
+> # In this per-layer format:
+> print(f'\nPer-layer format check:')
+> offset = base
+> for name, size in [('ln1w', E), ('ln1b', E), ('qkvw', 3*E*E), ('qkvb', 3*E), ('projw', E*E), ('projb', E), ('ln2w', E), ('ln2b', E), ('fcw', 4*E*E), ('fcb', 4
+*E), ('fcprojw', 4*E*E), ('fcprojb', E)]:
+>     vals = read_floats(offset, min(768, size))
+>     avg = sum(vals)/len(vals)
+>     print(f'  {name} (offset={offset}, size={size}): avg={avg:.6f}, min={min(vals):.4f}, max={max(vals):.4f}')
+>     offset += size
+>
+> f.close()
+> PYEOF
+Last 1536..768 from end (ln_f_w?): avg=-0.0010, min=-0.7493, max=0.4104
+Last 768 (ln_f_b?): avg=-0.0003, min=-0.7359, max=0.6595
+
+Karpathy grouped layout check:
+ln1w start: (0.012613765895366669, 0.1112576425075531, -0.018961146473884583, -0.07971286028623581, -0.1944773644208908)
+ln1w layer0 avg: 0.0147
+
+Checking if qkvw is at base...
+
+Per-layer format check:
+  ln1w (offset=39383808, size=768): avg=0.014674, min=-0.4365, max=0.4971
+  ln1b (offset=39384576, size=768): avg=0.014902, min=-0.3512, max=0.5670
+  qkvw (offset=39385344, size=1769472): avg=0.015637, min=-0.4138, max=0.3613
+  qkvb (offset=41154816, size=2304): avg=-0.000471, min=-0.3058, max=0.2194
+  projw (offset=41157120, size=589824): avg=0.000910, min=-0.3417, max=0.3323
+  projb (offset=41746944, size=768): avg=0.000961, min=-0.2450, max=0.3536
+  ln2w (offset=41747712, size=768): avg=0.000483, min=-0.2366, max=0.2414
+  ln2b (offset=41748480, size=768): avg=-0.000388, min=-0.3363, max=0.2608
+  fcw (offset=41749248, size=2359296): avg=-0.000535, min=-0.3968, max=0.7082
+  fcb (offset=44108544, size=3072): avg=0.006791, min=-0.3935, max=0.4678
+  fcprojw (offset=44111616, size=2359296): avg=-0.005174, min=-0.3806, max=0.3299
+  fcprojb (offset=46470912, size=768): avg=-0.009685, min=-0.4362, max=0.4019
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app#

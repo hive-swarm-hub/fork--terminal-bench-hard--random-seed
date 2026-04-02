@@ -1,0 +1,78 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# python3 << 'PYEOF'
+> import mmap, struct, math
+>
+> E, H, L, V, C = 768, 12, 12, 50257, 1024
+> HS = 64
+> LS = 7087872
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', m, off*4))
+>
+> wte_off = L*LS + 1536 + C*E
+> wpe_off = L*LS + 1536
+>
+> # Token 15496 ("Hello") at position 0
+> h = [a+b for a,b in zip(F(wte_off+15496*E,E), F(wpe_off,E))]
+> print(f'h[0:3]={h[0:3]}')
+>
+> # Layer 0
+> base = 0
+> qkvb_off = base
+> qkvw_off = base + 2304
+> projb_off = qkvw_off + E*2304
+> projw_off = projb_off + E
+> ln1b_off = projw_off + E*E
+> ln1g_off = ln1b_off + E
+>
+> ln1g = F(ln1g_off, E)
+> ln1b = F(ln1b_off, E)
+>
+> # Layer norm
+> mean = sum(h)/E
+> var = sum((x-mean)**2 for x in h)/E
+> std = math.sqrt(var + 1e-5)
+> ln_out = [(h[j]-mean)/std*ln1g[j]+ln1b[j] for j in range(E)]
+> print(f'ln_out[0:3]={ln_out[0:3]}')
+>
+> # QKV matmul: ln_out @ qkvw + qkvb
+> # Two conventions:
+> # A) w[in][out]: out[j] = sum_k(in[k]*w[k*out_dim+j]) + b[j]
+> # B) w[out][in]: out[j] = sum_k(in[k]*w[j*in_dim+k]) + b[j]
+>
+> qkvb = F(qkvb_off, 2304)
+> print(f'qkvb[0:3]={qkvb[0:3]}')
+>
+> # Try convention A (w[in][out], row-major)
+> qkv_a = list(qkvb)
+> for j in range(5):  # just first 5 for speed
+>     s = qkv_a[j]
+>     for k in range(E):
+>         w = struct.unpack_from('f', m, (qkvw_off + k*2304 + j)*4)[0]
+>         s += ln_out[k] * w
+>     qkv_a[j] = s
+> print(f'QKV conv A [0:5]={qkv_a[0:5]}')
+>
+> # Try convention B (w[out][in], row-major)
+> qkv_b = list(qkvb)
+> for j in range(5):
+>     s = qkv_b[j]
+>     for k in range(E):
+>         w = struct.unpack_from('f', m, (qkvw_off + j*E + k)*4)[0]
+>         s += ln_out[k] * w
+>     qkv_b[j] = s
+> print(f'QKV conv B [0:5]={qkv_b[0:5]}')
+>
+> m.close()
+> f.close()
+> PYEOF
+h[0:3]=[-0.087471479550004, -0.33011239767074585, 0.01523002702742815]
+ln_out[0:3]=[-0.052242387042290554, -0.1287420978706303, -0.05589586850010629]
+qkvb[0:3]=[0.4803391396999359, -0.5254325866699219, -0.42926454544067383]
+QKV conv A [0:5]=[0.4700907062842915, -0.07750076448039189, 0.5530714876782664, -0.7012008177838145, -0.25255713538909286]
+QKV conv B [0:5]=[0.5268518911635935, -0.8883902302518372, -0.5412440881484295, -1.533198748379737, 0.5168455118167943]
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app#

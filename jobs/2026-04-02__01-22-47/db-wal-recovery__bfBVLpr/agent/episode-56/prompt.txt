@@ -1,0 +1,65 @@
+New Terminal Output:
+
+root@ed6f0788-b5ba-4977-b13a-49e417199b5c:/app# python3 << 'PYEOF'
+> import sqlite3
+> import os
+> import shutil
+>
+> # Try to create a database that exactly matches the original header
+> # The original has change counter=3, schema cookie=3
+> # This suggests 3 schema changes or 3 checkpoints
+>
+> # Let me try: create table, insert base, checkpoint, then add WAL data
+> test_dir = '/tmp/test_match'
+> os.makedirs(test_dir, exist_ok=True)
+> db_path = os.path.join(test_dir, 'test.db')
+> wal_path = db_path + '-wal'
+> shm_path = db_path + '-shm'
+>
+> for f in [db_path, wal_path, shm_path]:
+>     if os.path.exists(f):
+>         os.remove(f)
+>
+> # Try different creation sequences to get change counter=3 and schema cookie=3
+> conn = sqlite3.connect(db_path)
+> conn.execute('PRAGMA journal_mode=WAL')
+> conn.execute('''CREATE TABLE items (
+>         id INTEGER PRIMARY KEY,
+>         name TEXT,
+>         value INTEGER
+>     )''')
+> conn.commit()
+> conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+>
+> # Insert base records
+> base_items = [
+>     (1, 'apple', 100), (2, 'banana', 200), (3, 'cherry', 300),
+>     (4, 'date', 400), (5, 'elderberry', 500),
+> ]
+> conn.executemany('INSERT INTO items VALUES (?, ?, ?)', base_items)
+> conn.commit()
+> conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+>
+> # Check header
+> with open(db_path, 'rb') as f:
+>     header = f.read(100)
+>
+> change_counter = int.from_bytes(header[0x18:0x1C], 'big')
+> schema_cookie = int.from_bytes(header[0x28:0x2C], 'big')
+> version_valid = int.from_bytes(header[0x5C:0x60], 'big')
+> print(f'Change counter: {change_counter}, Schema cookie: {schema_cookie}, Version valid: {version_valid}')
+>
+> # Compare with original
+> with open('/app/main.db', 'rb') as f:
+>     orig_header = f.read(100)
+> orig_cc = int.from_bytes(orig_header[0x18:0x1C], 'big')
+> orig_sc = int.from_bytes(orig_header[0x28:0x2C], 'big')
+> orig_vv = int.from_bytes(orig_header[0x5C:0x60], 'big')
+> print(f'Original - Change counter: {orig_cc}, Schema cookie: {orig_sc}, Version valid: {orig_vv}')
+>
+> conn.close()
+> shutil.rmtree(test_dir)
+> PYEOF
+Change counter: 2, Schema cookie: 1, Version valid: 2
+Original - Change counter: 3, Schema cookie: 3, Version valid: 3
+root@ed6f0788-b5ba-4977-b13a-49e417199b5c:/app#

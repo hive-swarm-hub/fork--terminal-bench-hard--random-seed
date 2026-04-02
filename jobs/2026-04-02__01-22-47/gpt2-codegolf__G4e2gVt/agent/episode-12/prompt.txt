@@ -1,0 +1,111 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# python3 << 'PYEOF'
+> import struct, math, sys
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+> HS = E // H  # 64
+>
+> # Load all weights
+> f = open('gpt2-124M.ckpt', 'rb')
+> data = f.read()
+> f.close()
+>
+> W = struct.unpack(f'{len(data)//4}f', data)
+>
+> # Weight layout per layer (alphabetical TF order):
+> # attn/c_attn/b(2304), attn/c_attn/w(768*2304), attn/c_proj/b(768), attn/c_proj/w(768*768)
+> # ln_1/b(768), ln_1/g(768), ln_2/b(768), ln_2/g(768)
+> # mlp/c_fc/b(3072), mlp/c_fc/w(768*3072), mlp/c_proj/b(768), mlp/c_proj/w(3072*768)
+> # Then: ln_f/b(768), ln_f/g(768), wpe(1024*768), wte(50257*768)
+>
+> layer_size = 7087872
+> after_layers = L * layer_size
+>
+> def get_layer_weights(l):
+>     base = l * layer_size
+>     off = base
+>     qkvb = W[off:off+2304]; off += 2304
+>     qkvw = W[off:off+768*2304]; off += 768*2304
+>     projb = W[off:off+768]; off += 768
+>     projw = W[off:off+768*768]; off += 768*768
+>     ln1b = W[off:off+768]; off += 768
+>     ln1g = W[off:off+768]; off += 768
+>     ln2b = W[off:off+768]; off += 768
+>     ln2g = W[off:off+768]; off += 768
+>     fcb = W[off:off+3072]; off += 3072
+>     fcw = W[off:off+768*3072]; off += 768*3072
+>     fcprojb = W[off:off+768]; off += 768
+>     fcprojw = W[off:off+3072*768]; off += 3072*768
+>     return {'qkvb': qkvb, 'qkvw': qkvw, 'projb': projb, 'projw': projw,
+>             'ln1b': ln1b, 'ln1g': ln1g, 'ln2b': ln2b, 'ln2g': ln2g,
+>             'fcb': fcb, 'fcw': fcw, 'fcprojb': fcprojb, 'fcprojw': fcprojw}
+>
+> off = after_layers
+> lnfb = W[off:off+768]; off += 768
+> lnfg = W[off:off+768]; off += 768
+> wpe = W[off:off+C*E]; off += C*E
+> wte = W[off:off+V*E]; off += V*E
+> print(f'Total consumed: {off} (expected {len(W)})')
+>
+> # Load BPE merges
+> merges = []
+> with open('vocab.bpe') as f:
+>     next(f)  # skip header
+>     for line in f:
+>         parts = line.rstrip('\n').split(' ')
+>         if len(parts) == 2:
+>             merges.append((parts[0], parts[1]))
+> print(f'Loaded {len(merges)} merges')
+>
+> # GPT-2 byte encoder
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(ord('\xa1'), ord('\xac')+1)) + list(range(ord('\xae'), ord('\xff')+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256 + n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> byte_enc = bytes_to_unicode()
+>
+> # Build vocab: first 256 tokens are single bytes, then merges create new tokens
+> vocab = [byte_enc[i] for i in range(256)]
+> for a, b in merges:
+>     vocab.append(a + b)
+> # Token 50256 = <|endoftext|>
+> print(f'Vocab size: {len(vocab)}')
+>
+> # Build token to string mapping
+> tok2str = {i: v for i, v in enumerate(vocab)}
+>
+> # Build string to token mapping
+> str2tok = {v: i for i, v in enumerate(vocab)}
+>
+> # BPE encode
+> def bpe_encode(text):
+>     # Convert text to unicode representation
+>     tokens = [byte_enc[b] for b in text.encode('utf-8')]
+>     # Apply merges greedily
+>     for i, (a, b) in enumerate(merges):
+>         j = 0
+>         while j < len(tokens) - 1:
+>             if tokens[j] == a and tokens[j+1] == b:
+>                 tokens[j] = a + b
+>                 tokens.pop(j+1)
+>             else:
+>                 j += 1
+>     return [str2tok[t] for t in tokens]
+>
+> # Test encoding
+> test = "Hello world"
+> tokens = bpe_encode(test)
+> print(f'Encoded "{test}": {tokens}')
+> for t in tokens:
+>     print(f'  {t}: "{tok2str[t]}"')
+>
+> PYEOF
+

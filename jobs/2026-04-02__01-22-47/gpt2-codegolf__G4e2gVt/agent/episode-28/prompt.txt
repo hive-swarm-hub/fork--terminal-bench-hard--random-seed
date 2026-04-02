@@ -1,0 +1,140 @@
+New Terminal Output:
+
+root@9179482f-a947-4b52-a542-1b5750ee70c5:/app# python3 << 'PYEOF'
+> import mmap, struct, math
+>
+> E, H, L, V, C = 768, 12, 12, 50257, 1024
+> HS, NL = 64, 12
+> LS = 7087872
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', m, off*4))
+>
+> def layernorm(x, g, b):
+>     mean = sum(x)/E
+>     var = sum((xi-mean)**2 for xi in x)/E
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[j]-mean)/std*g[j]+b[j] for j in range(E)]
+>
+> def matvec(x, w_off, b, in_dim, out_dim):
+>     out = list(b)
+>     for j in range(out_dim):
+>         s = out[j]
+>         for k in range(in_dim):
+>             s += x[k] * struct.unpack_from('f', m, (w_off + k*out_dim + j)*4)[0]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1.0+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+>
+> wte_off = L*LS + 1536 + C*E
+> wpe_off = L*LS + 1536
+>
+> # Token 15496 at position 0
+> h = [a+b for a,b in zip(F(wte_off+15496*E,E), F(wpe_off,E))]
+> print(f'Initial h[0:3]={h[0:3]}')
+>
+> # Process through all 12 layers
+> for l in range(L):
+>     base = l * LS
+>     qkvb_off = base
+>     qkvw_off = base + 2304
+>     projb_off = qkvw_off + E*2304
+>     projw_off = projb_off + E
+>     ln1b_off = projw_off + E*E
+>     ln1g_off = ln1b_off + E
+>     ln2b_off = ln1g_off + E
+>     ln2g_off = ln2b_off + E
+>     fcb_off = ln2g_off + E
+>     fcw_off = fcb_off + 3072
+>     fpb_off = fcw_off + E*3072
+>     fpw_off = fpb_off + E
+>
+>     # Layer norm 1
+>     ln1g = F(ln1g_off, E)
+>     ln1b = F(ln1b_off, E)
+>     ln_out = layernorm(h, ln1g, ln1b)
+>
+>     # QKV
+>     qkvb = F(qkvb_off, 2304)
+>     qkv = matvec(ln_out, qkvw_off, qkvb, E, 2304)
+>
+>     # For single token, attention is just self-attention (score=1)
+>     # Q dot K / sqrt(d) -> softmax -> V
+>     # With single position, attention output = V
+>     # So attn_out = V part of qkv
+>     # V is qkv[2*E:3*E] = qkv[1536:2304]
+>     attn_out = qkv[2*E:3*E]  # V values (since single token, attention weight is 1.0)
+>
+>     # Wait - that's not quite right. Let me think...
+>     # For single token at position 0:
+>     # Q = qkv[0:E], K = qkv[E:2E], V = qkv[2E:3E]
+>     # For each head h:
+>     #   q_h = Q[h*HS:(h+1)*HS], k_h = K[h*HS:(h+1)*HS], v_h = V[h*HS:(h+1)*HS]
+>     #   score = q_h . k_h / sqrt(HS) = q_h . k_h / 8
+>     #   softmax over single position = 1.0
+>     #   output_h = v_h
+>     # So concatenated output = V
+>     # This is correct!
+>
+>     # Projection
+>     projb = F(projb_off, E)
+>     proj = matvec(attn_out, projw_off, projb, E, E)
+>
+>     # Residual
+>     h = [h[j] + proj[j] for j in range(E)]
+>
+>     # Layer norm 2
+>     ln2g = F(ln2g_off, E)
+>     ln2b = F(ln2b_off, E)
+>     ln2_out = layernorm(h, ln2g, ln2b)
+>
+>     # MLP fc
+>     fcb = F(fcb_off, 3072)
+>     fc_out = matvec(ln2_out, fcw_off, fcb, E, 3072)
+>
+>     # GELU
+>     fc_out = [gelu(x) for x in fc_out]
+>
+>     # MLP projection
+>     fpb = F(fpb_off, E)
+>     fp_out = matvec(fc_out, fpw_off, fpb, 3072, E)
+>
+>     # Residual
+>     h = [h[j] + fp_out[j] for j in range(E)]
+>
+>     print(f'After layer {l}: h[0:3]={h[0:3]}')
+>
+> # Final layer norm
+> lnfb = F(L*LS, E)
+> lnfg = F(L*LS+E, E)
+> final = layernorm(h, lnfg, lnfb)
+> print(f'Final ln: {final[0:3]}')
+>
+> # Compute logits: final @ wte^T
+> # logit[i] = sum_j(final[j] * wte[i*E+j])
+> # Just compute top-5
+> best = []
+> for i in range(V):
+>     wte_i = F(wte_off + i*E, E)
+>     s = sum(final[j]*wte_i[j] for j in range(E))
+>     best.append((s, i))
+>
+> best.sort(reverse=True)
+> print(f'Top 5 tokens:')
+> for s, i in best[:5]:
+>     print(f'  token {i}: logit={s:.4f}')
+> print(f'Bottom 5 tokens:')
+> for s, i in best[-5:]:
+>     print(f'  token {i}: logit={s:.4f}')
+>
+> m.close()
+> f.close()
+> PYEOF
+Initial h[0:3]=[-0.087471479550004, -0.33011239767074585, 0.01523002702742815]
+After layer 0: h[0:3]=[0.6783659071440669, -1.4596385414088067, 0.8340051357957453]
+

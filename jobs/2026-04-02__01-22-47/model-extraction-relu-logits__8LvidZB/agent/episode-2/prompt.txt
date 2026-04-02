@@ -1,0 +1,210 @@
+New Terminal Output:
+
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app# cat > /app/steal.py << 'PYTHON_EOF'
+       diff_norm = np.linalg.norm(d> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of forward(x) via finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> # Step 1: Sample many random points and compute gradients
+> np.random.seed(42)
+> num_samples = 500
+> gradients = []
+> points = []
+>
+> for _ in range(num_samples):
+>     x = np.random.randn(10) * 5.0  # Use larger scale to explore activation space
+>     g = compute_gradient(x)
+>     gradients.append(g)
+>     points.append(x)
+>
+> gradients = np.array(gradients)
+> points = np.array(points)
+>
+> # Step 2: Find unique gradient directions by looking at differences
+> # Two gradients that differ by exactly one neuron flip will have a rank-1 difference
+> # That rank-1 difference is proportional to a row of A1
+>
+> found_rows = []  # Will store rows of A1 (up to scaling)
+>
+> def normalize(v):
+>     n = np.linalg.norm(v)
+>     if n < 1e-10:
+>         return v
+>     return v / n
+>
+> def is_new_direction(v, existing, tol=0.999):
+>     """Check if v is a new direction not already in existing list."""
+>     v_norm = normalize(v)
+>     for e in existing:
+>         e_norm = normalize(e)
+>         if abs(np.dot(v_norm, e_norm)) > tol:
+>             return False
+>     return True
+>
+> # Look at all pairs of gradients
+> print(f"Computing pairwise gradient differences...")
+> for i in range(len(gradients)):
+>     for j in range(i+1, len(gradients)):
+>         diff = gradients[i] - gradients[j]
+>         diff_norm = np.linalg.norm(diff)
+>         if diff_norm < 1e-10:
+>             continue  # Same gradient (same activation pattern)
+>
+>         # Check if this difference is rank-1 (i.e., a single vector)
+>         # For a 1D vector this is always rank-1, so we just check if it's a new direction
+>         if is_new_direction(diff, found_rows):
+>             found_rows.append(diff.copy())
+>             print(f"Found row {len(found_rows)}: norm={diff_norm:.6f}")
+>
+>         if len(found_rows) >= 20:
+>             break
+>     if len(found_rows) >= 20:
+>         break
+>
+> print(f"\nFound {len(found_rows)} candidate rows")
+>
+> # But wait - the above approach finds differences of gradients, which are
+> # A2[0,k] * A1[k,:] for individual neurons k.
+> # However, a gradient difference could also correspond to multiple neurons flipping.
+> # We need to be more careful.
+>
+> # Better approach: Use the fact that gradients live in a linear subspace.
+> # At any point, ∇f(x) = A1^T @ diag(s) @ A2^T where s is the activation pattern.
+> # The gradient is: sum_{i: neuron i active} A2[0,i] * A1[i,:]
+> #
+> # If we find the "critical points" where neurons switch, we can extract individual rows.
+> #
+> # Actually, let's use a cleaner method:
+> # Walk along a line from one point to another and detect where the gradient changes.
+> # Each change point corresponds to a neuron switching, giving us one row of A1.
+>
+> def find_transition(x1, x2, g1, g2, depth=50):
+>     """Binary search for the transition point between x1 and x2."""
+>     for _ in range(depth):
+>         xm = (x1 + x2) / 2
+>         gm = compute_gradient(xm)
+>         # Check which side xm is on
+>         if np.linalg.norm(gm - g1) < 1e-8:
+>             x1 = xm
+>             g1 = gm
+>         else:
+>             x2 = xm
+>             g2 = gm
+>     return x1, x2, g1, g2
+>
+> # Now let's use a more systematic approach
+> # Walk along random lines and detect gradient changes
+>
+> print("\n--- Phase 2: Walking along lines to find individual neuron directions ---")
+> found_rows2 = []
+> np.random.seed(123)
+>
+> for trial in range(200):
+>     if len(found_rows2) >= 20:
+>         break
+>
+>     # Pick a random line
+>     x0 = np.random.randn(10) * 3.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Sample along the line
+>     ts = np.linspace(-10, 10, 100)
+>     prev_g = None
+>
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = compute_gradient(x)
+>
+>         if prev_g is not None:
+>             diff = g - prev_g
+>             diff_norm = np.linalg.norm(diff)
+>             if diff_norm > 1e-8:  # Gradient changed
+>                 # This difference should be A2[0,k] * A1[k,:] for some k
+>                 # But could be multiple neurons if step is too large
+>                 # Let's binary search to find exact transition
+>                 x_before = x0 + ts[list(ts).index(t)-1] * direction if t != ts[0] else x0
+>                 x_after = x
+>                 xb, xa, gb, ga = find_transition(x_before, x_after, prev_g, g)
+>                 row_candidate = ga - gb
+>                 row_norm = np.linalg.norm(row_candidate)
+>
+>                 if row_norm > 1e-8 and is_new_direction(row_candidate, found_rows2):
+>                     found_rows2.append(row_candidate.copy())
+>                     print(f"Found direction {len(found_rows2)}: norm={row_norm:.8f}")
+>
+>         prev_g = g
+>
+> print(f"\nTotal directions found: {len(found_rows2)}")
+>
+> # The found rows are A2[0,k] * A1[k,:] for various k
+> # We need A1[k,:] up to permutation and scaling
+> # Since the task says "up to permuting neurons and scaling",
+> # we can just normalize each row or keep as-is
+>
+> # Build the matrix
+> if len(found_rows2) >= 20:
+>     rows_to_use = found_rows2[:20]
+> else:
+>     # Combine both methods
+>     rows_to_use = found_rows2[:]
+>     for r in found_rows:
+>         if len(rows_to_use) >= 20:
+>             break
+>         if is_new_direction(r, rows_to_use):
+>             rows_to_use.append(r)
+>
+> print(f"Using {len(rows_to_use)} rows")
+>
+> # Each found row is c_k * A1[k,:] for some scalar c_k
+> # To get A1 up to permutation and scaling, we normalize each row
+> # to have the same norm as the original A1 rows.
+> # Actually, "up to scaling" means we can have any scalar per row.
+> # So let's just normalize each to unit norm.
+>
+> stolen_A1 = np.array(rows_to_use)
+>
+> # Normalize each row to unit length (the scaling is arbitrary per the task)
+> for i in range(len(stolen_A1)):
+>     n = np.linalg.norm(stolen_A1[i])
+>     if n > 1e-10:
+>         stolen_A1[i] = stolen_A1[i] / n
+>
+> print(f"\nStolen A1 shape: {stolen_A1.shape}")
+> np.save('/app/stolen_A1.npy', stolen_A1)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verify: compare with actual A1 directions
+> from forward import A1 as true_A1
+> true_A1_normalized = true_A1.copy()
+> for i in range(true_A1.shape[0]):
+>     true_A1_normalized[i] = true_A1[i] / np.linalg.norm(true_A1[i])
+>
+> # For each stolen row, find the best matching true row
+> print("\nVerification (cosine similarity with best matching true row):")
+> matched = set()
+> for i in range(stolen_A1.shape[0]):
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(true_A1_normalized.shape[0]):
+>         sim = abs(np.dot(stolen_A1[i], true_A1_normalized[j]))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     print(f"  Stolen row {i} -> True row {best_j}: similarity = {best_sim:.6f}")
+>
+> print(f"\nMatched {len(matched)} unique true rows out of 20")
+> PYTHON_EOF
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app#

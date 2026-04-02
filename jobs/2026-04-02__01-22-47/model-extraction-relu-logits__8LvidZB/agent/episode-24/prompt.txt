@@ -1,0 +1,162 @@
+New Terminal Output:
+
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app# cat > /app/steal.py << 'PYTHON_EOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient via forward finite differences."""
+>     f0 = forward(x)
+>     grad = np.zeros(10)
+>     for i in range(10):
+>         xp = x.copy()
+>         xp[i] += eps
+>         grad[i] = (forward(xp) - f0) / eps
+>     return grad
+>
+> def cosine_sim(a, b):
+>     na, nb = np.linalg.norm(a), np.linalg.norm(b)
+>     if na < 1e-12 or nb < 1e-12:
+>         return 0.0
+>     return abs(np.dot(a, b)) / (na * nb)
+>
+> def find_matching_direction(v, directions, tol=0.995):
+>     """Find index of matching direction in list, or -1."""
+>     if np.linalg.norm(v) < 1e-10:
+>         return -1
+>     for idx, d in enumerate(directions):
+>         if cosine_sim(v, d) > tol:
+>             return idx
+>     return -1
+>
+> # ============================================================
+> # Step 1: Collect gradient transitions along random lines
+> # ============================================================
+> # Walking along a line in input space, the network output is piecewise linear
+> # (due to ReLU). Each gradient change corresponds to crossing a hyperplane
+> # A1[k,:] . x + b1[k] = 0 where neuron k switches on/off.
+> # The gradient difference at such a transition is +/- A2[0,k] * A1[k,:],
+> # which is proportional to row k of A1.
+>
+> all_diffs = []
+> np.random.seed(42)
+>
+> print("Collecting gradient transitions along random lines...")
+> sys.stdout.flush()
+>
+> for trial in range(50):
+>     x0 = np.random.randn(10) * 1.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Fine steps to ensure at most one neuron flips per step
+>     ts = np.linspace(-3, 3, 400)  # step size ~ 0.015
+>
+>     prev_g = None
+>     for t in ts:
+>         x = x0 + t * direction
+>         g = compute_gradient(x)
+>         if prev_g is not None:
+>             diff = g - prev_g
+>             diff_norm = np.linalg.norm(diff)
+>             if diff_norm > 1e-8:
+>                 all_diffs.append(diff.copy())
+>         prev_g = g
+>
+> print(f"Collected {len(all_diffs)} gradient transitions")
+> sys.stdout.flush()
+>
+> # ============================================================
+> # Step 2: Cluster transitions by direction
+> # ============================================================
+> # True single-neuron flip directions appear many times (from different lines).
+> # Multi-neuron flips (rare with fine steps) appear only once or twice.
+>
+> directions = []  # unique direction representatives
+> counts = []      # observation count per direction
+>
+> for d in all_diffs:
+>     idx = find_matching_direction(d, directions, tol=0.995)
+>     if idx >= 0:
+>         counts[idx] += 1
+>     else:
+>         directions.append(d.copy())
+>         counts.append(1)
+>
+> counts = np.array(counts)
+> print(f"\nFound {len(directions)} unique directions")
+> for i, (d, c) in enumerate(zip(directions, counts)):
+>     print(f"  Direction {i}: count={c}, norm={np.linalg.norm(d):.6f}")
+> sys.stdout.flush()
+>
+> # ============================================================
+> # Step 3: Determine hidden dimension and select true directions
+> # ============================================================
+> # True neuron directions have high counts; noise has count ~1.
+> # Use a threshold: directions seen at least 2 times are likely real neurons.
+> # Then sort by count and take the most frequent unique ones.
+>
+> # Determine threshold: use gap between sorted counts
+> sorted_counts = np.sort(counts)[::-1]
+> count_threshold = max(2, sorted_counts[0] // 4)  # at least 25% of max count
+>
+> # Select directions above threshold, sorted by count (most frequent first)
+> order = np.argsort(counts)[::-1]
+> final_directions = []
+> for idx in order:
+>     if counts[idx] < count_threshold:
+>         continue
+>     d = directions[idx]
+>     if find_matching_direction(d, final_directions, tol=0.99) < 0:
+>         final_directions.append(d.copy())
+>
+> hidden_dim = len(final_directions)
+> print(f"\nDetected hidden dimension: {hidden_dim}")
+> print(f"Count threshold used: {count_threshold}")
+>
+> # ============================================================
+> # Step 4: If we need more directions, do additional exploration
+> # ============================================================
+> if hidden_dim < len(sorted_counts[sorted_counts >= count_threshold]):
+>     print("Doing additional exploration...")
+>     np.random.seed(999)
+>     for trial in range(200):
+>         if len(final_directions) >= hidden_dim + 5:  # some buffer
+>             break
+>         x0 = np.random.randn(10) * 3.0
+>         direction = np.random.randn(10)
+>         direction = direction / np.linalg.norm(direction)
+>         ts = np.linspace(-8, 8, 500)
+>         prev_g = None
+>         for t in ts:
+>             x = x0 + t * direction
+>             g = compute_gradient(x)
+>             if prev_g is not None:
+>                 diff = g - prev_g
+>                 if np.linalg.norm(diff) > 1e-8:
+>                     if find_matching_direction(diff, final_directions, tol=0.995) < 0:
+>                         final_directions.append(diff.copy())
+>                         print(f"  Extra direction {len(final_directions)}")
+>                         sys.stdout.flush()
+>             prev_g = g
+>
+> # ============================================================
+> # Step 5: Build and save the stolen A1 matrix
+> # ============================================================
+> # Each direction is c_k * A1[k,:] for some scalar c_k.
+> # Normalize to unit length ("up to scaling" per the task).
+>
+> stolen_A1 = np.array(final_directions)
+> for i in range(len(stolen_A1)):
+>     n = np.linalg.norm(stolen_A1[i])
+>     if n > 1e-10:
+>         stolen_A1[i] /= n
+>
+> print(f"\nStolen A1 shape: {stolen_A1.shape}")
+> print(stolen_A1)
+> np.save('/app/stolen_A1.npy', stolen_A1)
+> print("\nSaved to /app/stolen_A1.npy")
+> PYTHON_EOF
+root@59c81d96-f54f-440d-987c-b9e3c471cbde:/app#
