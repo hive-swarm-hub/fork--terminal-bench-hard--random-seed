@@ -1,0 +1,133 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# cat > /tmp/test2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <math.h>
+> #include <string.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+>
+> #define V 50257
+> #define CTX 1024
+> #define E 768
+> #define L 12
+> #define H 12
+> #define HS (E/H)
+> #define E4 (4*E)
+> #define E3 (3*E)
+>
+> float *W;
+>
+> // Per-layer offsets
+> typedef struct {
+>     long qkvb, qkvw, apb, apw, ln1b, ln1g, ln2b, ln2g, fcb, fcw, fpb, fpw;
+> } LayerOff;
+>
+> LayerOff layers[L];
+> long o_lnfb, o_lnfg, o_wpe, o_wte;
+>
+> void init_offsets() {
+>     // Alphabetical order: h0, h1, h10, h11, h2..h9, ln_f, wpe, wte
+>     int order[] = {0,1,10,11,2,3,4,5,6,7,8,9};
+>     long off = 0;
+>     for (int i = 0; i < L; i++) {
+>         int l = order[i];
+>         layers[l].qkvb = off; off += E3;
+>         layers[l].qkvw = off; off += (long)E3*E;
+>         layers[l].apb = off; off += E;
+>         layers[l].apw = off; off += (long)E*E;
+>         layers[l].ln1b = off; off += E;
+>         layers[l].ln1g = off; off += E;
+>         layers[l].ln2b = off; off += E;
+>         layers[l].ln2g = off; off += E;
+>         layers[l].fcb = off; off += E4;
+>         layers[l].fcw = off; off += (long)E4*E;
+>         layers[l].fpb = off; off += E;
+>         layers[l].fpw = off; off += (long)E4*E;
+>     }
+>     o_lnfb = off; off += E;
+>     o_lnfg = off; off += E;
+>     o_wpe = off; off += (long)CTX*E;
+>     o_wte = off; off += (long)V*E;
+>     printf("Total: %ld\n", off);
+> }
+>
+> float x[E], ln_out[E], qkv[E3], attn_o[E], proj[E], fc[E4];
+>
+> void layernorm(float *out, float *inp, float *g, float *b) {
+>     float mean = 0;
+>     for (int i = 0; i < E; i++) mean += inp[i];
+>     mean /= E;
+>     float var = 0;
+>     for (int i = 0; i < E; i++) var += (inp[i]-mean)*(inp[i]-mean);
+>     var /= E;
+>     float s = 1.0f / sqrtf(var + 1e-5f);
+>     for (int i = 0; i < E; i++)
+>         out[i] = g[i] * (inp[i] - mean) * s + b[i];
+> }
+>
+> // TF Conv1D stores weights as [in_dim, out_dim], so x @ W
+> void matmul(float *out, float *inp, float *w, float *b, int od, int id) {
+>     for (int i = 0; i < od; i++) {
+>         float s = b ? b[i] : 0;
+>         for (int j = 0; j < id; j++)
+>             s += inp[j] * w[(long)j*od+i];
+>         out[i] = s;
+>     }
+> }
+>
+> float geluf(float x) {
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> void forward(int token) {
+>     for (int i = 0; i < E; i++)
+>         x[i] = W[o_wte + (long)token*E + i] + W[o_wpe + i];
+>
+>     for (int l = 0; l < L; l++) {
+>         LayerOff *lo = &layers[l];
+>         layernorm(ln_out, x, W+lo->ln1g, W+lo->ln1b);
+>         matmul(qkv, ln_out, W+lo->qkvw, W+lo->qkvb, E3, E);
+>         // Single token: attention output = value
+>         for (int h = 0; h < H; h++)
+>             for (int i = 0; i < HS; i++)
+>                 attn_o[h*HS+i] = qkv[2*E+h*HS+i];
+>         matmul(proj, attn_o, W+lo->apw, W+lo->apb, E, E);
+>         for (int i = 0; i < E; i++) x[i] += proj[i];
+>         layernorm(ln_out, x, W+lo->ln2g, W+lo->ln2b);
+>         matmul(fc, ln_out, W+lo->fcw, W+lo->fcb, E4, E);
+>         for (int i = 0; i < E4; i++) fc[i] = geluf(fc[i]);
+>         matmul(proj, fc, W+lo->fpw, W+lo->fpb, E, E4);
+>         for (int i = 0; i < E; i++) x[i] += proj[i];
+>     }
+>     layernorm(ln_out, x, W+o_lnfg, W+o_lnfb);
+>
+>     float best = -1e30;
+>     int best_id = 0;
+>     for (int v = 0; v < V; v++) {
+>         float s = 0;
+>         for (int i = 0; i < E; i++)
+>             s += ln_out[i] * W[o_wte + (long)v*E + i];
+>         if (s > best) { best = s; best_id = v; }
+>     }
+>     printf("Best token: %d (score %.4f)\n", best_id, best);
+> }
+>
+> int main() {
+>     int fd = open("/app/gpt2-124M.ckpt", O_RDONLY);
+>     struct stat st;
+>     fstat(fd, &st);
+>     W = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+>     init_offsets();
+>     printf("Testing Hello (15496):\n");
+>     forward(15496);
+>     return 0;
+> }
+> CEOF
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# gcc -O3 -o /tmp/test2 /tmp/test2.c -lm && /tmp/test2
+Total: 124439808
+Testing Hello (15496):
+Best token: 11 (score -32.3917)
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app#

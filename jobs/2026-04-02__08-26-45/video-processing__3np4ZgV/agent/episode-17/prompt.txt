@@ -1,0 +1,214 @@
+New Terminal Output:
+
+root@4c6302b4-3853-48dc-b1bb-a6a152799bed:/app# cat > /app/jump_analyzer.py << 'SCRIPT'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read video")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+>
+>     frame_data = []  # List of dicts with per-frame info
+>
+>     for frame_idx in range(1, total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>         diff = np.abs(blur - bg_blur)
+>
+>         # Threshold to get foreground mask
+>         mask = (diff > 25).astype(np.uint8) * 255
+>
+>         # Morphological operations to clean up noise
+>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>         mask = cv2.dilate(mask, kernel, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter small contours (noise)
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 500]
+>
+>         if big_contours:
+>             # Merge all significant contours
+>             all_points = np.vstack(big_contours)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             area = sum(cv2.contourArea(c) for c in big_contours)
+>             bottom = y + h  # Feet position
+>             top = y
+>             cx = x + w // 2
+>
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'area': area,
+>                 'x': x, 'y': y, 'w': w, 'h': h,
+>                 'bottom': bottom,
+>                 'top': top,
+>                 'cx': cx
+>             })
+>         else:
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'area': 0,
+>                 'x': 0, 'y': 0, 'w': 0, 'h': 0,
+>                 'bottom': 0,
+>                 'top': 0,
+>                 'cx': 0
+>             })
+>
+>     cap.release()
+>
+>     # Filter to only frames where athlete is detected with significant area
+>     # The athlete should have area > 5000 when fully visible and running
+>     athlete_frames = [f for f in frame_data if f['area'] > 3000]
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Establish ground level: the maximum bottom value when athlete is running
+>     # (before and after the jump, feet are at ground level)
+>     # Use the bottom values and find the typical ground level
+>     bottoms = [f['bottom'] for f in athlete_frames]
+>
+>     # Ground level is the maximum bottom value (highest y = lowest on screen = ground)
+>     ground_level = max(bottoms)
+>
+>     # The jump is characterized by the bottom value dropping significantly below ground level
+>     # Find the continuous sequence where bottom drops
+>
+>     # First, find frames that are part of the main athlete sequence
+>     # (consecutive frames with athlete detected)
+>     # Sort by frame number
+>     athlete_frames.sort(key=lambda f: f['frame'])
+>
+>     # Find the main sequence of consecutive athlete frames
+>     # Group consecutive frames
+>     sequences = []
+>     current_seq = [athlete_frames[0]]
+>     for i in range(1, len(athlete_frames)):
+>         if athlete_frames[i]['frame'] - athlete_frames[i-1]['frame'] <= 3:
+>             current_seq.append(athlete_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [athlete_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # The main athlete sequence is the longest one
+>     main_seq = max(sequences, key=len)
+>
+>     # Now analyze the bottom position in the main sequence
+>     # Ground level: use the first few and last few frames of the sequence
+>     # where the athlete is running on the ground
+>     n_ground_frames = min(3, len(main_seq) // 4)
+>     if n_ground_frames < 1:
+>         n_ground_frames = 1
+>
+>     ground_bottoms_start = [f['bottom'] for f in main_seq[:n_ground_frames]]
+>     ground_bottoms_end = [f['bottom'] for f in main_seq[-n_ground_frames:]]
+>     ground_level = max(ground_bottoms_start + ground_bottoms_end)
+>
+>     # Also consider the median of the highest bottom values as ground reference
+>     all_bottoms = sorted([f['bottom'] for f in main_seq], reverse=True)
+>     # Ground level is roughly the top quartile of bottom values
+>     ground_ref = np.median(all_bottoms[:max(len(all_bottoms)//4, 3)])
+>
+>     # Threshold for being "in the air": bottom is significantly above ground
+>     # A threshold of ~20 pixels should work
+>     air_threshold = ground_ref - 20
+>
+>     # Find frames where athlete is in the air
+>     in_air_frames = [f for f in main_seq if f['bottom'] < air_threshold]
+>
+>     if not in_air_frames:
+>         # Try a smaller threshold
+>         air_threshold = ground_ref - 10
+>         in_air_frames = [f for f in main_seq if f['bottom'] < air_threshold]
+>
+>     if not in_air_frames:
+>         raise ValueError("No jump detected")
+>
+>     # Takeoff: the first frame where bottom starts dropping below ground level
+>     # Look for the transition from ground to air
+>     # Find the first in-air frame
+>     first_air_frame = in_air_frames[0]['frame']
+>     last_air_frame = in_air_frames[-1]['frame']
+>
+>     # Takeoff is the frame just before or at the start of the air phase
+>     # Look backwards from first_air_frame to find where bottom starts decreasing
+>     main_seq_dict = {f['frame']: f for f in main_seq}
+>
+>     # Find takeoff: scan from before the air phase
+>     # The takeoff frame is where the athlete's feet first leave the ground
+>     # This is when bottom starts decreasing from ground level
+>     takeoff_frame = first_air_frame
+>     for f in main_seq:
+>         if f['frame'] >= first_air_frame:
+>             break
+>         # Check if bottom is starting to decrease (feet leaving ground)
+>         if f['bottom'] < ground_ref - 5:
+>             takeoff_frame = f['frame']
+>             break
+>
+>     # More precise: find the frame where bottom first drops below ground_ref - small_threshold
+>     # going backwards from the peak of the jump
+>     peak_frame = min(in_air_frames, key=lambda f: f['bottom'])  # Highest point (lowest bottom)
+>
+>     # Scan forward from beginning of sequence to find takeoff
+>     takeoff_frame = first_air_frame
+>     for i, f in enumerate(main_seq):
+>         if f['frame'] <= peak_frame['frame']:
+>             if f['bottom'] < ground_ref - 5:
+>                 takeoff_frame = f['frame']
+>                 break
+>
+>     # Landing: the first frame after the peak where bottom returns to near ground level
+>     landing_frame = last_air_frame
+>     for f in main_seq:
+>         if f['frame'] > peak_frame['frame']:
+>             if f['bottom'] >= air_threshold:
+>                 landing_frame = f['frame']
+>                 break
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff, landing = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff,
+>         'jump_land_frame_number': landing
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff}")
+>     print(f"Landing frame: {landing}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT
+root@4c6302b4-3853-48dc-b1bb-a6a152799bed:/app#

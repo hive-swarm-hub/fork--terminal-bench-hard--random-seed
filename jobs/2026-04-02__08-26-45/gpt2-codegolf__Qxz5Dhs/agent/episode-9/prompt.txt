@@ -1,0 +1,76 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# python3 << 'EOF'
+> import struct
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+>
+> # Check first 40 bytes as different types
+> f.seek(0)
+> data = f.read(40)
+> print('As int32:', struct.unpack('10i', data))
+> print('As uint32:', struct.unpack('10I', data))
+> print('As float32:', struct.unpack('10f', data))
+>
+> # Check if there's a magic number
+> print('First 4 bytes hex:', data[:4].hex())
+> print('As int32[0]:', struct.unpack('i', data[:4])[0])
+>
+> # llm.c uses header: 20240326 (magic), 3 (version), then params
+> # Let's check: 20240326 = 0x0134E946
+> print('0x0134E946 =', 0x0134E946)
+>
+> # Check if file size exactly matches raw weights
+> f.seek(0, 2)
+> fsize = f.tell()
+> print(f'File size: {fsize} bytes = {fsize//4} floats')
+>
+> # GPT-2 124M has 124439808 params
+> print(f'Expected: {124439808 * 4} bytes')
+> print(f'Match: {fsize == 124439808 * 4}')
+>
+> # Search entire file for gamma blocks - but faster
+> # Sample random positions
+> import random
+> random.seed(42)
+> f.seek(0)
+> all_data = f.read()
+> f.close()
+>
+> # Check every position that could be start of 768-float block
+> # But search the ENTIRE file this time, checking every 768-float block
+> total = len(all_data) // 4
+> for start in range(0, total - 768):
+>     if start % 1000000 == 0:
+>         pass  # progress
+>     # Quick check: just check first value
+>     v = struct.unpack_from('f', all_data, start * 4)[0]
+>     if abs(v - 1.0) < 0.1:
+>         # Check more values
+>         vals = struct.unpack_from('20f', all_data, start * 4)
+>         near1 = sum(1 for v in vals if abs(v - 1.0) < 0.3)
+>         if near1 >= 18:
+>             # Full check
+>             vals = struct.unpack_from(f'768f', all_data, start * 4)
+>             near1 = sum(1 for v in vals if abs(v - 1.0) < 0.3)
+>             if near1 > 600:
+>                 avg = sum(vals) / 768
+>                 print(f'FOUND gamma at offset {start}, near1={near1}, avg={avg:.4f}')
+>                 break
+>     if start > 50000000:
+>         print('Checked 50M offsets, stopping')
+>         break
+>
+> print('Search done')
+> EOF
+As int32: (1056304899, -1090092352, -1092892528, -1101863626, -1107112794, -1111265429, -1095456213, -1113810758, -1120140049, -1122388099)
+As uint32: (1056304899, 3204874944, 3202074768, 3193103670, 3187854502, 3183701867, 3199511083, 3181156538, 3174827247, 3172579197)
+As float32: (0.4803391396999359, -0.5254325866699219, -0.42926454544067383, -0.2059524953365326, -0.12773379683494568, -0.09542735666036606, -0.3528607785701751
+7, -0.07646317780017853, -0.04590314254164696, -0.03752850368618965)
+First 4 bytes hex: 03eff53e
+As int32[0]: 1056304899
+0x0134E946 = 20244806
+File size: 497759232 bytes = 124439808 floats
+Expected: 497759232 bytes
+Match: True
+

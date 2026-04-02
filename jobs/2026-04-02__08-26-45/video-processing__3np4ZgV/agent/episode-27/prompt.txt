@@ -1,0 +1,183 @@
+New Terminal Output:
+
+root@4c6302b4-3853-48dc-b1bb-a6a152799bed:/app# cat > /app/jump_analyzer.py << 'SCRIPT'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Read first frame as background (no runner on track)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read video")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+>
+>     frame_data = []
+>
+>     for frame_idx in range(1, total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>         diff = np.abs(blur - bg_blur)
+>
+>         # Threshold to get foreground mask
+>         mask = (diff > 25).astype(np.uint8) * 255
+>
+>         # Morphological operations to clean up noise
+i>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>         mask = cv2.dilate(mask, kernel, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter small contours (noise)
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 500]
+>
+>         if big_contours:
+>             all_points = np.vstack(big_contours)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             area = sum(cv2.contourArea(c) for c in big_contours)
+>             bottom = y + h
+>             top = y
+>             cx = x + w // 2
+>
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'area': area,
+>                 'x': x, 'y': y, 'w': w, 'h': h,
+>                 'bottom': bottom,
+>                 'top': top,
+>                 'cx': cx
+>             })
+>         else:
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'area': 0,
+>                 'x': 0, 'y': 0, 'w': 0, 'h': 0,
+>                 'bottom': 0,
+>                 'top': 0,
+>                 'cx': 0
+>             })
+>
+>     cap.release()
+>
+>     # Filter to frames where athlete is clearly detected
+>     athlete_frames = [f for f in frame_data if f['area'] > 3000]
+>
+>     if not athlete_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     athlete_frames.sort(key=lambda f: f['frame'])
+>
+>     # Group into consecutive sequences
+>     sequences = []
+>     current_seq = [athlete_frames[0]]
+>     for i in range(1, len(athlete_frames)):
+>         if athlete_frames[i]['frame'] - athlete_frames[i-1]['frame'] <= 3:
+>             current_seq.append(athlete_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [athlete_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # The main athlete sequence is the longest one
+>     main_seq = max(sequences, key=len)
+>
+>     # Filter out frames where athlete is entering/exiting the frame
+>     margin = 10
+>     fully_visible = [f for f in main_seq
+>                      if f['x'] > margin and (f['x'] + f['w']) < (width - margin)]
+>
+>     if len(fully_visible) < 5:
+>         fully_visible = main_seq
+>
+>     # Establish ground level from fully visible frames
+>     # Use the maximum bottom value as ground reference
+>     bottoms_fv = [f['bottom'] for f in fully_visible]
+>     ground_level = max(bottoms_fv)
+>
+>     # Compute dip for each frame in main sequence
+>     for f in main_seq:
+>         f['dip'] = ground_level - f['bottom']  # positive = above ground
+>
+>     # Find the peak of the jump (maximum dip = highest point)
+>     peak_frame = max(main_seq, key=lambda f: f['dip'])
+>     peak_idx = next(i for i, f in enumerate(main_seq) if f['frame'] == peak_frame['frame'])
+>     max_dip = peak_frame['dip']
+>
+>     if max_dip < 10:
+>         raise ValueError("No significant jump detected")
+>
+>     # Ground threshold: consider a frame "on ground" if dip is within
+>     # a percentage of the max dip. Normal running variation is small
+>     # compared to jump height.
+>     # Use 15% of max_dip as threshold, with min of 8 pixels
+>     ground_threshold = max(max_dip * 0.15, 8)
+>
+>     # TAKEOFF DETECTION:
+>     # Scan backwards from peak to find the last frame on the ground
+>     # Then takeoff = next frame (first frame leaving ground)
+>     last_ground_before_jump = 0
+>     for i in range(peak_idx, -1, -1):
+>         f = main_seq[i]
+>         if f['dip'] <= ground_threshold:
+>             last_ground_before_jump = i
+>             break
+>
+>     # Takeoff = the frame after the last ground contact
+>     if last_ground_before_jump + 1 <= peak_idx:
+>         takeoff_frame = main_seq[last_ground_before_jump + 1]['frame']
+>     else:
+>         takeoff_frame = main_seq[last_ground_before_jump]['frame']
+>
+>     # LANDING DETECTION:
+>     # Scan forward from peak to find first frame back on ground
+>     landing_frame = main_seq[-1]['frame']
+>     for i in range(peak_idx, len(main_seq)):
+>         f = main_seq[i]
+>         if f['dip'] <= ground_threshold:
+>             landing_frame = f['frame']
+>             break
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff, landing = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff,
+>         'jump_land_frame_number': landing
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff}")
+>     print(f"Landing frame: {landing}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT
+root@4c6302b4-3853-48dc-b1bb-a6a152799bed:/app#

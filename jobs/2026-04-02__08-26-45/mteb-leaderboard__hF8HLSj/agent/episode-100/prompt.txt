@@ -1,0 +1,149 @@
+New Terminal Output:
+__
+root@1b011509-eba3-4b94-9e13-1e60307b1b48:/app# head -145 /tmp/_create_table.py
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Literal
+
+import numpy as np
+import pandas as pd
+
+from mteb.get_tasks import get_task, get_tasks
+from mteb.models.get_model_meta import get_model_meta
+
+if TYPE_CHECKING:
+    from mteb.results.benchmark_results import BenchmarkResults
+
+
+def _borda_count(scores: pd.Series) -> pd.Series:
+    n = len(scores)
+    ranks = scores.rank(method="average", ascending=False)
+    counts = n - ranks
+    return counts
+
+
+def _get_borda_rank(score_table: pd.DataFrame) -> pd.Series:
+    borda_counts = score_table.apply(_borda_count, axis="index")
+    mean_borda = borda_counts.sum(axis=1)
+    return mean_borda.rank(method="min", ascending=False).astype(int)
+
+
+def _split_on_capital(s: str) -> str:
+    """Splits on capital letters and joins with spaces
+
+    Returns:
+        The input string split on capital letters and joined with spaces as a string.
+    """
+    return " ".join(re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)", s))
+
+
+def _format_n_parameters(n_parameters) -> float | None:
+    """Format n_parameters to be in billions with decimals down to 1 million. I.e. 7M -> 0.007B, 1.5B -> 1.5B, None -> None"""
+    if n_parameters:
+        n_parameters = float(n_parameters)
+        return round(n_parameters / 1e9, 3)
+    return None
+
+
+def _format_n_active_parameters(n_active_parameters) -> float | None:
+    """Format n_active_parameters to be in billions with decimals down to 1 million. I.e. 7M -> 0.007B, 1.5B -> 1.5B, None -> None"""
+    if n_active_parameters is not None:
+        n_active_parameters = float(n_active_parameters)
+        return round(n_active_parameters / 1e9, 3)
+    return None
+
+
+def _format_max_tokens(max_tokens: float | None) -> float | None:
+    if max_tokens is None or max_tokens == np.inf:
+        return None
+    return float(max_tokens)
+
+
+def _get_embedding_size(embed_dim: int | list[int] | None) -> int | None:
+    if embed_dim is None:
+        return None
+    if isinstance(embed_dim, int):
+        return int(embed_dim)
+    if isinstance(embed_dim, Sequence) and len(embed_dim) > 0:
+        return int(max(embed_dim))
+    return None
+
+
+def _get_means_per_types(per_task: pd.DataFrame):
+    task_names_per_type = defaultdict(list)
+    for task_name in per_task.columns:
+        task_type = get_task(task_name).metadata.type
+        task_names_per_type[task_type].append(task_name)
+    records = []
+    for task_type, tasks in task_names_per_type.items():
+        for model_name, scores in per_task.iterrows():
+            records.append(
+                dict(
+                    model_name=model_name,
+                    task_type=task_type,
+                    score=scores[tasks].mean(skipna=False),
+                )
+            )
+    return pd.DataFrame.from_records(records)
+
+
+def _create_summary_table_from_benchmark_results(
+    benchmark_results: BenchmarkResults,
+) -> pd.DataFrame:
+    """Create summary table from BenchmarkResults.
+
+    Returns a DataFrame with one row per model containing summary statistics
+    and task type averages.
+
+    Args:
+        benchmark_results: BenchmarkResults object containing model results
+
+    Returns:
+        DataFrame with model summaries, ready for styling in the leaderboard
+    """
+    data = benchmark_results.to_dataframe(format="long")
+
+    if data.empty:
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return no_results_frame
+
+    # Convert to DataFrame and pivot
+    per_task = data.pivot(index="model_name", columns="task_name", values="score")
+
+    # Remove models with no scores
+    to_remove = per_task.isna().all(axis="columns")
+    if to_remove.all():
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return no_results_frame
+
+    models_to_remove = list(per_task[to_remove].index)
+    per_task = per_task.drop(models_to_remove, axis=0)
+
+    # Calculate means by task type
+    mean_per_type = _get_means_per_types(per_task)
+    mean_per_type = mean_per_type.pivot(
+        index="model_name", columns="task_type", values="score"
+    )
+    mean_per_type.columns = [
+        _split_on_capital(column) for column in mean_per_type.columns
+    ]
+
+    # Calculate overall means
+    typed_mean = mean_per_type.mean(skipna=False, axis=1)
+    overall_mean = per_task.mean(skipna=False, axis=1)
+
+    # Build joint table
+    joint_table = mean_per_type.copy()
+    joint_table.insert(0, "mean", overall_mean)
+    joint_table.insert(1, "mean_by_task_type", typed_mean)
+    joint_table["borda_rank"] = _get_borda_rank(per_task)
+    joint_table = joint_table.sort_values("borda_rank", ascending=True)
+    joint_table = joint_table.reset_index()
+root@1b011509-eba3-4b94-9e13-1e60307b1b48:/app#

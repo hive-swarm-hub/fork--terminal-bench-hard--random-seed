@@ -1,0 +1,140 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# cat > /tmp/test.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <math.h>
+> #include <string.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define L 12
+> #define H 12
+> #define HS (E/H)
+> #define E4 (4*E)
+> #define E3 (3*E)
+>
+> float *W;
+>
+> // Grouped layout offsets (llm.c style)
+> long o_wte, o_wpe, o_ln1w, o_ln1b, o_qkvw, o_qkvb, o_apw, o_apb;
+> long o_ln2w, o_ln2b, o_fcw, o_fcb, o_fpw, o_fpb, o_lnfw, o_lnfb;
+>
+> void init_offsets_grouped() {
+>     long off = 0;
+>     o_wte = off; off += (long)V*E;
+>     o_wpe = off; off += (long)C*E;
+>     o_ln1w = off; off += (long)L*E;
+>     o_ln1b = off; off += (long)L*E;
+>     o_qkvw = off; off += (long)L*E3*E;
+>     o_qkvb = off; off += (long)L*E3;
+>     o_apw = off; off += (long)L*E*E;
+>     o_apb = off; off += (long)L*E;
+>     o_ln2w = off; off += (long)L*E;
+>     o_ln2b = off; off += (long)L*E;
+>     o_fcw = off; off += (long)L*E4*E;
+>     o_fcb = off; off += (long)L*E4;
+>     o_fpw = off; off += (long)L*E4*E;
+>     o_fpb = off; off += (long)L*E;
+>     o_lnfw = off; off += E;
+>     o_lnfb = off; off += E;
+>     printf("Grouped total: %ld\n", off);
+> }
+>
+> float x[E], ln_out[E], qkv[E3], attn[E], proj[E], fc[E4], mlp[E];
+>
+> void layernorm(float *out, float *inp, float *w, float *b, int add1) {
+>     float mean = 0;
+>     for (int i = 0; i < E; i++) mean += inp[i];
+>     mean /= E;
+>     float var = 0;
+>     for (int i = 0; i < E; i++) var += (inp[i]-mean)*(inp[i]-mean);
+>     var /= E;
+>     float s = 1.0f / sqrtf(var + 1e-5f);
+>     for (int i = 0; i < E; i++)
+>         out[i] = (add1 ? w[i]+1.0f : w[i]) * (inp[i] - mean) * s + b[i];
+> }
+>
+> void matmul(float *out, float *inp, float *w, float *b, int od, int id, int trans) {
+>     for (int i = 0; i < od; i++) {
+>         float s = b ? b[i] : 0;
+>         for (int j = 0; j < id; j++)
+>             s += inp[j] * (trans ? w[j*od+i] : w[i*id+j]);
+>         out[i] = s;
+>     }
+> }
+>
+> float gelu(float x) {
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> void forward_grouped(int token, int add1, int trans) {
+>     // Embedding
+>     for (int i = 0; i < E; i++)
+>         x[i] = W[o_wte + (long)token*E + i] + W[o_wpe + i];
+>
+>     for (int l = 0; l < L; l++) {
+>         // LN1
+>         layernorm(ln_out, x, W+o_ln1w+l*E, W+o_ln1b+l*E, add1);
+>         // QKV
+>         matmul(qkv, ln_out, W+o_qkvw+(long)l*E3*E, W+o_qkvb+l*E3, E3, E, trans);
+>         // Self-attention (single token = just value)
+>         for (int h = 0; h < H; h++)
+>             for (int i = 0; i < HS; i++)
+>                 attn[h*HS+i] = qkv[2*E+h*HS+i];
+>         // Attn proj
+>         matmul(proj, attn, W+o_apw+(long)l*E*E, W+o_apb+l*E, E, E, trans);
+>         for (int i = 0; i < E; i++) x[i] += proj[i];
+>         // LN2
+>         layernorm(ln_out, x, W+o_ln2w+l*E, W+o_ln2b+l*E, add1);
+>         // FC
+>         matmul(fc, ln_out, W+o_fcw+(long)l*E4*E, W+o_fcb+l*E4, E4, E, trans);
+>         for (int i = 0; i < E4; i++) fc[i] = gelu(fc[i]);
+>         // FC proj
+>         matmul(proj, fc, W+o_fpw+(long)l*E4*E, W+o_fpb+l*E, E, E4, trans);
+>         for (int i = 0; i < E; i++) x[i] += proj[i];
+>     }
+>     // Final LN
+>     layernorm(ln_out, x, W+o_lnfw, W+o_lnfb, add1);
+>     // Logits
+>     float best = -1e30;
+>     int best_id = 0;
+>     for (int v = 0; v < V; v++) {
+>         float s = 0;
+>         for (int i = 0; i < E; i++)
+>             s += ln_out[i] * W[o_wte + (long)v*E + i];
+>         if (s > best) { best = s; best_id = v; }
+>     }
+>     printf("Best token: %d (score %.4f)\n", best_id, best);
+> }
+>
+> int main() {
+>     int fd = open("/app/gpt2-124M.ckpt", O_RDONLY);
+>     struct stat st;
+>     fstat(fd, &st);
+>     W = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+>
+>     init_offsets_grouped();
+>
+>     int token = 15496; // "Hello"
+>     printf("Testing token %d (Hello)\n", token);
+>     printf("Grouped, no+1, no trans: "); forward_grouped(token, 0, 0);
+>     printf("Grouped, +1, no trans: "); forward_grouped(token, 1, 0);
+>     printf("Grouped, no+1, trans: "); forward_grouped(token, 0, 1);
+>     printf("Grouped, +1, trans: "); forward_grouped(token, 1, 1);
+>
+>     return 0;
+> }
+> CEOF
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# gcc -O3 -o /tmp/test /tmp/test.c -lm && /tmp/test
+Grouped total: 124439808
+Testing token 15496 (Hello)
+Grouped, no+1, no trans: Best token: 43739 (score 10.9923)
+Grouped, +1, no trans: Best token: 35030 (score 23.3265)
+Grouped, no+1, trans: Best token: 46107 (score 47.5089)
+Grouped, +1, trans: Best token: 36877 (score 175.7964)
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app#

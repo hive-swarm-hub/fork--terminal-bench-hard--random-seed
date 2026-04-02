@@ -1,0 +1,205 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# cat > /tmp/test_gpt2.py << 'PYEOF'
+> import struct, math
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+> HS = E // H  # 64
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> W = f.read()
+> f.close()
+>
+> def gf(off, n):
+>     return list(struct.unpack_from(f'{n}f', W, off*4))
+>
+> # Weight offsets (llm.c layout)
+> o_wte = 0
+> o_wpe = V*E
+> o_ln1w = o_wpe + C*E
+> o_ln1b = o_ln1w + L*E
+> o_qkvw = o_ln1b + L*E
+> o_qkvb = o_qkvw + L*3*E*E
+> o_apw = o_qkvb + L*3*E
+> o_apb = o_apw + L*E*E
+> o_ln2w = o_apb + L*E
+> o_ln2b = o_ln2w + L*E
+> o_fcw = o_ln2b + L*E
+> o_fcb = o_fcw + L*4*E*E
+> o_fpw = o_fcb + L*4*E
+> o_fpb = o_fpw + L*4*E*E
+> o_lnfw = o_fpb + L*E
+> o_lnfb = o_lnfw + E
+>
+> def layernorm(x, woff, boff):
+>     w = gf(woff, E)
+>     b = gf(boff, E)
+>     mean = sum(x) / E
+>     var = sum((xi - mean)**2 for xi in x) / E
+>     s = 1.0 / math.sqrt(var + 1e-5)
+>     return [(w[i] + 1.0) * (x[i] - mean) * s + b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matmul(x, woff, boff, out_dim, in_dim):
+>     w = gf(woff, out_dim * in_dim)
+>     b = gf(boff, out_dim) if boff >= 0 else [0]*out_dim
+>     result = []
+>     for i in range(out_dim):
+>         s = b[i]
+>         for j in range(in_dim):
+>             s += x[j] * w[i * in_dim + j]
+>         result.append(s)
+>     return result
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(xi - m) for xi in x]
+>     s = sum(e)
+>     return [ei / s for ei in e]
+>
+> # Parse BPE
+> bpe_merges = []
+> with open('/app/vocab.bpe') as f:
+>     next(f)  # skip header
+>     for line in f:
+>         parts = line.strip().split(' ')
+>         if len(parts) == 2:
+>             bpe_merges.append((parts[0], parts[1]))
+>
+> # Build vocab: 256 byte tokens + merges
+> vocab = [bytes([i]).decode('latin-1') for i in range(256)]
+> for a, b in bpe_merges:
+>     vocab.append(a + b)
+> vocab.append('<|endoftext|>')
+>
+> # BPE encode
+> def bpe_encode(text):
+>     # Convert to list of single-char tokens (using Ġ for space)
+>     text = text.replace(' ', '\u0120')  # Ġ
+>     tokens = list(text)
+>
+>     # Build merge rank lookup
+>     merge_rank = {}
+>     for i, (a, b) in enumerate(bpe_merges):
+>         merge_rank[(a, b)] = i
+>
+>     while len(tokens) > 1:
+>         best_pair = None
+>         best_rank = float('inf')
+>         for i in range(len(tokens) - 1):
+>             pair = (tokens[i], tokens[i+1])
+>             if pair in merge_rank and merge_rank[pair] < best_rank:
+>                 best_rank = merge_rank[pair]
+>                 best_pair = i
+>         if best_pair is None:
+>             break
+>         i = best_pair
+>         tokens = tokens[:i] + [tokens[i] + tokens[i+1]] + tokens[i+2:]
+>
+>     # Convert to token IDs
+>     token_to_id = {v: i for i, v in enumerate(vocab)}
+>     return [token_to_id[t] for t in tokens]
+>
+> # Test
+> tokens = bpe_encode("Hello world")
+> print(f'Tokens: {tokens}')
+> print(f'Token strings: {[vocab[t] for t in tokens]}')
+>
+> # Forward pass for a single position (simplified - no KV cache)
+> def forward(token_ids):
+>     T = len(token_ids)
+>
+>     # Get embeddings
+>     x = []  # T x E
+>     for t in range(T):
+>         wte = gf(o_wte + token_ids[t] * E, E)
+>         wpe = gf(o_wpe + t * E, E)
+>         x.append([wte[i] + wpe[i] for i in range(E)])
+>
+>     for layer in range(L):
+>         print(f'  Layer {layer}...')
+>         # Layer norm 1
+>         ln1_out = []
+>         for t in range(T):
+>             ln1_out.append(layernorm(x[t], o_ln1w + layer*E, o_ln1b + layer*E))
+>
+>         # QKV projection
+>         qkv_all = []
+>         for t in range(T):
+>             qkv = matmul(ln1_out[t], o_qkvw + layer*3*E*E, o_qkvb + layer*3*E, 3*E, E)
+>             qkv_all.append(qkv)
+>
+>         # Multi-head attention
+>         attn_out = [[0.0]*E for _ in range(T)]
+>         for h in range(H):
+>             for t in range(T):
+>                 # Query for this position
+>                 q = qkv_all[t][h*HS:(h+1)*HS]
+>                 # Compute attention scores
+>                 scores = []
+>                 for s in range(t+1):
+>                     k = qkv_all[s][E + h*HS:E + (h+1)*HS]
+>                     score = sum(q[i]*k[i] for i in range(HS)) / math.sqrt(HS)
+>                     scores.append(score)
+>                 probs = softmax(scores)
+>                 # Weighted sum of values
+>                 for s in range(t+1):
+>                     v = qkv_all[s][2*E + h*HS:2*E + (h+1)*HS]
+>                     for i in range(HS):
+>                         attn_out[t][h*HS + i] += probs[s] * v[i]
+>
+>         # Attention projection
+>         proj_out = []
+>         for t in range(T):
+>             p = matmul(attn_out[t], o_apw + layer*E*E, o_apb + layer*E, E, E)
+>             proj_out.append(p)
+>
+>         # Residual
+>         for t in range(T):
+>             for i in range(E):
+>                 x[t][i] += proj_out[t][i]
+>
+>         # Layer norm 2
+>         ln2_out = []
+>         for t in range(T):
+>             ln2_out.append(layernorm(x[t], o_ln2w + layer*E, o_ln2b + layer*E))
+>
+>         # MLP: fc
+>         fc_out = []
+>         for t in range(T):
+>             fc = matmul(ln2_out[t], o_fcw + layer*4*E*E, o_fcb + layer*4*E, 4*E, E)
+>             fc_out.append([gelu(v) for v in fc])
+>
+>         # MLP: proj
+>         for t in range(T):
+>             p = matmul(fc_out[t], o_fpw + layer*4*E*E, o_fpb + layer*E, E, 4*E)
+>             for i in range(E):
+>                 x[t][i] += p[i]
+>
+>     # Final layer norm
+>     last = layernorm(x[-1], o_lnfw, o_lnfb)
+>
+>     # Logits = last @ wte.T (weight tying)
+>     logits = []
+>     for v in range(V):
+>         wte_v = gf(o_wte + v * E, E)
+>         s = sum(last[i] * wte_v[i] for i in range(E))
+>         logits.append(s)
+>
+>     return logits
+>
+> # Test with just "Hello"
+> tokens = bpe_encode("Hello")
+> print(f'Input tokens: {tokens} = {[vocab[t] for t in tokens]}')
+> print('Running forward pass...')
+> logits = forward(tokens)
+> top = sorted(range(V), key=lambda i: -logits[i])[:10]
+> print(f'Top 10 predictions:')
+> for t in top:
+>     print(f'  {t}: {vocab[t]!r} ({logits[t]:.4f})')
+> PYEOF
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# python3 /tmp/test_gpt2.py 2>&1 | tee /tmp/test_output.txt &
+[1] 1643
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app#

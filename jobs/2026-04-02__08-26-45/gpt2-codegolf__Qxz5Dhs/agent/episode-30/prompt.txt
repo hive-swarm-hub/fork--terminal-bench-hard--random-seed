@@ -1,0 +1,185 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# cat > /tmp/test3.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <math.h>
+> #include <string.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+>
+> #define V 50257
+> #define CTX 1024
+> #define E 768
+> #define NL 12
+> #define NH 12
+> #define HS (E/NH)
+> #define E4 (4*E)
+> #define E3 (3*E)
+>
+> float *W;
+>
+> typedef struct {
+>     long qkvb, qkvw, apb, apw, ln1b, ln1g, ln2b, ln2g, fcb, fcw, fpb, fpw;
+> } LayerOff;
+>
+> LayerOff layers[NL];
+> long o_lnfb, o_lnfg, o_wpe, o_wte;
+>
+> void init_offsets() {
+>     int order[] = {0,1,10,11,2,3,4,5,6,7,8,9};
+>     long off = 0;
+>     for (int i = 0; i < NL; i++) {
+>         int l = order[i];
+>         layers[l].qkvb = off; off += E3;
+>         layers[l].qkvw = off; off += (long)E3*E;
+>         layers[l].apb = off; off += E;
+>         layers[l].apw = off; off += (long)E*E;
+>         layers[l].ln1b = off; off += E;
+>         layers[l].ln1g = off; off += E;
+>         layers[l].ln2b = off; off += E;
+>         layers[l].ln2g = off; off += E;
+>         layers[l].fcb = off; off += E4;
+>         layers[l].fcw = off; off += (long)E4*E;
+>         layers[l].fpb = off; off += E;
+>         layers[l].fpw = off; off += (long)E4*E;
+>     }
+>     o_lnfb = off; off += E;
+>     o_lnfg = off; off += E;
+>     o_wpe = off; off += (long)CTX*E;
+>     o_wte = off; off += (long)V*E;
+> }
+>
+> // Buffers for multi-token
+> #define MAXT 128
+> float xs[MAXT][E]; // residual stream
+> float ln_out[E], qkv_buf[E3];
+> float key_cache[NL][MAXT][E]; // store all K,V per layer
+> float val_cache[NL][MAXT][E];
+> float attn_o[E], proj[E], fc_buf[E4];
+>
+> void layernorm(float *out, float *inp, float *g, float *b) {
+>     float mean = 0;
+>     for (int i = 0; i < E; i++) mean += inp[i];
+>     mean /= E;
+>     float var = 0;
+>     for (int i = 0; i < E; i++) var += (inp[i]-mean)*(inp[i]-mean);
+>     var /= E;
+>     float s = 1.0f / sqrtf(var + 1e-5f);
+>     for (int i = 0; i < E; i++)
+>         out[i] = g[i] * (inp[i] - mean) * s + b[i];
+> }
+>
+> void matmul(float *out, float *inp, float *w, float *b, int od, int id) {
+>     for (int i = 0; i < od; i++) {
+>         float s = b ? b[i] : 0;
+>         for (int j = 0; j < id; j++)
+>             s += inp[j] * w[(long)j*od+i];
+>         out[i] = s;
+>     }
+> }
+>
+> float geluf(float x) {
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> int forward(int *tokens, int T) {
+>     // Init embeddings
+>     for (int t = 0; t < T; t++)
+>         for (int i = 0; i < E; i++)
+>             xs[t][i] = W[o_wte + (long)tokens[t]*E + i] + W[o_wpe + (long)t*E + i];
+>
+>     for (int l = 0; l < NL; l++) {
+>         LayerOff *lo = &layers[l];
+>
+>         for (int t = 0; t < T; t++) {
+>             layernorm(ln_out, xs[t], W+lo->ln1g, W+lo->ln1b);
+>             matmul(qkv_buf, ln_out, W+lo->qkvw, W+lo->qkvb, E3, E);
+>
+>             // Store K, V
+>             for (int i = 0; i < E; i++) {
+>                 key_cache[l][t][i] = qkv_buf[E+i];
+>                 val_cache[l][t][i] = qkv_buf[2*E+i];
+>             }
+>
+>             // Multi-head attention
+>             memset(attn_o, 0, sizeof(attn_o));
+>             for (int h = 0; h < NH; h++) {
+>                 float *q = qkv_buf + h*HS;
+>                 // Compute scores
+>                 float scores[MAXT];
+>                 float maxs = -1e30f;
+>                 for (int s = 0; s <= t; s++) {
+>                     float dot = 0;
+>                     for (int i = 0; i < HS; i++)
+>                         dot += q[i] * key_cache[l][s][h*HS+i];
+>                     scores[s] = dot / sqrtf(HS);
+>                     if (scores[s] > maxs) maxs = scores[s];
+>                 }
+>                 float sum = 0;
+>                 for (int s = 0; s <= t; s++) {
+>                     scores[s] = expf(scores[s] - maxs);
+>                     sum += scores[s];
+>                 }
+>                 for (int s = 0; s <= t; s++) {
+>                     float w = scores[s] / sum;
+>                     for (int i = 0; i < HS; i++)
+>                         attn_o[h*HS+i] += w * val_cache[l][s][h*HS+i];
+>                 }
+>             }
+>
+>             matmul(proj, attn_o, W+lo->apw, W+lo->apb, E, E);
+>             for (int i = 0; i < E; i++) xs[t][i] += proj[i];
+>
+>             layernorm(ln_out, xs[t], W+lo->ln2g, W+lo->ln2b);
+>             matmul(fc_buf, ln_out, W+lo->fcw, W+lo->fcb, E4, E);
+>             for (int i = 0; i < E4; i++) fc_buf[i] = geluf(fc_buf[i]);
+>             matmul(proj, fc_buf, W+lo->fpw, W+lo->fpb, E, E4);
+>             for (int i = 0; i < E; i++) xs[t][i] += proj[i];
+>         }
+>     }
+>
+>     layernorm(ln_out, xs[T-1], W+o_lnfg, W+o_lnfb);
+>
+>     float best = -1e30;
+>     int best_id = 0;
+>     for (int v = 0; v < V; v++) {
+>         float s = 0;
+>         for (int i = 0; i < E; i++)
+>             s += ln_out[i] * W[o_wte + (long)v*E + i];
+>         if (s > best) { best = s; best_id = v; }
+>     }
+>     return best_id;
+> }
+>
+> int main() {
+>     int fd = open("/app/gpt2-124M.ckpt", O_RDONLY);
+>     struct stat st;
+>     fstat(fd, &st);
+>     W = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+>     init_offsets();
+>
+>     // Test: "Hello" -> should predict "," or similar
+>     int tokens1[] = {15496};
+>     int r = forward(tokens1, 1);
+>     printf("Hello -> token %d\n", r);
+>
+>     // Test: "Hello," -> should predict something sensible
+>     int tokens2[] = {15496, 11};
+>     r = forward(tokens2, 2);
+>     printf("Hello, -> token %d\n", r);
+>
+>     // Test: "The capital of France is"
+>     // Tokens: The=464, capital=3139, of=286, France=4881, is=318
+>     int tokens3[] = {464, 3139, 286, 4881, 318};
+>     r = forward(tokens3, 5);
+>     printf("The capital of France is -> token %d\n", r);
+>
+>     return 0;
+> }
+> CEOF
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# gcc -O3 -o /tmp/test3 /tmp/test3.c -lm && /tmp/test3
+Hello -> token 11
+Hello, -> token 314
+

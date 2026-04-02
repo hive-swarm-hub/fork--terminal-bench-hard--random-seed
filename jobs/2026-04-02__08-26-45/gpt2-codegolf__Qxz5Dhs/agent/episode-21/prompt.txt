@@ -1,0 +1,136 @@
+New Terminal Output:
+
+root@a3cd6a80-903d-4290-8343-0a207a7ea097:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+> HS = E // H
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> W = f.read()
+> f.close()
+>
+> def gf(off, n):
+>     return list(struct.unpack_from(f'{n}f', W, off*4))
+>
+> # Try per-layer sequential layout
+> off = 0
+> o_wte = off; off += V*E
+> o_wpe = off; off += C*E
+>
+> layer_offsets = []
+> for l in range(L):
+>     lo = {}
+>     lo['ln1w'] = off; off += E
+>     lo['ln1b'] = off; off += E
+>     lo['qkvw'] = off; off += 3*E*E
+>     lo['qkvb'] = off; off += 3*E
+>     lo['apw'] = off; off += E*E
+>     lo['apb'] = off; off += E
+>     lo['ln2w'] = off; off += E
+>     lo['ln2b'] = off; off += E
+>     lo['fcw'] = off; off += 4*E*E
+>     lo['fcb'] = off; off += 4*E
+>     lo['fpw'] = off; off += 4*E*E
+>     lo['fpb'] = off; off += E
+>     layer_offsets.append(lo)
+>
+> o_lnfw = off; off += E
+> o_lnfb = off; off += E
+> print(f'Total: {off} (expected {len(W)//4})')
+>
+> # Check ln1w for layer 0 - should be near 1.0 for standard GPT-2
+> ln1w = gf(layer_offsets[0]['ln1w'], E)
+> print(f'ln1w[0] avg={sum(ln1w)/E:.4f}')
+> print(f'lnfw avg={sum(gf(o_lnfw, E))/E:.4f}')
+>
+> def layernorm(x, woff, boff):
+>     w = gf(woff, E)
+>     b = gf(boff, E)
+>     mean = sum(x) / E
+>     var = sum((xi - mean)**2 for xi in x) / E
+>     s = 1.0 / math.sqrt(var + 1e-5)
+>     return [w[i] * (x[i] - mean) * s + b[i] for i in range(E)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matmul(x, woff, boff, out_dim, in_dim):
+>     w = gf(woff, out_dim * in_dim)
+>     b = gf(boff, out_dim) if boff >= 0 else [0]*out_dim
+>     result = []
+>     for i in range(out_dim):
+>         s = b[i]
+>         for j in range(in_dim):
+>             s += x[j] * w[i * in_dim + j]
+>         result.append(s)
+>     return result
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(xi - m) for xi in x]
+>     s = sum(e)
+>     return [ei / s for ei in e]
+>
+> bpe_merges = []
+> with open('/app/vocab.bpe') as f:
+>     next(f)
+>     for line in f:
+>         parts = line.strip().split(' ')
+>         if len(parts) == 2:
+>             bpe_merges.append((parts[0], parts[1]))
+> vocab = [bytes([i]).decode('latin-1') for i in range(256)]
+> for a, b in bpe_merges:
+>     vocab.append(a + b)
+> vocab.append('<|endoftext|>')
+>
+> tokens = [15496]
+> T = 1
+> x = []
+> for t in range(T):
+>     wte = gf(o_wte + tokens[t] * E, E)
+>     wpe = gf(o_wpe + t * E, E)
+>     x.append([wte[i] + wpe[i] for i in range(E)])
+>
+> for layer in range(L):
+>     lo = layer_offsets[layer]
+>     print(f'  Layer {layer}...')
+>     ln1_out = [layernorm(x[t], lo['ln1w'], lo['ln1b']) for t in range(T)]
+>     qkv_all = [matmul(ln1_out[t], lo['qkvw'], lo['qkvb'], 3*E, E) for t in range(T)]
+>
+>     attn_out = [[0.0]*E for _ in range(T)]
+>     for h in range(H):
+>         for t in range(T):
+>             q = qkv_all[t][h*HS:(h+1)*HS]
+>             scores = [sum(q[i]*qkv_all[0][E+h*HS+i] for i in range(HS))/math.sqrt(HS)]
+>             probs = softmax(scores)
+>             v = qkv_all[0][2*E+h*HS:2*E+(h+1)*HS]
+>             for i in range(HS):
+>                 attn_out[t][h*HS+i] += probs[0]*v[i]
+>
+>     proj_out = [matmul(attn_out[t], lo['apw'], lo['apb'], E, E) for t in range(T)]
+>     for t in range(T):
+>         for i in range(E): x[t][i] += proj_out[t][i]
+>
+>     ln2_out = [layernorm(x[t], lo['ln2w'], lo['ln2b']) for t in range(T)]
+>     fc_out = []
+>     for t in range(T):
+>         fc = matmul(ln2_out[t], lo['fcw'], lo['fcb'], 4*E, E)
+>         fc_out.append([gelu(v) for v in fc])
+>     for t in range(T):
+>         p = matmul(fc_out[t], lo['fpw'], lo['fpb'], E, 4*E)
+>         for i in range(E): x[t][i] += p[i]
+>
+> last = layernorm(x[-1], o_lnfw, o_lnfb)
+> logits = [sum(last[i]*gf(o_wte+v*E,E)[i] for i in range(E)) for v in range(V)]
+> top = sorted(range(V), key=lambda i: -logits[i])[:10]
+> print('Per-layer sequential results:')
+> for t in top:
+>     print(f'  {t}: {vocab[t]!r} ({logits[t]:.4f})')
+> PYEOF
+Total: 124439808 (expected 124439808)
+ln1w[0] avg=0.0147
+lnfw avg=-0.0010
+  Layer 0...
+  Layer 1...
+

@@ -1,0 +1,210 @@
+New Terminal Output:
+
+root@cf08a906-16d8-40da-93b7-0366b1d20d4b:/app# cat > /app/fit_peaks.py << 'PYEOF'
+ask = (x > 6100) & (x < 6600)
+g_x = x[g_mask]
+g_y = y[g_mask]
+
+print(f"\nG peak region: {len(g_x)} points, x=[{g_x.min():.1f}, {g_x.max():.1f}]")
+print(f"  Max y: {g_y.max():.1f} at x={g_x[np.argmax(g_y)]:.1f}")
+print(f"  Min y: {g_y.min():.1f}")
+
+g_x0_init = g_x[np.argmax(g_y)]
+g_offset_init = np.percentile(g_y, 10)
+g_amp_init = g_y.max() - g_offset_init
+g_gamma_init = 20.0
+
+g_popt, g_pcov = curve_fit(lorentzian, g_x, g_y,
+                           p0=[g_x0_init, g_gamma_init, g_amp_init, g_offset_init],
+                           maxfev=100000)
+print(f"  Fit: x0={g_popt[0]:.4f}, gamma={g_popt[1]:.4f}, amp={g_popt[2]:.4f}, offset={g_popt[3]:.4f}")
+
+# ---- FIT 2D PEAK (around x=3745) ----
+d2_mask = (x > 3600) & (x < 3900)
+d2_x = x[d2_mask]
+d2_y = y[d2_mask]
+
+print(f"\n2D peak region: {len(d2_x)} points, x=[{d2_x.min():.1f}, {d2_x.max():.1f}]")
+print(f"  Max y: {d2_y.max():.1f} at x={d2_x[np.argmax(d2_y)]:.1f}")
+print(f"  Min y: {d2_y.min():.1f}")
+
+d2_x0_init = d2_x[np.argmax(d2_y)]
+d2_offset_init = np.percentile(d2_y, 10)
+d2_amp_init = d2_y.max() - d2_offset_init
+d2_gamma_init = 10.0
+
+d2_popt, d2_pcov = curve_fit(lorentzian, d2_x, d2_y,
+                             p0=[d2_x0_init, d2_gamma_init, d2_amp_init, d2_offset_init],
+                             maxfev=100000)
+print(f"  Fit: x0={d2_popt[0]:.4f}, gamma={d2_popt[1]:.4f}, amp={d2_popt[2]:.4f}, offset={d2_popt[3]:.4f}")
+
+# Write results
+results = {
+    "G": {
+        "x0": round(float(g_popt[0]), 4),
+        "gamma": round(float(abs(g_popt[1])), 4),
+        "amplitude": round(float(g_popt[2]), 4),
+        "offset": round(float(g_popt[3]), 4)
+    },
+    "2D": {
+        "x0": round(float(d2_popt[0]), 4),
+        "gamma": round(float(abs(d2_popt[1])), 4),
+        "amplitude": round(float(d2_popt[2]), 4),
+        "offset": round(float(d2_popt[3]), 4)
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults written to /app/results.json")
+print(json.dumps(results, indent=2))
+PYEOF
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> xdata = []
+> ydata = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         xdata.append(x)
+>         ydata.append(y)
+>
+> x = np.array(xdata)
+> y = np.array(ydata)
+> idx = np.argsort(x)
+> x = x[idx]
+> y = y[idx]
+>
+> print(f"Data range: x=[{x.min():.1f}, {x.max():.1f}], y=[{y.min():.1f}, {y.max():.1f}]")
+> print(f"Number of points: {len(x)}")
+>
+> # Lorentzian function
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # The two prominent Raman peaks (G and 2D) are at:
+> # Peak near x=6329 (sharper, higher intensity)
+> # Peak near x=3745 (sharper)
+> # The huge peak at x~19139 is the laser/Rayleigh line
+>
+> # For graphene Raman:
+> # G peak is at ~1580 cm-1 Raman shift (closer to laser in absolute wavenumber)
+> # 2D peak is at ~2700 cm-1 Raman shift (further from laser)
+> # Since higher x = closer to laser (at 19139):
+> #   G peak (smaller shift) -> higher x -> x~6329 is FURTHER from laser
+> #   2D peak (larger shift) -> lower x -> x~3745 is EVEN FURTHER from laser
+> # Wait, 6329 is closer to 19139 than 3745 is.
+> # So G peak (smaller Raman shift, closer to laser) = x~6329? No...
+> # Raman shift = 19139 - x, so:
+> #   x=6329 -> shift = 12810 (too high)
+> #   x=3745 -> shift = 15394 (too high)
+> # These don't match expected values.
+>
+> # However, 1e7/6329 = 1580.5 and 1e7/3745 = 2669.7
+> # This matches G=1580 cm-1 and 2D=2670 cm-1 perfectly!
+> # So the x-axis values, when converted via 1e7/x, give the Raman shift.
+> # This means x might be scattered wavelength in nm * some factor,
+> # or the spectrometer uses a nonlinear scale.
+>
+> # Regardless, the peak at x~6329 corresponds to G band (~1580 cm-1)
+> # and the peak at x~3745 corresponds to 2D band (~2670 cm-1)
+>
+> # ---- FIT G PEAK (around x=6329) ----
+> g_mask = (x > 6100) & (x < 6600)
+> g_x = x[g_mask]
+> g_y = y[g_mask]
+>
+> print(f"\nG peak region: {len(g_x)} points, x=[{g_x.min():.1f}, {g_x.max():.1f}]")
+> print(f"  Max y: {g_y.max():.1f} at x={g_x[np.argmax(g_y)]:.1f}")
+> print(f"  Min y: {g_y.min():.1f}")
+>
+> g_x0_init = g_x[np.argmax(g_y)]
+> g_offset_init = np.percentile(g_y, 10)
+> g_amp_init = g_y.max() - g_offset_init
+> g_gamma_init = 20.0
+>
+> g_popt, g_pcov = curve_fit(lorentzian, g_x, g_y,
+>                            p0=[g_x0_init, g_gamma_init, g_amp_init, g_offset_init],
+>                            maxfev=100000)
+> print(f"  Fit: x0={g_popt[0]:.4f}, gamma={g_popt[1]:.4f}, amp={g_popt[2]:.4f}, offset={g_popt[3]:.4f}")
+>
+> # ---- FIT 2D PEAK (around x=3745) ----
+> d2_mask = (x > 3600) & (x < 3900)
+> d2_x = x[d2_mask]
+> d2_y = y[d2_mask]
+>
+> print(f"\n2D peak region: {len(d2_x)} points, x=[{d2_x.min():.1f}, {d2_x.max():.1f}]")
+> print(f"  Max y: {d2_y.max():.1f} at x={d2_x[np.argmax(d2_y)]:.1f}")
+> print(f"  Min y: {d2_y.min():.1f}")
+>
+> d2_x0_init = d2_x[np.argmax(d2_y)]
+> d2_offset_init = np.percentile(d2_y, 10)
+> d2_amp_init = d2_y.max() - d2_offset_init
+> d2_gamma_init = 10.0
+>
+> d2_popt, d2_pcov = curve_fit(lorentzian, d2_x, d2_y,
+>                              p0=[d2_x0_init, d2_gamma_init, d2_amp_init, d2_offset_init],
+>                              maxfev=100000)
+> print(f"  Fit: x0={d2_popt[0]:.4f}, gamma={d2_popt[1]:.4f}, amp={d2_popt[2]:.4f}, offset={d2_popt[3]:.4f}")
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(g_popt[0]), 4),
+>         "gamma": round(float(abs(g_popt[1])), 4),
+>         "amplitude": round(float(g_popt[2]), 4),
+>         "offset": round(float(g_popt[3]), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(d2_popt[0]), 4),
+>         "gamma": round(float(abs(d2_popt[1])), 4),
+>         "amplitude": round(float(d2_popt[2]), 4),
+>         "offset": round(float(d2_popt[3]), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print("\nResults written to /app/results.json")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@cf08a906-16d8-40da-93b7-0366b1d20d4b:/app# python3 /app/fit_peaks.py
+Data range: x=[1648.7, 47183.6], y=[40.1, 79400.1]
+Number of points: 3565
+
+G peak region: 55 points, x=[6104.3, 6593.5]
+  Max y: 13777.7 at x=6329.4
+  Min y: 5459.0
+  Fit: x0=6327.9428, gamma=34.1873, amp=8320.8054, offset=5729.6404
+
+2D peak region: 112 points, x=[3602.1, 3899.6]
+  Max y: 12920.9 at x=3745.1
+  Min y: 1298.9
+  Fit: x0=3745.3628, gamma=25.3725, amp=12435.9529, offset=1052.7610
+
+Results written to /app/results.json
+{
+  "G": {
+    "x0": 6327.9428,
+    "gamma": 34.1873,
+    "amplitude": 8320.8054,
+    "offset": 5729.6404
+  },
+  "2D": {
+    "x0": 3745.3628,
+    "gamma": 25.3725,
+    "amplitude": 12435.9529,
+    "offset": 1052.761
+  }
+}
+root@cf08a906-16d8-40da-93b7-0366b1d20d4b:/app#
