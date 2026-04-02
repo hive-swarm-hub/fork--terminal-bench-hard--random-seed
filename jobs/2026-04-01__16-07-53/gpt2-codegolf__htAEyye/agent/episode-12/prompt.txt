@@ -1,0 +1,218 @@
+New Terminal Output:
+
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <unistd.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define H 12
+> #define M 1024
+> #define C4 3072
+> float *W,*x,*xb,*hb,*hb2,*q,*att,*kc,*vc,*logits;
+> typedef struct{char s[64];int l;}Tok;
+> Tok vocab[V];
+> int b2u[256],u2b[512];
+> void init_b2u(){
+>   int bs[256],cs[256],n=0,j=0;
+>   for(int i=33;i<=126;i++){bs[j]=i;cs[j]=i;j++;}
+>   for(int i=161;i<=172;i++){bs[j]=i;cs[j]=i;j++;}
+>   for(int i=174;i<=255;i++){bs[j]=i;cs[j]=i;j++;}
+>   int have[256]={0};
+>   for(int i=0;i<j;i++)have[bs[i]]=1;
+>   for(int i=0;i<256;i++)if(!have[i]){bs[j]=i;cs[j]=256+n;n++;j++;}
+>   for(int i=0;i<256;i++){b2u[bs[i]]=cs[i];u2b[cs[i]]=bs[i];}
+> }
+> void utf8(int cp,char*o,int*len){
+>   if(cp<128){o[0]=cp;*len=1;}
+>   else if(cp<2048){o[0]=192|(cp>>6);o[1]=128|(cp&63);*len=2;}
+>   else{o[0]=224|(cp>>12);o[1]=128|((cp>>6)&63);o[2]=128|(cp&63);*len=3;}
+> }
+> void build_vocab(char*path){
+>   for(int i=0;i<256;i++){int l;utf8(b2u[i],vocab[i].s,&l);vocab[i].l=l;vocab[i].s[l]=0;}
+>   FILE*f=fopen(path,"r");
+>   char line[256];
+>   fgets(line,256,f);
+>   int idx=256;
+>   while(fgets(line,256,f)&&idx<V-1){
+>     int len=strlen(line);
+>     if(len>0&&line[len-1]=='\n')line[--len]=0;
+>     char*sp=strchr(line,' ');
+>     if(!sp)continue;
+>     *sp=0;
+>     char*a=line,*b=sp+1;
+>     int al=strlen(a),bl=strlen(b);
+>     memcpy(vocab[idx].s,a,al);
+>     memcpy(vocab[idx].s+al,b,bl);
+>     vocab[idx].l=al+bl;
+>     vocab[idx].s[al+bl]=0;
+>     idx++;
+>   }
+>   fclose(f);
+>   strcpy(vocab[50256].s,"<|endoftext|>");
+>   vocab[50256].l=13;
+> }
+> int find_tok(char*s,int l){
+>   for(int i=V-1;i>=0;i--)
+>     if(vocab[i].l==l&&memcmp(vocab[i].s,s,l)==0)return i;
+>   return 0;
+> }
+> int encode(char*text,int*tokens){
+>   int nt=0;
+>   char buf[512];
+>   int bl=0;
+>   for(int i=0;text[i];){
+>     unsigned char c=text[i];
+>     int cp=b2u[c],l;
+>     char u[4];
+>     utf8(cp,u,&l);
+>     memcpy(buf+bl,u,l);
+>     bl+=l;
+>     i++;
+>   }
+>   // each utf8 char is a token, then merge
+>   int toks[512],tn=0;
+>   int p=0;
+>   while(p<bl){
+>     int best=-1,bestl=0;
+>     for(int l=bl-p<63?bl-p:63;l>=1;l--){
+>       int t=find_tok(buf+p,l);
+>       if(t>=0&&vocab[t].l==l){best=t;bestl=l;break;}
+>     }
+>     if(best<0){best=0;bestl=1;}
+>     toks[tn++]=best;p+=bestl;
+>   }
+>   // BPE merge loop
+>   for(;;){
+>     int bi=-1,bj=-1,bm=V;
+>     for(int i=0;i<tn-1;i++){
+>       char tmp[128];
+>       int tl=vocab[toks[i]].l+vocab[toks[i+1]].l;
+>       if(tl>63)continue;
+>       memcpy(tmp,vocab[toks[i]].s,vocab[toks[i]].l);
+>       memcpy(tmp+vocab[toks[i]].l,vocab[toks[i+1]].s,vocab[toks[i+1]].l);
+>       for(int m=256;m<V-1;m++){
+>         if(vocab[m].l==tl&&memcmp(vocab[m].s,tmp,tl)==0){if(m<bm){bm=m;bi=i;bj=i+1;}break;}
+>       }
+>     }
+>     if(bi<0)break;
+>     toks[bi]=bm;
+>     for(int i=bj;i<tn-1;i++)toks[i]=toks[i+1];
+>     tn--;
+>   }
+>   memcpy(tokens,toks,tn*sizeof(int));
+>   return tn;
+> }
+> void decode_tok(int t){
+>   char*s=vocab[t].s;
+>   for(int i=0;i<vocab[t].l;){
+>     int cp=0,nb=1;
+>     unsigned char c=s[i];
+>     if(c<128)cp=c;
+>     else if((c&0xe0)==0xc0){cp=((c&0x1f)<<6)|(s[i+1]&0x3f);nb=2;}
+>     else{cp=((c&0xf)<<12)|((s[i+1]&0x3f)<<6)|(s[i+2]&0x3f);nb=3;}
+>     if(cp<512&&u2b[cp])putchar(u2b[cp]);
+>     else if(cp<128)putchar(cp);
+>     i+=nb;
+>   }
+> }
+> float*P; // all params
+> void layernorm(float*o,float*x,float*w,float*b){
+>   float m=0,v=0;
+>   for(int i=0;i<C;i++)m+=x[i];
+>   m/=C;
+>   for(int i=0;i<C;i++)v+=(x[i]-m)*(x[i]-m);
+>   v=1.0f/sqrtf(v/C+1e-5f);
+>   for(int i=0;i<C;i++)o[i]=(x[i]-m)*v*w[i]+b[i];
+> }
+> void matmul(float*o,float*x,float*w,int n,int d){
+>   for(int i=0;i<d;i++){float s=0;for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];o[i]=s;}
+> }
+> float gelu(float x){return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> int main(int argc,char**argv){
+>   if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>   init_b2u();
+>   build_vocab(argv[2]);
+>   int fd=open(argv[1],O_RDONLY);
+>   off_t sz=lseek(fd,0,SEEK_END);
+>   P=mmap(NULL,sz,PROT_READ,MAP_PRIVATE,fd,0);
+>   float*wte=P,*wpe=P+V*C,*ln1w=wpe+M*C,*ln1b=ln1w+L*C;
+>   float*qkvw=ln1b+L*C,*qkvb=qkvw+L*C*3*C,*apw=qkvb+L*3*C,*apb=apw+L*C*C;
+>   float*ln2w=apb+L*C,*ln2b=ln2w+L*C;
+>   float*fcw=ln2b+L*C,*fcb=fcw+L*C*4*C,*fpw=fcb+L*4*C,*fpb=fpw+L*4*C*C;
+>   float*lnfw=fpb+L*C,*lnfb=lnfw+C;
+>   int tokens[512],nt;
+>   nt=encode(argv[3],tokens);
+>   x=calloc(C,4);xb=calloc(C,4);hb=calloc(C4,4);hb2=calloc(C,4);
+>   q=calloc(C,4);att=calloc(H*M,4);
+>   kc=calloc(L*M*C,4);vc=calloc(L*M*C,4);
+>   logits=calloc(V,4);
+>   int pos=0;
+>   for(int step=0;step<nt+20-1;step++){
+>     int tok=tokens[step<nt?step:nt-1];
+>     if(step>=nt)tok=tokens[nt-1];
+>     // embed
+>     for(int i=0;i<C;i++)x[i]=wte[tok*C+i]+wpe[pos*C+i];
+>     for(int l=0;l<L;l++){
+>       layernorm(xb,x,ln1w+l*C,ln1b+l*C);
+>       // qkv
+>       float qkv[2304];
+>       matmul(qkv,xb,qkvw+l*C*3*C,C,3*C);
+>       for(int i=0;i<3*C;i++)qkv[i]+=qkvb[l*3*C+i];
+>       // store k,v in cache
+>       memcpy(kc+(l*M+pos)*C,qkv+C,C*4);
+>       memcpy(vc+(l*M+pos)*C,qkv+2*C,C*4);
+>       memcpy(q,qkv,C*4);
+>       // multi-head attention
+>       memset(hb2,0,C*4);
+>       for(int h=0;h<H;h++){
+>         for(int t=0;t<=pos;t++){
+>           float s=0;
+>           for(int i=0;i<64;i++)s+=q[h*64+i]*kc[(l*M+t)*C+h*64+i];
+>           att[h*(M)+t]=s/8.0f;
+>         }
+>         // softmax
+>         float mx=-1e9;
+>         for(int t=0;t<=pos;t++)if(att[h*M+t]>mx)mx=att[h*M+t];
+>         float sm=0;
+>         for(int t=0;t<=pos;t++){att[h*M+t]=expf(att[h*M+t]-mx);sm+=att[h*M+t];}
+>         for(int t=0;t<=pos;t++)att[h*M+t]/=sm;
+>         for(int t=0;t<=pos;t++)
+>           for(int i=0;i<64;i++)
+>             hb2[h*64+i]+=att[h*M+t]*vc[(l*M+t)*C+h*64+i];
+>       }
+>       // attn proj
+>       float ap[768];
+>       matmul(ap,hb2,apw+l*C*C,C,C);
+>       for(int i=0;i<C;i++)x[i]+=ap[i]+apb[l*C+i];
+>       // ln2 + mlp
+>       layernorm(xb,x,ln2w+l*C,ln2b+l*C);
+>       matmul(hb,xb,fcw+l*C*4*C,C,C4);
+>       for(int i=0;i<C4;i++)hb[i]=gelu(hb[i]+fcb[l*4*C+i]);
+>       matmul(hb2,hb,fpw+l*4*C*C,C4,C);
+>       for(int i=0;i<C;i++)x[i]+=hb2[i]+fpb[l*C+i];
+>     }
+>     if(step>=nt-1){
+>       layernorm(xb,x,lnfw,lnfb);
+>       matmul(logits,xb,wte,C,V);
+>       int best=0;
+>       for(int i=1;i<V;i++)if(logits[i]>logits[best])best=i;
+>       if(step>=nt-1){
+>         if(step==nt-1&&nt>1){} // don't print for prompt processing
+>         else { /* nothing */ }
+>         decode_tok(best);
+>         fflush(stdout);
+>         tokens[nt++]=best;
+>       }
+>     }
+>     pos++;
+>   }
+>   printf("\n");
+> }
+> CEOF
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app#

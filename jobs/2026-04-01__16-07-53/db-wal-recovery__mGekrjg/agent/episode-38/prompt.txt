@@ -1,0 +1,114 @@
+New Terminal Output:
+
+root@9181d935-876a-401a-be6d-e7bd54c9adaf:/app# python3 << 'PYEOF'
+> import sqlite3
+> import os
+> import struct
+>
+> test_dir = '/tmp/test_db'
+> os.makedirs(test_dir, exist_ok=True)
+>
+> # The original has schema_cookie=3 and change_counter=3
+> # Let me try to reproduce this exactly
+>
+> # Approach: maybe the DB was created with:
+> # 1. CREATE TABLE (schema_cookie=1, change_counter=1)
+> # 2. Some other schema change (schema_cookie=2, change_counter=2)
+> # 3. INSERT + checkpoint (schema_cookie=3, change_counter=3)
+>
+> # Or maybe:
+> # 1. PRAGMA journal_mode=WAL (might increment change counter)
+> # 2. CREATE TABLE
+> # 3. INSERT + commit
+>
+> # Let me try various sequences
+>
+> def try_sequence(name, ops):
+>     db_path = os.path.join(test_dir, 'test.db')
+>     for f in [db_path, db_path + '-wal', db_path + '-shm']:
+>         if os.path.exists(f):
+>             os.remove(f)
+>
+>     conn = sqlite3.connect(db_path)
+>     for op in ops:
+>         if callable(op):
+>             op(conn)
+>         else:
+>             conn.execute(op)
+>     conn.commit()
+>     conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+>     conn.close()
+>
+>     with open(db_path, 'rb') as f:
+>         data = f.read()
+>
+>     cc = struct.unpack('>I', data[24:28])[0]
+>     sc = struct.unpack('>I', data[40:44])[0]
+>     vvf = struct.unpack('>I', data[92:96])[0]
+>
+>     with open('/app/main.db', 'rb') as f:
+>         orig = f.read()
+>
+>     page2_match = data[4096:8192] == orig[4096:8192]
+>
+>     print(f'{name}: cc={cc} sc={sc} vvf={vvf} page2_match={page2_match}')
+>
+>     if cc == 3 and sc == 3 and page2_match:
+>         print(f'  *** FULL HEADER MATCH! ***')
+>         # Compare all bytes
+>         diffs = sum(1 for i in range(len(orig)) if i < len(data) and orig[i] != data[i])
+>         print(f'  Total byte differences: {diffs}')
+>
+> base_items = [
+>     (1, 'apple', 100), (2, 'banana', 200), (3, 'cherry', 300),
+>     (4, 'date', 400), (5, 'elderberry', 500),
+> ]
+>
+> def insert_base(conn):
+>     conn.executemany('INSERT INTO items VALUES (?,?,?)', base_items)
+>
+> create_sql = '''CREATE TABLE items (
+>         id INTEGER PRIMARY KEY,
+>         name TEXT,
+>         value INTEGER
+>     )'''
+>
+> # Sequence 1: WAL mode first, then create, then insert (each as separate commit)
+> try_sequence('seq1: WAL+create+insert separate', [
+>     'PRAGMA journal_mode=WAL',
+>     lambda c: c.commit(),
+>     create_sql,
+>     lambda c: c.commit(),
+>     insert_base,
+> ])
+>
+> # Sequence 2: create first, then WAL, then insert
+> try_sequence('seq2: create+WAL+insert', [
+>     create_sql,
+>     lambda c: c.commit(),
+>     'PRAGMA journal_mode=WAL',
+>     lambda c: c.commit(),
+>     insert_base,
+> ])
+>
+> # Sequence 3: WAL + create in one commit, insert in another
+> try_sequence('seq3: WAL,create | insert', [
+>     'PRAGMA journal_mode=WAL',
+>     create_sql,
+>     lambda c: c.commit(),
+>     insert_base,
+> ])
+>
+> # Sequence 4: All in one commit with WAL
+> try_sequence('seq4: all in one', [
+>     'PRAGMA journal_mode=WAL',
+>     create_sql,
+>     insert_base,
+> ])
+>
+> PYEOF
+seq1: WAL+create+insert separate: cc=2 sc=1 vvf=2 page2_match=True
+seq2: create+WAL+insert: cc=2 sc=1 vvf=2 page2_match=True
+seq3: WAL,create | insert: cc=2 sc=1 vvf=2 page2_match=True
+seq4: all in one: cc=2 sc=1 vvf=2 page2_match=True
+root@9181d935-876a-401a-be6d-e7bd54c9adaf:/app#

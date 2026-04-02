@@ -1,0 +1,88 @@
+New Terminal Output:
+
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app# python3 << 'PYEOF'
+> import struct, math, mmap, os
+>
+> V,C,T,L,H = 50257,768,1024,12,12
+>
+> fd = os.open('gpt2-124M.ckpt', os.O_RDONLY)
+> fsize = os.fstat(fd).st_size
+> mm = mmap.mmap(fd, fsize, access=mmap.ACCESS_READ)
+>
+> def gf(offset, n):
+>     return struct.unpack_from(f'<{n}f', mm, offset*4)
+>
+> o_wte = 0
+> o_wpe = V*C
+> o_ln1w = o_wpe + T*C
+> o_ln1b = o_ln1w + L*C
+> o_qkvw = o_ln1b + L*C
+> o_qkvb = o_qkvw + L*C*3*C
+> o_apw = o_qkvb + L*3*C
+> o_apb = o_apw + L*C*C
+> o_ln2w = o_apb + L*C
+> o_ln2b = o_ln2w + L*C
+> o_fcw = o_ln2b + L*C
+> o_fcb = o_fcw + L*C*4*C
+> o_fpw = o_fcb + L*4*C
+> o_fpb = o_fpw + L*4*C*C
+> o_lnfw = o_fpb + L*C
+> o_lnfb = o_lnfw + C
+>
+> def layernorm(x, w_off, b_off):
+>     w = gf(w_off, C); b = gf(b_off, C)
+>     m = sum(x)/C
+>     v = sum((xi-m)**2 for xi in x)/C
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     return [(x[i]-m)*s*w[i]+b[i] for i in range(C)]
+>
+> def matmul(x, w_off, in_d, out_d):
+>     w = gf(w_off, in_d*out_d)
+>     out = [0.0]*out_d
+>     for j in range(out_d):
+>         s = 0.0
+>         for i in range(in_d):
+>             s += x[i] * w[i*out_d + j]
+>         out[j] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> wte_tok = gf(o_wte + 464*C, C)
+> wpe_pos = gf(o_wpe, C)
+> x = [wte_tok[i] + wpe_pos[i] for i in range(C)]
+>
+> for layer in range(L):
+>     print(f'Layer {layer}...',flush=True)
+>     ln_out = layernorm(x, o_ln1w + layer*C, o_ln1b + layer*C)
+>     qkv = matmul(ln_out, o_qkvw + layer*C*3*C, C, 3*C)
+>     qkvb = gf(o_qkvb + layer*3*C, 3*C)
+>     qkv = [qkv[i] + qkvb[i] for i in range(3*C)]
+>     v_vals = qkv[2*C:3*C]
+>     ap = matmul(v_vals, o_apw + layer*C*C, C, C)
+>     apb = gf(o_apb + layer*C, C)
+>     x = [x[i] + ap[i] + apb[i] for i in range(C)]
+>     ln2_out = layernorm(x, o_ln2w + layer*C, o_ln2b + layer*C)
+>     fc = matmul(ln2_out, o_fcw + layer*C*4*C, C, 4*C)
+>     fcb = gf(o_fcb + layer*4*C, 4*C)
+>     fc = [gelu(fc[i] + fcb[i]) for i in range(4*C)]
+>     fp = matmul(fc, o_fpw + layer*4*C*C, 4*C, C)
+>     fpb = gf(o_fpb + layer*C, C)
+>     x = [x[i] + fp[i] + fpb[i] for i in range(C)]
+>
+> x = layernorm(x, o_lnfw, o_lnfb)
+> print('Computing logits...',flush=True)
+> logits = matmul(x, o_wte, C, V)
+> best = max(range(V), key=lambda i: logits[i])
+> print(f'Best token: {best}, logit: {logits[best]:.4f}')
+> top5 = sorted(range(V), key=lambda i: -logits[i])[:10]
+> for i, t in enumerate(top5):
+>     print(f'  top{i}: token {t} logit {logits[t]:.4f}')
+> mm.close(); os.close(fd)
+> PYEOF
+Layer 0...
+Layer 1...
+Layer 2...
+Layer 3...
+

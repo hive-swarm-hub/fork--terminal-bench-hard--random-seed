@@ -1,0 +1,157 @@
+New Terminal Output:
+
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app# cat > /tmp/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def revcomp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Insertion: output = input[0:215] + insertion + input[215:]
+> # insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG" (39 bp)
+> insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+> cut_point = 215  # insertion goes between input[214] and input[215]
+>
+> print(f"Insertion: {insertion}")
+> print(f"Insertion length: {len(insertion)}")
+> print(f"Cut point: {cut_point}")
+> print()
+>
+> # Forward primer: 5' tail (insertion) + annealing region (input[215:215+fwd_len])
+> # Reverse primer: revcomp(input[215-rev_len:215]) - anneals upstream of cut
+> # The Tm is computed only on the annealing portion
+>
+> # Find valid primer pairs
+> MIN_LEN = 15
+> MAX_LEN = 45
+> MIN_TM = 58.0
+> MAX_TM = 72.0
+> MAX_TM_DIFF = 5.0
+>
+> # Compute Tm for all possible forward annealing lengths
+> print("Forward primer annealing Tm values:")
+> fwd_tms = {}
+> for fwd_len in range(MIN_LEN, min(MAX_LEN + 1, 37)):  # oligotm max is 36
+>     anneal_seq = input_seq[cut_point:cut_point + fwd_len]
+>     tm = get_tm(anneal_seq)
+>     fwd_tms[fwd_len] = tm
+>     if MIN_TM <= tm <= MAX_TM:
+>         print(f"  len={fwd_len}: {anneal_seq} Tm={tm:.1f}")
+>
+> print()
+> print("Reverse primer annealing Tm values:")
+> rev_tms = {}
+> for rev_len in range(MIN_LEN, min(MAX_LEN + 1, 37)):  # oligotm max is 36
+>     # Reverse primer anneals to the - strand upstream of cut point
+>     anneal_seq = input_seq[cut_point - rev_len:cut_point]
+>     rev_primer = revcomp(anneal_seq)
+>     tm = get_tm(anneal_seq)  # Tm of the annealing portion
+>     rev_tms[rev_len] = tm
+>     if MIN_TM <= tm <= MAX_TM:
+>         print(f"  len={rev_len}: {rev_primer} (anneals to {anneal_seq}) Tm={tm:.1f}")
+>
+> print()
+>
+> # Find best pair
+> best_pair = None
+> best_diff = float('inf')
+> for fwd_len, fwd_tm in fwd_tms.items():
+>     if not (MIN_TM <= fwd_tm <= MAX_TM):
+>         continue
+>     for rev_len, rev_tm in rev_tms.items():
+>         if not (MIN_TM <= rev_tm <= MAX_TM):
+>             continue
+>         diff = abs(fwd_tm - rev_tm)
+>         if diff <= MAX_TM_DIFF:
+>             if diff < best_diff:
+>                 best_diff = diff
+>                 best_pair = (fwd_len, rev_len, fwd_tm, rev_tm)
+>
+> if best_pair:
+>     fwd_len, rev_len, fwd_tm, rev_tm = best_pair
+>     fwd_anneal = input_seq[cut_point:cut_point + fwd_len]
+>     rev_anneal_region = input_seq[cut_point - rev_len:cut_point]
+>     rev_primer = revcomp(rev_anneal_region)
+>     fwd_primer = insertion + fwd_anneal
+>
+>     print(f"Best primer pair:")
+>     print(f"  Forward: {fwd_primer}")
+>     print(f"    Tail: {insertion} ({len(insertion)} bp)")
+>     print(f"    Annealing: {fwd_anneal} ({fwd_len} bp, Tm={fwd_tm:.1f})")
+>     print(f"    Total length: {len(fwd_primer)} bp")
+>     print(f"  Reverse: {rev_primer}")
+>     print(f"    Annealing length: {rev_len} bp, Tm={rev_tm:.1f}")
+>     print(f"  Tm difference: {abs(fwd_tm - rev_tm):.1f}")
+>
+>     # Write primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("\nWritten to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app# python3 /tmp/design_primers.py
+Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+Insertion length: 39
+Cut point: 215
+
+Forward primer annealing Tm values:
+  len=15: CAAGGGCGAGGAGCT Tm=59.5
+  len=16: CAAGGGCGAGGAGCTG Tm=61.2
+  len=17: CAAGGGCGAGGAGCTGT Tm=63.3
+  len=18: CAAGGGCGAGGAGCTGTT Tm=63.8
+  len=19: CAAGGGCGAGGAGCTGTTC Tm=64.7
+  len=20: CAAGGGCGAGGAGCTGTTCA Tm=66.3
+  len=21: CAAGGGCGAGGAGCTGTTCAC Tm=67.2
+  len=22: CAAGGGCGAGGAGCTGTTCACC Tm=69.2
+  len=23: CAAGGGCGAGGAGCTGTTCACCG Tm=71.1
+
+Reverse primer annealing Tm values:
+  len=28: CTCATATGTATATCTCCTTCTTAAAGTT (anneals to AACTTTAAGAAGGAGATATACATATGAG) Tm=58.0
+  len=30: CTCATATGTATATCTCCTTCTTAAAGTTAA (anneals to TTAACTTTAAGAAGGAGATATACATATGAG) Tm=58.5
+  len=31: CTCATATGTATATCTCCTTCTTAAAGTTAAA (anneals to TTTAACTTTAAGAAGGAGATATACATATGAG) Tm=58.9
+  len=32: CTCATATGTATATCTCCTTCTTAAAGTTAAAC (anneals to GTTTAACTTTAAGAAGGAGATATACATATGAG) Tm=59.8
+  len=33: CTCATATGTATATCTCCTTCTTAAAGTTAAACA (anneals to TGTTTAACTTTAAGAAGGAGATATACATATGAG) Tm=61.0
+  len=34: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (anneals to TTGTTTAACTTTAAGAAGGAGATATACATATGAG) Tm=61.3
+  len=35: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAA (anneals to TTTGTTTAACTTTAAGAAGGAGATATACATATGAG) Tm=61.6
+  len=36: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAA (anneals to TTTTGTTTAACTTTAAGAAGGAGATATACATATGAG) Tm=62.0
+
+Best primer pair:
+  Forward: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG
+    Tail: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 bp)
+    Annealing: CAAGGGCGAGGAGCTG (16 bp, Tm=61.2)
+    Total length: 55 bp
+  Reverse: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+    Annealing length: 34 bp, Tm=61.3
+  Tm difference: 0.1
+
+Written to primers.fasta
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app#

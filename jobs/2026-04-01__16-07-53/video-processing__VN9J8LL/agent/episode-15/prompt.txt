@@ -1,0 +1,201 @@
+New Terminal Output:
+
+root@a0978511-2ca2-4ef6-8380-a096d5b32273:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     frames = []
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float64))
+>     cap.release()
+>
+>     n_frames = len(frames)
+>     if n_frames < 3:
+>         raise ValueError("Video too short")
+>
+>     # Use background subtraction from first frame (which has no runner)
+>     bg = frames[0]
+>
+>     # For each frame, compute motion relative to background
+>     # and track the runner's position and vertical extent
+>     frame_data = []  # list of dicts with frame info
+>
+>     for i in range(n_frames):
+>         diff = np.abs(frames[i] - bg)
+>         mask = (diff > 35).astype(np.uint8)
+>
+>         # Clean up noise
+>         kernel = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find contours and keep only significant ones
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter for runner-like contours (in lower half, reasonable size)
+>         runner_contours = []
+>         for c in contours:
+>             area = cv2.contourArea(c)
+>             x, y, w, h = cv2.boundingRect(c)
+>             if area > 300 and h > 30 and y + h > 150:
+>                 runner_contours.append(c)
+>
+>         if runner_contours:
+>             # Merge all runner contours into one mask
+>             runner_mask = np.zeros_like(mask)
+>             cv2.drawContours(runner_mask, runner_contours, -1, 1, -1)
+>
+>             ys, xs = np.where(runner_mask > 0)
+>             if len(ys) > 20:
+>                 cx = np.mean(xs)
+>                 cy = np.mean(ys)
+>                 bot = np.max(ys)
+>                 top = np.min(ys)
+>                 bot95 = int(np.percentile(ys, 95))
+>                 bot90 = int(np.percentile(ys, 90))
+>                 frame_data.append({
+>                     'frame': i,
+>                     'cx': cx,
+>                     'cy': cy,
+>                     'bot': bot,
+>                     'top': top,
+>                     'bot95': bot95,
+>                     'bot90': bot90,
+>                     'area': len(ys)
+>                 })
+>                 continue
+>
+>         frame_data.append(None)
+>
+>     # Also compute consecutive frame differences for more precise timing
+>     consec_data = [None]  # frame 0 has no previous
+>     for i in range(1, n_frames):
+>         diff = np.abs(frames[i] - frames[i-1])
+>         mask = (diff > 15).astype(np.uint8)
+>         kernel = np.ones((3, 3), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>
+>         # Focus on track area
+>         mask[:80, :] = 0
+>         mask[420:, :] = 0
+>
+>         ys, xs = np.where(mask > 0)
+>         if len(ys) > 100:
+>             cx = np.mean(xs)
+>             cy = np.mean(ys)
+>             bot95 = int(np.percentile(ys, 95))
+>             consec_data.append({
+>                 'frame': i,
+>                 'cx': cx,
+>                 'cy': cy,
+>                 'bot95': bot95,
+>                 'area': len(ys)
+>             })
+>         else:
+>             consec_data.append(None)
+>
+>     # Find the main running sequence using consecutive frame data
+>     # The runner creates significant consecutive motion for a sustained period
+>     # Find the longest continuous sequence of frames with significant motion
+>     running_frames = []
+>     for i in range(n_frames):
+>         if consec_data[i] is not None and consec_data[i]['area'] > 1000:
+>             running_frames.append(i)
+>
+>     if not running_frames:
+>         raise ValueError("No runner detected")
+>
+>     # Find the main continuous sequence
+>     sequences = []
+>     current_seq = [running_frames[0]]
+>     for j in range(1, len(running_frames)):
+>         if running_frames[j] - running_frames[j-1] <= 3:  # allow small gaps
+>             current_seq.append(running_frames[j])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [running_frames[j]]
+>     sequences.append(current_seq)
+>
+>     # Pick the longest sequence
+>     main_seq = max(sequences, key=len)
+>     start_frame = main_seq[0]
+>     end_frame = main_seq[-1]
+>
+>     # Extract bot95 values for the main running sequence
+>     bot95_values = []
+>     for i in range(start_frame, end_frame + 1):
+>         if consec_data[i] is not None and consec_data[i]['area'] > 500:
+>             bot95_values.append((i, consec_data[i]['bot95']))
+>
+>     if not bot95_values:
+>         raise ValueError("Could not track runner")
+>
+>     # Establish ground level from the running frames
+>     # Ground level is the typical bot95 value when running (should be ~330-350)
+>     all_bot95 = [v[1] for v in bot95_values]
+>
+>     # The ground level is approximately the median of the higher bot95 values
+>     # (during running, bot95 should be near the track surface)
+>     ground_level = np.percentile(all_bot95, 75)  # 75th percentile as ground estimate
+>
+>     # Find the minimum bot95 (peak of jump)
+>     min_bot95_idx = np.argmin(all_bot95)
+>     min_bot95_frame = bot95_values[min_bot95_idx][0]
+>     min_bot95_val = bot95_values[min_bot95_idx][1]
+>
+>     # The jump threshold: significant drop from ground level
+>     jump_threshold = ground_level - (ground_level - min_bot95_val) * 0.3
+>
+>     # Find takeoff: last frame before bot95 drops below threshold
+>     # Search backward from the minimum
+>     takeoff_frame = start_frame
+>     for idx in range(min_bot95_idx - 1, -1, -1):
+>         f, b = bot95_values[idx]
+>         if b >= jump_threshold:
+>             takeoff_frame = f
+>             break
+>
+>     # Find landing: first frame after bot95 returns above threshold
+>     land_frame = end_frame
+>     for idx in range(min_bot95_idx + 1, len(bot95_values)):
+>         f, b = bot95_values[idx]
+>         if b >= jump_threshold:
+>             land_frame = f
+>             break
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         video_path = '/app/example_video.mp4'
+>     else:
+>         video_path = sys.argv[1]
+>
+>     takeoff, landing = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff,
+>         'jump_land_frame_number': landing
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff}")
+>     print(f"Landing frame: {landing}")
+>     print(f"Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@a0978511-2ca2-4ef6-8380-a096d5b32273:/app#

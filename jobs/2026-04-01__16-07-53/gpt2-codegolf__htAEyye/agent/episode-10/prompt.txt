@@ -1,0 +1,122 @@
+New Terminal Output:
+
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> V,C,T,L,H = 50257,768,1024,12,12
+> HS = C//H  # 64
+>
+> # Load weights
+> f = open('gpt2-124M.ckpt','rb')
+> def rd(n):
+>     return struct.unpack(f'<{n}f', f.read(n*4))
+>
+> wte = list(rd(V*C))
+> wpe = list(rd(T*C))
+> ln1w = list(rd(L*C))
+> ln1b = list(rd(L*C))
+> qkvw = list(rd(L*C*3*C))
+> qkvb = list(rd(L*3*C))
+> attprojw = list(rd(L*C*C))
+> attprojb = list(rd(L*C))
+> ln2w = list(rd(L*C))
+> ln2b = list(rd(L*C))
+> fcw = list(rd(L*C*4*C))
+> fcb = list(rd(L*4*C))
+> fcprojw = list(rd(L*4*C*C))
+> fcprojb = list(rd(L*C))
+> lnfw = list(rd(C))
+> lnfb = list(rd(C))
+> f.close()
+>
+> def layernorm(x, w_off, b_off, w, b):
+>     n = len(x)
+>     mean = sum(x)/n
+>     var = sum((xi-mean)**2 for xi in x)/n
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)/std * w[w_off+i] + b[b_off+i] for i in range(n)]
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> def matmul(x, w, w_off, out_dim, in_dim):
+>     # w is stored as [out_dim, in_dim] in row-major? or [in_dim, out_dim]?
+>     # In GPT-2 TF, the weight for dense layers is [in_dim, out_dim]
+>     # So w[w_off + i*out_dim + j] where i is input dim, j is output dim
+>     # output[j] = sum_i x[i] * w[i*out_dim + j]
+>     out = [0.0]*out_dim
+>     for j in range(out_dim):
+>         s = 0.0
+>         for i in range(in_dim):
+>             s += x[i] * w[w_off + i*out_dim + j]
+>         out[j] = s
+>     return out
+>
+> # Test with a simple input - token for "The"
+> # First, let's just test with token 464 ("The")
+> tokens = [464]  # "The"
+> nt = len(tokens)
+>
+> # Embedding
+> x = [wte[tokens[0]*C+i] + wpe[0*C+i] for i in range(C)]
+>
+> # Process through layers
+> for layer in range(L):
+>     # LayerNorm 1
+>     ln1_out = layernorm(x, layer*C, layer*C, ln1w, ln1b)
+>
+>     # QKV projection
+>     qkv = matmul(ln1_out, qkvw, layer*C*3*C, 3*C, C)
+>     for j in range(3*C):
+>         qkv[j] += qkvb[layer*3*C + j]
+>
+>     # Split into Q, K, V and compute attention
+>     # For single token, attention is just V (softmax of single element = 1)
+>     # attn_out = V part of qkv
+>     attn_out = qkv[2*C:3*C]  # V values
+>
+>     # Attention projection
+>     proj = matmul(attn_out, attprojw, layer*C*C, C, C)
+>     for j in range(C):
+>         proj[j] += attprojb[layer*C + j]
+>
+>     # Residual
+>     x = [x[i] + proj[i] for i in range(C)]
+>
+>     # LayerNorm 2
+>     ln2_out = layernorm(x, layer*C, layer*C, ln2w, ln2b)
+>
+>     # MLP
+>     fc = matmul(ln2_out, fcw, layer*C*4*C, 4*C, C)
+>     for j in range(4*C):
+>         fc[j] += fcb[layer*4*C + j]
+>         fc[j] = gelu(fc[j])
+>
+>     fc_proj = matmul(fc, fcprojw, layer*4*C*C, C, 4*C)
+>     for j in range(C):
+>         fc_proj[j] += fcprojb[layer*C + j]
+>
+>     # Residual
+>     x = [x[i] + fc_proj[i] for i in range(C)]
+>
+> # Final LayerNorm
+> x = layernorm(x, 0, 0, lnfw, lnfb)
+>
+> # Logits = x @ wte.T (weight tying)
+> # logits[v] = sum_i x[i] * wte[v*C + i]
+> logits = [0.0]*V
+> for v in range(V):
+>     s = 0.0
+>     for i in range(C):
+>         s += x[i] * wte[v*C + i]
+>     logits[v] = s
+>
+> # Argmax
+> best = max(range(V), key=lambda v: logits[v])
+> print(f'Next token after "The": {best}')
+> print(f'Top 5 logits:')
+> top5 = sorted(range(V), key=lambda v: -logits[v])[:5]
+> for v in top5:
+>     print(f'  token {v}: logit {logits[v]:.4f}')
+> PYEOF
+

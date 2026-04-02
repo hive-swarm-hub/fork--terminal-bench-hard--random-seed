@@ -1,0 +1,139 @@
+New Terminal Output:
+
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def revcomp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('primers.fasta')
+> fwd = primers['forward_primer'].upper()
+> rev = primers['reverse_primer'].upper()
+>
+> print("=== Primer Details ===")
+> print(f"Forward: {fwd} (len={len(fwd)})")
+> print(f"Reverse: {rev} (len={len(rev)})")
+>
+> # The insertion
+> insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+> cut_point = 215
+>
+> # Forward primer: tail + annealing
+> fwd_tail = fwd[:len(insertion)]
+> fwd_anneal = fwd[len(insertion):]
+> print(f"\nForward tail: {fwd_tail} (len={len(fwd_tail)})")
+> print(f"Forward anneal: {fwd_anneal} (len={len(fwd_anneal)})")
+> print(f"Tail matches insertion: {fwd_tail == insertion}")
+> print(f"Anneal matches input[{cut_point}:{cut_point+len(fwd_anneal)}]: {fwd_anneal == input_seq[cut_point:cut_point+len(fwd_anneal)]}")
+>
+> # Reverse primer: should be revcomp of upstream region
+> rev_target = revcomp(rev)  # This is the sense-strand sequence the rev primer anneals to
+> rev_start = cut_point - len(rev)
+> print(f"\nReverse primer target (sense): {rev_target} (len={len(rev)})")
+> print(f"Matches input[{rev_start}:{cut_point}]: {rev_target == input_seq[rev_start:cut_point]}")
+>
+> # Verify Tm constraints
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_target)  # Tm of the annealing region (sense strand)
+> print(f"\n=== Tm Verification ===")
+> print(f"Fwd annealing Tm: {fwd_tm:.2f} (range 58-72: {'OK' if 58 <= fwd_tm <= 72 else 'FAIL'})")
+> print(f"Rev annealing Tm: {rev_tm:.2f} (range 58-72: {'OK' if 58 <= rev_tm <= 72 else 'FAIL'})")
+> print(f"Tm diff: {abs(fwd_tm - rev_tm):.2f} (max 5: {'OK' if abs(fwd_tm - rev_tm) <= 5 else 'FAIL'})")
+>
+> # Verify annealing lengths
+> print(f"\n=== Length Verification ===")
+> print(f"Fwd annealing len: {len(fwd_anneal)} (range 15-45: {'OK' if 15 <= len(fwd_anneal) <= 45 else 'FAIL'})")
+> print(f"Rev annealing len: {len(rev)} (range 15-45: {'OK' if 15 <= len(rev) <= 45 else 'FAIL'})")
+>
+> # Verify reconstruction
+> # Q5 SDM: the kit does exponential amplification (KLD enzyme ligates the linear product)
+> # The PCR product (linear) from circular template:
+> # Forward primer extends from cut_point going right (clockwise)
+> # Reverse primer extends from cut_point going left (counterclockwise) on antisense strand
+> # The linear product has:
+> #   5' end: fwd_primer sequence = insertion + input[215:215+fwd_anneal_len]
+> #   Then continues: input[215+fwd_anneal_len:] + input[0:rev_start]
+> #   3' end: revcomp of rev_primer = input[rev_start:215]
+> # After KLD ligation, the circular product is:
+> #   insertion + input[215:] + input[0:215]
+> # Which when linearized at position 0 is:
+> #   input[0:215] + insertion + input[215:]
+> result = input_seq[0:215] + insertion + input_seq[215:]
+> print(f"\n=== Reconstruction ===")
+> print(f"Reconstructed == output: {result == output_seq}")
+>
+> # Check the output is truly a single mutation (only 1 primer pair needed)
+> print(f"\n=== Minimum primer pairs ===")
+> print(f"Number of distinct mutation regions: 1 (single insertion)")
+> print(f"Number of primer pairs: 1")
+> print(f"This is the minimum needed: YES")
+>
+> print(f"\n=== FASTA format check ===")
+> with open('primers.fasta') as f:
+>     content = f.read()
+> print(content)
+> print("Forward listed first: YES" if content.index('forward') < content.index('reverse') else "FAIL")
+>
+> PYEOF
+=== Primer Details ===
+Forward: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG (len=55)
+Reverse: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (len=34)
+
+Forward tail: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (len=39)
+Forward anneal: CAAGGGCGAGGAGCTG (len=16)
+Tail matches insertion: True
+Anneal matches input[215:231]: True
+
+Reverse primer target (sense): TTGTTTAACTTTAAGAAGGAGATATACATATGAG (len=34)
+Matches input[181:215]: True
+
+=== Tm Verification ===
+Fwd annealing Tm: 61.24 (range 58-72: OK)
+Rev annealing Tm: 61.31 (range 58-72: OK)
+Tm diff: 0.07 (max 5: OK)
+
+=== Length Verification ===
+Fwd annealing len: 16 (range 15-45: OK)
+Rev annealing len: 34 (range 15-45: OK)
+
+=== Reconstruction ===
+Reconstructed == output: True
+
+=== Minimum primer pairs ===
+Number of distinct mutation regions: 1 (single insertion)
+Number of primer pairs: 1
+This is the minimum needed: YES
+
+=== FASTA format check ===
+>forward_primer
+TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG
+>reverse_primer
+CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+
+Forward listed first: YES
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app#

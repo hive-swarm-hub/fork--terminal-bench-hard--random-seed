@@ -1,0 +1,68 @@
+New Terminal Output:
+
+cat > /app/train.py << 'PYEOF'
+import pandas as pd
+import fasttext
+import os
+import re
+
+# Load training data
+print("Loading data...")
+df_train = pd.read_parquet('data/train-00000-of-00001.parquet')
+
+# Vectorized text preprocessing
+print("Preprocessing...")
+texts = df_train['text'].str.lower().str.replace(r'[^a-z0-9\s]', ' ', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
+labels = df_train['label'].astype(str)
+lines = '__label__' + labels + ' ' + texts
+
+# Write fasttext format
+print("Writing training file...")
+lines.to_csv('/tmp/train.txt', index=False, header=False, quoting=3)
+
+print("Training model...")
+model = fasttext.train_supervised(
+    input='/tmp/train.txt',
+    epoch=25,
+    lr=0.5,
+    dim=50,
+    wordNgrams=2,
+    minCount=5,
+    loss='softmax',
+    thread=4,
+    verbose=2
+)
+
+# Check accuracy on training data
+result = model.test('/tmp/train.txt')
+print(f"Training - Samples: {result[0]}, Precision: {result[1]:.4f}, Recall: {result[2]:.4f}")
+
+# Save model
+model.save_model('/app/model_full.bin')
+full_size = os.path.getsize('/app/model_full.bin') / (1024*1024)
+print(f"Full model size: {full_size:.1f} MB")
+
+if full_size > 150:
+    print("Model too large, quantizing...")
+    model.quantize(input='/tmp/train.txt', retrain=True, cutoff=100000, qnorm=True)
+    model.save_model('/app/model.bin')
+    os.remove('/app/model_full.bin')
+else:
+    os.rename('/app/model_full.bin', '/app/model.bin')
+
+final_size = os.path.getsize('/app/model.bin') / (1024*1024)
+print(f"Final model size: {final_size:.1f} MB")
+
+# Test on test set
+df_test = pd.read_parquet('data/test-00000-of-00001.parquet')
+texts_t = df_test['text'].str.lower().str.replace(r'[^a-z0-9\s]', ' ', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
+labels_t = df_test['label'].astype(str)
+lines_t = '__label__' + labels_t + ' ' + texts_t
+lines_t.to_csv('/tmp/test.txt', index=False, header=False, quoting=3)
+
+result = model.test('/tmp/test.txt')
+print(f"Test - Samples: {result[0]}, Precision: {result[1]:.4f}, Recall: {result[2]:.4f}")
+
+print("Done!")
+PYEOF
+

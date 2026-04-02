@@ -1,0 +1,155 @@
+New Terminal Output:
+
+root@84e54d3f-edbc-4baa-8bab-d5655eeceb96:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient using forward finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def normalize_direction(v):
+>     """Normalize vector to unit length with canonical sign."""
+>     n = np.linalg.norm(v)
+>     if n < 1e-10:
+>         return None
+>     v = v / n
+>     for k in range(len(v)):
+>         if abs(v[k]) > 1e-4:
+>             if v[k] < 0:
+>                 v = -v
+>             break
+>     return v
+>
+> def is_new_direction(d, existing_dirs, threshold=0.9995):
+>     """Check if direction d is new."""
+>     for e in existing_dirs:
+>         if abs(np.dot(d, e)) > threshold:
+>             return False
+>     return True
+>
+> def find_single_flip_boundaries(x0, direction, t_lo, t_hi, g_lo, g_hi, depth=0, max_depth=40):
+>     """Recursively find single-neuron-flip boundaries in [t_lo, t_hi].
+>     Returns list of (gradient_difference, t_boundary) tuples."""
+>     diff = g_hi - g_lo
+>     if np.linalg.norm(diff) < 1e-7:
+>         return []  # No flip in this interval
+>
+>     if depth >= max_depth:
+>         # Assume this is a single flip at this resolution
+>         return [(diff, (t_lo + t_hi) / 2)]
+>
+>     # Check midpoint
+>     t_mid = (t_lo + t_hi) / 2
+>     g_mid = compute_gradient(x0 + t_mid * direction)
+>
+>     diff_lo = g_mid - g_lo
+>     diff_hi = g_hi - g_mid
+>
+>     norm_lo = np.linalg.norm(diff_lo)
+>     norm_hi = np.linalg.norm(diff_hi)
+>
+>     if norm_lo < 1e-7 and norm_hi < 1e-7:
+>         # No flip detected (shouldn't happen if parent had a flip)
+>         return [(diff, t_mid)]
+>
+>     if norm_lo < 1e-7:
+>         # Flip is in upper half only
+>         return find_single_flip_boundaries(x0, direction, t_mid, t_hi, g_mid, g_hi, depth+1, max_depth)
+>
+>     if norm_hi < 1e-7:
+>         # Flip is in lower half only
+>         return find_single_flip_boundaries(x0, direction, t_lo, t_mid, g_lo, g_mid, depth+1, max_depth)
+>
+>     # Both halves have flips - check if they're the same direction
+>     d_lo = normalize_direction(diff_lo)
+>     d_hi = normalize_direction(diff_hi)
+>
+>     if d_lo is not None and d_hi is not None and abs(np.dot(d_lo, d_hi)) > 0.999:
+>         # Same direction - likely same neuron flip split across midpoint
+>         # Continue subdividing the lower half to isolate
+>         return find_single_flip_boundaries(x0, direction, t_lo, t_mid, g_lo, g_mid, depth+1, max_depth)
+>
+>     # Different directions - recurse into both halves
+>     results = []
+>     results.extend(find_single_flip_boundaries(x0, direction, t_lo, t_mid, g_lo, g_mid, depth+1, max_depth))
+>     results.extend(find_single_flip_boundaries(x0, direction, t_mid, t_hi, g_mid, g_hi, depth+1, max_depth))
+>     return results
+>
+> print("Extracting A1 rows by finding ReLU boundaries along random lines...")
+> np.random.seed(42)
+>
+> recovered_directions = []
+> target = 20
+> max_lines = 300
+>
+> for line_idx in range(max_lines):
+>     if len(recovered_directions) >= target:
+>         break
+>
+>     # Random line with diverse starting points
+>     x0 = np.random.randn(10) * 3.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Compute gradients at endpoints
+>     t_start, t_end = -8, 8
+>     g_start = compute_gradient(x0 + t_start * direction)
+>     g_end = compute_gradient(x0 + t_end * direction)
+>
+>     if np.linalg.norm(g_end - g_start) < 1e-7:
+>         continue
+>
+>     # Find all single-neuron-flip boundaries
+>     boundaries = find_single_flip_boundaries(x0, direction, t_start, t_end, g_start, g_end, max_depth=25)
+>
+>     for grad_diff, t_boundary in boundaries:
+>         d = normalize_direction(grad_diff)
+>         if d is None:
+>             continue
+>
+>         if is_new_direction(d, recovered_directions):
+>             recovered_directions.append(d)
+>             print(f"  Found direction {len(recovered_directions)}/{target} (line {line_idx+1})")
+>             if len(recovered_directions) >= target:
+>                 break
+>
+>     if (line_idx + 1) % 20 == 0 and len(recovered_directions) < target:
+>         print(f"  Lines searched: {line_idx+1}, directions found: {len(recovered_directions)}")
+>
+> print(f"\nRecovered {len(recovered_directions)} unique directions")
+>
+> A1_stolen = np.array(recovered_directions)
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+>
+> # Verify
+> from forward import A1 as true_A1
+>
+> print("\nVerification:")
+> matched = set()
+> for i, row in enumerate(A1_stolen):
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(true_A1.shape[0]):
+>         true_norm = true_A1[j] / np.linalg.norm(true_A1[j])
+>         sim = abs(np.dot(row, true_norm))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     print(f"  Recovered row {i} -> true row {best_j}, similarity {best_sim:.6f}")
+>
+> print(f"\nMatched {len(matched)} out of {true_A1.shape[0]} true rows")
+>
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print(f"Saved stolen A1 to /app/stolen_A1.npy")
+> PYEOF
+root@84e54d3f-edbc-4baa-8bab-d5655eeceb96:/app#

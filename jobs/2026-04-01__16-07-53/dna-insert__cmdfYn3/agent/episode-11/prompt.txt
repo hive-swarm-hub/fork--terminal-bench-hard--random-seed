@@ -1,0 +1,123 @@
+New Terminal Output:
+
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app# cat > /tmp/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def revcomp(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # The mutation: output = input[0:215] + "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA" + input[213:]
+> # This is an insertion of 39 bp (37 bp new sequence + 2 bp "AG" duplication)
+> #
+> # For Q5 SDM kit insertion:
+> # We need to pick a clean cut point in the input plasmid.
+> #
+> # The insertion point is between input positions 214 and 215.
+> # (After "...ATATACATATGAG" and before "CAAGGGCGAGG...")
+> #
+> # Forward primer:
+> #   5' tail (non-annealing) = the inserted sequence
+> #   3' (annealing) = binds downstream of insertion point on input
+> #
+> # Reverse primer:
+> #   Entirely annealing, binds upstream of insertion point on input (reverse strand)
+> #   Back-to-back with the forward primer's annealing region
+>
+> # The inserted sequence that needs to be in the forward primer's tail:
+> # output[215:252] = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA" (37 bp)
+> # Plus we need to duplicate "AG" (input[213:215]) because the reconstruction is:
+> # output = input[0:215] + output[215:252] + input[213:]
+> #
+> # So looking at the output around the insertion:
+> # output[210:260] = "ATGAGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGG"
+> # input[210:225]  = "ATGAGCAAGGGCGAGG"
+> #
+> # The forward primer anneals starting at some position >= 213 in the input.
+> # If we set the forward primer's annealing start at position 215 ("CAAGGGCGAGG..."),
+> # then the 5' tail needs to contain everything from the output that's NOT in the input
+> # between the reverse primer's end and the forward primer's annealing start.
+> #
+> # Reverse primer anneals to the reverse complement of input ending at position 215.
+> # i.e., reverse primer = revcomp(input[215-L:215]) for some length L
+> #
+> # Forward primer = tail + input[215:215+M] for some length M
+> # The tail = output[215:252] + input[213:215] = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA" + "AG" = 39 bp
+> # Wait, that's not right either.
+> #
+> # Let me think again. In Q5 SDM for insertions:
+> # - The primers are designed back-to-back at the insertion site
+> # - The forward primer has the insertion sequence at its 5' end
+> # - The reverse primer is just a standard primer on the opposite strand
+> #
+> # Cut point in input: between position 214 and 215
+> # Reverse primer: revcomp of input[215-L:215] -- anneals to input ending right at the cut
+> # Forward primer: insertion_seq + input[215:215+M] -- carries the insertion, anneals downstream
+> #
+> # But what IS the insertion sequence?
+> # At the cut point (between 214 and 215 in input):
+> # Input:  ...G(214) | C(215)...
+> # Output: ...G(214) | TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGC(215+39)...
+> #
+> # Wait, output[214] = G (same as input[214])
+> # output[215:254] = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGC" (39 chars)
+> # output[254] = ?
+>
+> print("output[214] =", output_seq[214])
+> print("output[215:254] =", output_seq[215:254])
+> print("len =", len(output_seq[215:254]))
+> print("output[254:260] =", output_seq[254:260])
+> print()
+> print("input[215:221] =", input_seq[215:221])
+> print()
+>
+> # output[254] should equal input[215] if it's a pure insertion
+> print("output[254] =", output_seq[254])
+> print("input[215] =", input_seq[215])
+>
+> # Check: is output = input[0:215] + output[215:254] + input[215:]?
+> test = input_seq[0:215] + output_seq[215:254] + input_seq[215:]
+> print(f"\nTest reconstruction: {test == output_seq}")
+> print(f"Test length: {len(test)}, output length: {len(output_seq)}")
+>
+> PYEOF
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app# python3 /tmp/design_primers.py
+output[214] = G
+output[215:254] = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+len = 39
+output[254:260] = CAAGGG
+
+input[215:221] = CAAGGG
+
+output[254] = C
+input[215] = C
+
+Test reconstruction: True
+Test length: 3630, output length: 3630
+root@ab6d2795-831d-49d6-9637-06f4c6d428c4:/app#

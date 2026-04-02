@@ -1,0 +1,165 @@
+New Terminal Output:
+
+root@84e54d3f-edbc-4baa-8bab-d5655eeceb96:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient using forward finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+e> def normalize_direction(v):
+>     """Normalize vector to unit length with canonical sign."""
+>     n = np.linalg.norm(v)
+>     if n < 1e-10:
+>         return None
+>     v = v / n
+>     for k in range(len(v)):
+>         if abs(v[k]) > 1e-4:
+>             if v[k] < 0:
+>                 v = -v
+>             break
+>     return v
+>
+> def is_new_direction(d, existing_dirs, threshold=0.9995):
+>     """Check if direction d is new."""
+>     for e in existing_dirs:
+>         if abs(np.dot(d, e)) > threshold:
+>             return False
+>     return True
+>
+> def find_all_breakpoints_on_line(x0, direction, t_min, t_max, n_initial=500):
+>     """Find all breakpoints of the piecewise linear function along a line.
+>     Uses function values (cheap) to find breakpoints, then refines them.
+>     Returns list of precise t values at breakpoints."""
+>
+>     # Step 1: Dense sampling of function values
+>     t_values = np.linspace(t_min, t_max, n_initial)
+>     f_values = np.array([forward(x0 + t * direction) for t in t_values])
+>     dt = t_values[1] - t_values[0]
+>
+>     # Step 2: Compute slopes and find where they change
+>     slopes = np.diff(f_values) / dt
+>     slope_changes = np.abs(np.diff(slopes))
+>
+>     # Find intervals where slope changes
+>     threshold = 1e-8
+>     breakpoint_intervals = []
+>     for i in range(len(slope_changes)):
+>         if slope_changes[i] > threshold:
+>             # Breakpoint is near t_values[i+1]
+>             # Use the three points: t[i], t[i+1], t[i+2]
+>             breakpoint_intervals.append((t_values[i], t_values[i+2] if i+2 < len(t_values) else t_values[i+1]))
+>
+>     # Step 3: Refine each breakpoint using function values
+>     # For a piecewise linear function, the breakpoint is where the slope changes.
+>     # We can find it by fitting lines on each side.
+>     refined_breakpoints = []
+>     for t_lo, t_hi in breakpoint_intervals:
+>         # Binary search: find t* where slope changes
+>         # Use three points to detect slope change
+>         for _ in range(50):
+>             t_mid = (t_lo + t_hi) / 2
+>             # Check if slope changes between [t_lo, t_mid] or [t_mid, t_hi]
+>             f_lo = forward(x0 + t_lo * direction)
+>             f_mid = forward(x0 + t_mid * direction)
+>             f_hi = forward(x0 + t_hi * direction)
+>
+>             slope_left = (f_mid - f_lo) / (t_mid - t_lo)
+>             slope_right = (f_hi - f_mid) / (t_hi - t_mid)
+>
+>             if abs(slope_left - slope_right) < 1e-10:
+>                 break  # Converged or no breakpoint
+>
+>             # Check which half contains the breakpoint
+>             t_quarter = (t_lo + t_mid) / 2
+>             f_quarter = forward(x0 + t_quarter * direction)
+>             slope_first_quarter = (f_quarter - f_lo) / (t_quarter - t_lo)
+>             slope_second_quarter = (f_mid - f_quarter) / (t_mid - t_quarter)
+>
+>             if abs(slope_first_quarter - slope_second_quarter) > 1e-10:
+>                 t_hi = t_mid
+>             else:
+>                 t_lo = t_mid
+>
+>         refined_breakpoints.append((t_lo + t_hi) / 2)
+>
+>     return refined_breakpoints
+>
+> print("Extracting A1 rows by finding ReLU boundaries...")
+> np.random.seed(42)
+>
+> recovered_directions = []
+> target = 20
+> max_lines = 200
+>
+> for line_idx in range(max_lines):
+>     if len(recovered_directions) >= target:
+>         break
+>
+>     x0 = np.random.randn(10) * 3.0
+>     direction = np.random.randn(10)
+>     direction = direction / np.linalg.norm(direction)
+>
+>     # Find breakpoints using cheap function evaluations
+>     breakpoints = find_all_breakpoints_on_line(x0, direction, -8, 8, n_initial=500)
+>
+>     if not breakpoints:
+>         continue
+>
+>     # For each breakpoint, compute gradient on both sides
+>     delta = 1e-6  # Very small offset from breakpoint
+>     for t_bp in breakpoints:
+>         g_before = compute_gradient(x0 + (t_bp - delta) * direction)
+>         g_after = compute_gradient(x0 + (t_bp + delta) * direction)
+>
+>         grad_diff = g_after - g_before
+>         d = normalize_direction(grad_diff)
+>         if d is None:
+>             continue
+>
+>         if is_new_direction(d, recovered_directions):
+>             recovered_directions.append(d)
+>             print(f"  Found direction {len(recovered_directions)}/{target} (line {line_idx+1})")
+>             if len(recovered_directions) >= target:
+>                 break
+>
+>     if (line_idx + 1) % 20 == 0 and len(recovered_directions) < target:
+>         print(f"  Lines searched: {line_idx+1}, directions found: {len(recovered_directions)}")
+>
+> print(f"\nRecovered {len(recovered_directions)} unique directions")
+>
+> A1_stolen = np.array(recovered_directions)
+> print(f"Stolen A1 shape: {A1_stolen.shape}")
+>
+> # Verify
+> from forward import A1 as true_A1
+>
+> print("\nVerification:")
+> matched = set()
+> for i, row in enumerate(A1_stolen):
+>     best_sim = 0
+>     best_j = -1
+>     for j in range(true_A1.shape[0]):
+>         true_norm = true_A1[j] / np.linalg.norm(true_A1[j])
+>         sim = abs(np.dot(row, true_norm))
+>         if sim > best_sim:
+>             best_sim = sim
+>             best_j = j
+>     matched.add(best_j)
+>     print(f"  Recovered row {i} -> true row {best_j}, similarity {best_sim:.6f}")
+>
+> print(f"\nMatched {len(matched)} out of {true_A1.shape[0]} true rows")
+>
+> np.save('/app/stolen_A1.npy', A1_stolen)
+> print(f"Saved stolen A1 to /app/stolen_A1.npy")
+> PYEOF
+root@84e54d3f-edbc-4baa-8bab-d5655eeceb96:/app#

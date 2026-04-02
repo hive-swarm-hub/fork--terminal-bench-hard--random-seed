@@ -1,0 +1,159 @@
+New Terminal Output:
+
+root@67da611d-6f74-4e87-bee6-c0bcdb1b82a5:/app# cat > /app/fit_peaks.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.interpolate import interp1d
+> import json
+>
+> # Parse the data file
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_wn = np.array(x_data)  # absolute wavenumber in cm⁻¹
+> y_data = np.array(y_data)
+>
+> # Sort by wavenumber
+> sort_idx = np.argsort(x_wn)
+> x_wn = x_wn[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Convert to wavelength (nm) - data is uniformly spaced here
+> wl = 1e7 / x_wn  # wavelength in nm
+>
+> # Find the Rayleigh peak (laser line) - highest intensity
+> rayleigh_idx = np.argmax(y_data)
+> laser_wn = x_wn[rayleigh_idx]
+> laser_wl = wl[rayleigh_idx]
+> print(f'Laser: wn={laser_wn:.2f} cm-1, wl={laser_wl:.2f} nm')
+>
+> # Convert to Raman shift
+> raman_shift = laser_wn - x_wn  # positive for Stokes
+>
+> # Use only Stokes side (positive Raman shift, lower wavenumber = longer wavelength)
+> stokes = raman_shift > 100  # exclude Rayleigh region
+> rs = raman_shift[stokes]
+> ys = y_data[stokes]
+> wl_s = wl[stokes]
+>
+> # Sort by Raman shift
+> sort2 = np.argsort(rs)
+> rs = rs[sort2]
+> ys = ys[sort2]
+> wl_s = wl_s[sort2]
+>
+> # Interpolate onto uniform Raman shift grid
+> rs_uniform = np.linspace(rs.min(), rs.max(), 10000)
+> interp_func = interp1d(rs, ys, kind='linear')
+> ys_uniform = interp_func(rs_uniform)
+>
+> # Lorentzian function
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude / (1.0 + ((x - x0) / gamma) ** 2) + offset
+>
+> # G peak region (~1500-1700 cm⁻¹)
+> g_mask = (rs_uniform >= 1450) & (rs_uniform <= 1750)
+> rs_g = rs_uniform[g_mask]
+> ys_g = ys_uniform[g_mask]
+>
+> print(f'G peak region: {len(rs_g)} points')
+> g_peak_idx = np.argmax(ys_g)
+> print(f'G peak max at shift={rs_g[g_peak_idx]:.2f}, y={ys_g[g_peak_idx]:.2f}')
+>
+> # Initial guesses for G peak
+> g_x0 = rs_g[g_peak_idx]
+> g_amp = ys_g[g_peak_idx] - np.min(ys_g)
+> g_off = np.min(ys_g)
+> g_gam = 20.0
+>
+> try:
+>     popt_g, pcov_g = curve_fit(lorentzian, rs_g, ys_g,
+>                                p0=[g_x0, g_gam, g_amp, g_off],
+>                                maxfev=100000)
+>     print(f'G fit: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amp={popt_g[2]:.4f}, off={popt_g[3]:.4f}')
+> except Exception as e:
+>     print(f'G fit failed: {e}')
+>     popt_g = [g_x0, g_gam, g_amp, g_off]
+>
+> # 2D peak region (~2550-2850 cm⁻¹)
+> td_mask = (rs_uniform >= 2500) & (rs_uniform <= 2900)
+> rs_2d = rs_uniform[td_mask]
+> ys_2d = ys_uniform[td_mask]
+>
+> print(f'\n2D peak region: {len(rs_2d)} points')
+> td_peak_idx = np.argmax(ys_2d)
+> print(f'2D peak max at shift={rs_2d[td_peak_idx]:.2f}, y={ys_2d[td_peak_idx]:.2f}')
+>
+> # Initial guesses for 2D peak
+> td_x0 = rs_2d[td_peak_idx]
+> td_amp = ys_2d[td_peak_idx] - np.min(ys_2d)
+> td_off = np.min(ys_2d)
+> td_gam = 30.0
+>
+> try:
+>     popt_2d, pcov_2d = curve_fit(lorentzian, rs_2d, ys_2d,
+>                                  p0=[td_x0, td_gam, td_amp, td_off],
+>                                  maxfev=100000)
+>     print(f'2D fit: x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amp={popt_2d[2]:.4f}, off={popt_2d[3]:.4f}')
+> except Exception as e:
+>     print(f'2D fit failed: {e}')
+>     popt_2d = [td_x0, td_gam, td_amp, td_off]
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(popt_g[0]), 4),
+>         "gamma": round(float(abs(popt_g[1])), 4),
+>         "amplitude": round(float(popt_g[2]), 4),
+>         "offset": round(float(popt_g[3]), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(popt_2d[0]), 4),
+>         "gamma": round(float(abs(popt_2d[1])), 4),
+>         "amplitude": round(float(popt_2d[2]), 4),
+>         "offset": round(float(popt_2d[3]), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print('\nResults written to /app/results.json')
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@67da611d-6f74-4e87-bee6-c0bcdb1b82a5:/app# python3 /app/fit_peaks.py
+Laser: wn=19139.54 cm-1, wl=522.48 nm
+G peak region: 174 points
+G peak max at shift=1450.09, y=20571.84
+G fit: x0=1343.0229, gamma=281.1371, amp=3020.2840, off=17948.7826
+
+2D peak region: 231 points
+2D peak max at shift=2894.97, y=18159.28
+2D fit: x0=2876.1634, gamma=123.1598, amp=1883.8799, off=16214.3708
+
+Results written to /app/results.json
+{
+  "G": {
+    "x0": 1343.0229,
+    "gamma": 281.1371,
+    "amplitude": 3020.284,
+    "offset": 17948.7826
+  },
+  "2D": {
+    "x0": 2876.1634,
+    "gamma": 123.1598,
+    "amplitude": 1883.8799,
+    "offset": 16214.3708
+  }
+}
+root@67da611d-6f74-4e87-bee6-c0bcdb1b82a5:/app#

@@ -1,0 +1,635 @@
+New Terminal Output:
+
+root@4ee17a04-b091-4040-a9f5-9d373474cb30:/app# cat > /tmp/write_ars.py << 'PYEOF'
+> import os
+>
+> code = r'''
+> # =============================================================================
+> # Adaptive Rejection Sampling (ARS)
+> # Based on Gilks, W. R., & Wild, P. (1992)
+> # =============================================================================
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Evaluate log-density
+> # -----------------------------------------------------------------------------
+> eval_log_density <- function(x, log_f) {
+>   result <- log_f(x)
+>   if (any(is.nan(result) | is.na(result))) {
+>     stop("Log-density returned NaN or NA. Check your density function and domain.")
+>   }
+>   return(result)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Compute derivative of log-density numerically
+> # -----------------------------------------------------------------------------
+> eval_log_density_deriv <- function(x, log_f, eps = 1e-8) {
+>   f_plus <- log_f(x + eps)
+>   f_minus <- log_f(x - eps)
+>   deriv <- (f_plus - f_minus) / (2 * eps)
+>   return(deriv)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Check log-concavity at abscissae
+> # -----------------------------------------------------------------------------
+> check_log_concavity <- function(abscissae, log_f) {
+>   if (length(abscissae) < 3) return(TRUE)
+>   sorted_x <- sort(abscissae)
+>   h_vals <- eval_log_density(sorted_x, log_f)
+>   dh_vals <- eval_log_density_deriv(sorted_x, log_f)
+>   for (i in 2:length(dh_vals)) {
+>     if (dh_vals[i] > dh_vals[i-1] + 1e-6) {
+>       return(FALSE)
+>     }
+>   }
+>   if (length(sorted_x) >= 3) {
+>     for (i in 2:(length(sorted_x) - 1)) {
+>       slope_left <- (h_vals[i] - h_vals[i-1]) / (sorted_x[i] - sorted_x[i-1])
+>       slope_right <- (h_vals[i+1] - h_vals[i]) / (sorted_x[i+1] - sorted_x[i])
+>       if (slope_right > slope_left + 1e-6) {
+>         return(FALSE)
+>       }
+>     }
+>   }
+>   return(TRUE)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Build upper hull (piecewise linear envelope)
+> # -----------------------------------------------------------------------------
+> build_upper_hull <- function(abscissae, log_f) {
+>   k <- length(abscissae)
+>   sorted_idx <- order(abscissae)
+>   x <- abscissae[sorted_idx]
+>   h <- eval_log_density(x, log_f)
+>   dh <- eval_log_density_deriv(x, log_f)
+>   intercepts <- h - x * dh
+>   slopes <- dh
+>   z <- numeric(k - 1)
+>   for (j in 1:(k-1)) {
+>     denom <- dh[j] - dh[j+1]
+>     if (abs(denom) < 1e-15) {
+>       z[j] <- (x[j] + x[j+1]) / 2
+>     } else {
+>       z[j] <- (h[j+1] - h[j] - x[j+1]*dh[j+1] + x[j]*dh[j]) / denom
+>     }
+>   }
+>   return(list(x = x, h = h, dh = dh, intercepts = intercepts,
+>               slopes = slopes, z = z))
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Evaluate upper hull at a point
+> # -----------------------------------------------------------------------------
+> eval_upper_hull <- function(x_eval, hull, lb, ub) {
+>   k <- length(hull$x)
+>   result <- numeric(length(x_eval))
+>   for (i in seq_along(x_eval)) {
+>     xv <- x_eval[i]
+>     seg <- findInterval(xv, hull$z) + 1
+>     if (seg < 1) seg <- 1
+>     if (seg > k) seg <- k
+>     result[i] <- hull$h[seg] + (xv - hull$x[seg]) * hull$dh[seg]
+>   }
+>   return(result)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Evaluate lower hull (piecewise linear squeeze)
+> # -----------------------------------------------------------------------------
+> eval_lower_hull <- function(x_eval, hull) {
+>   k <- length(hull$x)
+>   result <- numeric(length(x_eval))
+>   for (i in seq_along(x_eval)) {
+>     xv <- x_eval[i]
+>     if (xv <= hull$x[1] || xv >= hull$x[k]) {
+>       result[i] <- -Inf
+>     } else {
+>       seg <- findInterval(xv, hull$x)
+>       if (seg < 1) seg <- 1
+>       if (seg >= k) seg <- k - 1
+>       x_left <- hull$x[seg]
+>       x_right <- hull$x[seg + 1]
+>       h_left <- hull$h[seg]
+>       h_right <- hull$h[seg + 1]
+>       result[i] <- h_left + (xv - x_left) * (h_right - h_left) / (x_right - x_left)
+>     }
+>   }
+>   return(result)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Sample from the upper hull (piecewise exponential)
+> # -----------------------------------------------------------------------------
+> sample_upper_hull <- function(n, hull, lb, ub) {
+>   k <- length(hull$x)
+>   z_full <- c(lb, hull$z, ub)
+>
+>   # Compute area under exp(upper hull) for each segment
+>   areas <- numeric(k)
+>   for (j in 1:k) {
+>     a_j <- z_full[j]
+>     b_j <- z_full[j + 1]
+>     slope_j <- hull$dh[j]
+>     intercept_j <- hull$h[j] - hull$x[j] * hull$dh[j]
+>
+>     if (abs(slope_j) < 1e-15) {
+>       areas[j] <- exp(intercept_j) * (b_j - a_j)
+>     } else {
+>       # Use log-sum-exp for numerical stability
+>       val_a <- intercept_j + slope_j * a_j
+>       val_b <- intercept_j + slope_j * b_j
+>       max_val <- max(val_a, val_b)
+>       if (slope_j > 0) {
+>         areas[j] <- (exp(val_b - max_val) - exp(val_a - max_val)) * exp(max_val) / slope_j
+>       } else {
+>         areas[j] <- (exp(val_a - max_val) - exp(val_b - max_val)) * exp(max_val) / (-slope_j)
+>       }
+>     }
+>
+>     if (is.nan(areas[j]) || is.na(areas[j]) || !is.finite(areas[j]) || areas[j] < 0) {
+>       areas[j] <- 1e-300
+>     }
+>   }
+>
+>   total_area <- sum(areas)
+>   probs <- areas / total_area
+>
+>   # Sample segments
+>   segments <- sample(1:k, n, replace = TRUE, prob = probs)
+>
+>   # Sample within each segment from truncated exponential
+>   samples <- numeric(n)
+>   for (i in 1:n) {
+>     j <- segments[i]
+>     a_j <- z_full[j]
+>     b_j <- z_full[j + 1]
+>     slope_j <- hull$dh[j]
+>
+>     u <- runif(1)
+>
+>     if (abs(slope_j) < 1e-15) {
+>       samples[i] <- a_j + u * (b_j - a_j)
+>     } else {
+>       exp_range <- slope_j * (b_j - a_j)
+>       if (abs(exp_range) > 500) {
+>         # For very large ranges, approximate
+>         if (slope_j > 0) {
+>           samples[i] <- b_j + log(1 - u) / slope_j
+>         } else {
+>           samples[i] <- a_j - log(1 - u) / slope_j
+>         }
+>       } else {
+>         samples[i] <- a_j + log(1 + u * (exp(exp_range) - 1)) / slope_j
+>       }
+>     }
+>
+>     # Safety check
+>     if (is.nan(samples[i]) || !is.finite(samples[i])) {
+>       samples[i] <- runif(1, max(a_j, a_j), min(b_j, b_j))
+>     }
+>     # Clamp to segment bounds
+>     if (is.finite(a_j)) samples[i] <- max(samples[i], a_j + 1e-10)
+>     if (is.finite(b_j)) samples[i] <- min(samples[i], b_j - 1e-10)
+>   }
+>
+>   return(samples)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Validate inputs
+> # -----------------------------------------------------------------------------
+> validate_inputs <- function(n, g, lb, ub, init_abs) {
+>   if (!is.numeric(n) || length(n) != 1 || n != floor(n) || n <= 0) {
+>     stop("'n' must be a positive integer.")
+>   }
+>   if (!is.function(g)) {
+>     stop("'g' must be a function that computes the (possibly unnormalized) density.")
+>   }
+>   if (!is.numeric(lb) || !is.numeric(ub) || length(lb) != 1 || length(ub) != 1) {
+>     stop("'lb' and 'ub' must be single numeric values.")
+>   }
+>   if (lb >= ub) {
+>     stop("Lower bound must be less than upper bound.")
+>   }
+>   if (!is.null(init_abs)) {
+>     if (!is.numeric(init_abs) || length(init_abs) < 2) {
+>       stop("'init_abs' must be a numeric vector of length >= 2.")
+>     }
+>     if (any(init_abs <= lb) || any(init_abs >= ub)) {
+>       stop("Initial abscissae must be strictly within (lb, ub).")
+>     }
+>   }
+>   # Test that g returns valid values
+>   if (is.finite(lb) && is.finite(ub)) {
+>     test_pt <- (lb + ub) / 2
+>   } else if (is.finite(lb)) {
+>     test_pt <- lb + 1
+>   } else if (is.finite(ub)) {
+>     test_pt <- ub - 1
+>   } else {
+>     test_pt <- 0
+>   }
+>   test_val <- tryCatch(g(test_pt), error = function(e) {
+>     stop("Density function failed to evaluate at test point: ", e$message)
+>   })
+>   if (!is.numeric(test_val) || any(is.na(test_val))) {
+>     stop("Density function must return numeric values.")
+>   }
+>   if (any(test_val < 0)) {
+>     stop("Density function must return non-negative values.")
+>   }
+>   return(TRUE)
+> }
+>
+> # -----------------------------------------------------------------------------
+> # Helper: Initialize abscissae
+> # -----------------------------------------------------------------------------
+> initialize_abscissae <- function(log_f, lb, ub, n_init = 5) {
+>   if (is.finite(lb) && is.finite(ub)) {
+>     x_init <- seq(lb + 0.1*(ub-lb), ub - 0.1*(ub-lb), length.out = n_init)
+>   } else if (is.finite(lb)) {
+>     x_init <- lb + (1:n_init) * 0.5
+>   } else if (is.finite(ub)) {
+>     x_init <- ub - (n_init:1) * 0.5
+>   } else {
+>     x_init <- seq(-3, 3, length.out = n_init)
+>   }
+>
+>   h_vals <- eval_log_density(x_init, log_f)
+>   valid <- is.finite(h_vals)
+>   if (sum(valid) < 2) {
+>     stop("Could not find enough valid initial abscissae. Try specifying init_abs manually.")
+>   }
+>   x_init <- x_init[valid]
+>
+>   dh <- eval_log_density_deriv(x_init, log_f)
+>   if (!is.finite(lb) && all(dh <= 0)) {
+>     x_try <- min(x_init) - 1
+>     for (iter in 1:20) {
+>       d_try <- eval_log_density_deriv(x_try, log_f)
+>       h_try <- tryCatch(eval_log_density(x_try, log_f), error = function(e) -Inf)
+>       if (is.finite(h_try) && d_try > 0) {
+>         x_init <- c(x_try, x_init)
+>         break
+>       }
+>       x_try <- x_try - 2^iter
+>     }
+>   }
+>   dh <- eval_log_density_deriv(x_init, log_f)
+>   if (!is.finite(ub) && all(dh >= 0)) {
+>     x_try <- max(x_init) + 1
+>     for (iter in 1:20) {
+>       d_try <- eval_log_density_deriv(x_try, log_f)
+>       h_try <- tryCatch(eval_log_density(x_try, log_f), error = function(e) -Inf)
+>       if (is.finite(h_try) && d_try < 0) {
+>         x_init <- c(x_init, x_try)
+>         break
+>       }
+>       x_try <- x_try + 2^iter
+>     }
+>   }
+>
+>   return(sort(x_init))
+> }
+>
+> # =============================================================================
+> # Main ARS Function
+> # =============================================================================
+> ars <- function(n, g, lb = -Inf, ub = Inf, init_abs = NULL) {
+>   # Adaptive Rejection Sampling
+>   #
+>   # Args:
+>   #   n        : Number of samples to generate (positive integer)
+>   #   g        : Density function (possibly unnormalized), must be vectorized
+>   #   lb       : Lower bound of the domain (default: -Inf)
+>   #   ub       : Upper bound of the domain (default: Inf)
+>   #   init_abs : Initial abscissae (optional, numeric vector of length >= 2)
+>   #
+>   # Returns:
+>   #   Numeric vector of n samples from the distribution proportional to g
+>
+>   validate_inputs(n, g, lb, ub, init_abs)
+>
+>   log_f <- function(x) {
+>     vals <- g(x)
+>     vals[vals <= 0] <- .Machine$double.xmin
+>     return(log(vals))
+>   }
+>
+>   if (is.null(init_abs)) {
+>     abscissae <- initialize_abscissae(log_f, lb, ub)
+>   } else {
+>     abscissae <- sort(init_abs)
+>   }
+>
+>   if (!check_log_concavity(abscissae, log_f)) {
+>     stop("The log-density does not appear to be log-concave. ARS requires a log-concave density.")
+>   }
+>
+>   samples <- numeric(n)
+>   n_sampled <- 0
+>   max_iter <- n * 200
+>   iter <- 0
+>
+>   while (n_sampled < n && iter < max_iter) {
+>     iter <- iter + 1
+>
+>     hull <- build_upper_hull(abscissae, log_f)
+>     x_star <- sample_upper_hull(1, hull, lb, ub)
+>     u_val <- eval_upper_hull(x_star, hull, lb, ub)
+>     l_val <- eval_lower_hull(x_star, hull)
+>     w <- runif(1)
+>
+>     if (w <= exp(l_val - u_val)) {
+>       n_sampled <- n_sampled + 1
+>       samples[n_sampled] <- x_star
+>     } else {
+>       h_star <- eval_log_density(x_star, log_f)
+>
+>       new_abs <- sort(unique(c(abscissae, x_star)))
+>       if (!check_log_concavity(new_abs, log_f)) {
+>         stop("Non-log-concave density detected during sampling at x = ",
+>              round(x_star, 4), ". ARS requires a log-concave density.")
+>       }
+>
+>       if (w <= exp(h_star - u_val)) {
+>         n_sampled <- n_sampled + 1
+>         samples[n_sampled] <- x_star
+>       }
+>
+>       abscissae <- new_abs
+>     }
+>   }
+>
+>   if (n_sampled < n) {
+>     warning("ARS only generated ", n_sampled, " out of ", n, " requested samples.")
+>     samples <- samples[1:n_sampled]
+>   }
+>
+>   return(samples)
+> }
+>
+> # =============================================================================
+> # Test Function
+> # =============================================================================
+> test <- function() {
+>   cat("=============================================================\n")
+>   cat("  Adaptive Rejection Sampling (ARS) - Test Suite\n")
+>   cat("=============================================================\n\n")
+>
+>   pass_count <- 0
+>   fail_count <- 0
+>
+>   run_test <- function(name, expr) {
+>     result <- tryCatch(expr, error = function(e) {
+>       cat(name, ": FAIL (", e$message, ")\n", sep="")
+>       return("FAIL")
+>     })
+>     if (is.character(result) && result == "FAIL") {
+>       fail_count <<- fail_count + 1
+>     } else if (isTRUE(result)) {
+>       cat(name, ": PASS\n", sep="")
+>       pass_count <<- pass_count + 1
+>     } else {
+>       cat(name, ": FAIL\n", sep="")
+>       fail_count <<- fail_count + 1
+>     }
+>   }
+>
+>   # ---- Input Validation Tests ----
+>   cat("--- Input Validation Tests ---\n\n")
+>
+>   run_test("test_negative_n", {
+>     err <- tryCatch(ars(-5, dnorm), error = function(e) e)
+>     inherits(err, "error") && grepl("positive integer", err$message)
+>   })
+>
+>   run_test("test_non_integer_n", {
+>     err <- tryCatch(ars(3.5, dnorm), error = function(e) e)
+>     inherits(err, "error") && grepl("positive integer", err$message)
+>   })
+>
+>   run_test("test_zero_n", {
+>     err <- tryCatch(ars(0, dnorm), error = function(e) e)
+>     inherits(err, "error") && grepl("positive integer", err$message)
+>   })
+>
+>   run_test("test_invalid_bounds", {
+>     err <- tryCatch(ars(100, dnorm, lb = 5, ub = 2), error = function(e) e)
+>     inherits(err, "error") && grepl("Lower bound", err$message)
+>   })
+>
+>   run_test("test_non_function_g", {
+>     err <- tryCatch(ars(100, "not_a_function"), error = function(e) e)
+>     inherits(err, "error") && grepl("function", err$message)
+>   })
+>
+>   run_test("test_invalid_init_abs", {
+>     err <- tryCatch(ars(100, dnorm, init_abs = c(-10)), error = function(e) e)
+>     inherits(err, "error")
+>   })
+>
+>   cat("\n--- Distribution Tests ---\n\n")
+>
+>   run_test("test_standard_normal", {
+>     set.seed(42)
+>     samples <- ars(1000, dnorm)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     cat("  Standard Normal: sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = 0, sd = 1\n")
+>     write(samples, file = "/app/normal_samples.txt", ncolumns = 1)
+>     ks <- ks.test(samples, "pnorm")
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m) < 0.15 && abs(s - 1) < 0.2 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_normal_shifted", {
+>     set.seed(123)
+>     g <- function(x) dnorm(x, mean = 3, sd = 2)
+>     samples <- ars(1000, g)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     cat("  Normal(3,2): sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = 3, sd = 2\n")
+>     ks <- ks.test(samples, "pnorm", mean = 3, sd = 2)
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m - 3) < 0.3 && abs(s - 2) < 0.4 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_exponential", {
+>     set.seed(456)
+>     g <- function(x) dexp(x, rate = 1)
+>     samples <- ars(1000, g, lb = 0, ub = Inf)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     cat("  Exponential(1): sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = 1, sd = 1\n")
+>     write(samples, file = "/app/exponential_samples.txt", ncolumns = 1)
+>     ks <- ks.test(samples, "pexp", rate = 1)
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m - 1) < 0.2 && abs(s - 1) < 0.3 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_gamma", {
+>     set.seed(789)
+>     g <- function(x) dgamma(x, shape = 3, rate = 2)
+>     samples <- ars(1000, g, lb = 0, ub = Inf)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     expected_mean <- 3/2
+>     expected_sd <- sqrt(3)/2
+>     cat("  Gamma(3,2): sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = ", round(expected_mean, 4),
+>         ", sd = ", round(expected_sd, 4), "\n")
+>     ks <- ks.test(samples, "pgamma", shape = 3, rate = 2)
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m - expected_mean) < 0.3 && abs(s - expected_sd) < 0.3 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_beta", {
+>     set.seed(101)
+>     g <- function(x) dbeta(x, shape1 = 2, shape2 = 5)
+>     samples <- ars(1000, g, lb = 0, ub = 1)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     expected_mean <- 2/7
+>     expected_sd <- sqrt(2*5 / (7^2 * 8))
+>     cat("  Beta(2,5): sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = ", round(expected_mean, 4),
+>         ", sd = ", round(expected_sd, 4), "\n")
+>     ks <- ks.test(samples, "pbeta", shape1 = 2, shape2 = 5)
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m - expected_mean) < 0.1 && abs(s - expected_sd) < 0.1 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_non_log_concave_detection", {
+>     set.seed(202)
+>     g <- function(x) dcauchy(x)
+>     err <- tryCatch(ars(100, g), error = function(e) e)
+>     is_error <- inherits(err, "error") && grepl("log-concave|concav", err$message, ignore.case=TRUE)
+>     if (is_error) {
+>       cat("  Correctly detected non-log-concave density (Cauchy)\n")
+>     }
+>     is_error
+>   })
+>
+>   cat("\n--- Module Tests ---\n\n")
+>
+>   run_test("test_eval_log_density", {
+>     log_f <- function(x) dnorm(x, log = TRUE)
+>     val <- eval_log_density(0, log_f)
+>     expected <- dnorm(0, log = TRUE)
+>     cat("  eval_log_density(0) = ", round(val, 6),
+>         ", expected = ", round(expected, 6), "\n")
+>     abs(val - expected) < 1e-10
+>   })
+>
+>   run_test("test_numerical_derivative", {
+>     log_f <- function(x) dnorm(x, log = TRUE)
+>     test_pts <- c(-2, -1, 0, 1, 2)
+>     derivs <- eval_log_density_deriv(test_pts, log_f)
+>     expected <- -test_pts
+>     max_err <- max(abs(derivs - expected))
+>     cat("  Max derivative error = ", round(max_err, 8), "\n")
+>     max_err < 1e-5
+>   })
+>
+>   run_test("test_upper_hull", {
+>     log_f <- function(x) dnorm(x, log = TRUE)
+>     abs_pts <- c(-2, -1, 0, 1, 2)
+>     hull <- build_upper_hull(abs_pts, log_f)
+>     test_pts <- seq(-3, 3, by = 0.5)
+>     u_vals <- eval_upper_hull(test_pts, hull, -Inf, Inf)
+>     h_vals <- log_f(test_pts)
+>     all_above <- all(u_vals >= h_vals - 1e-6)
+>     cat("  Upper hull >= log_f everywhere: ", all_above, "\n")
+>     all_above
+>   })
+>
+>   run_test("test_lower_hull", {
+>     log_f <- function(x) dnorm(x, log = TRUE)
+>     abs_pts <- c(-2, -1, 0, 1, 2)
+>     hull <- build_upper_hull(abs_pts, log_f)
+>     test_pts <- seq(-1.5, 1.5, by = 0.5)
+>     l_vals <- eval_lower_hull(test_pts, hull)
+>     h_vals <- log_f(test_pts)
+>     all_below <- all(l_vals <= h_vals + 1e-6)
+>     cat("  Lower hull <= log_f at interior points: ", all_below, "\n")
+>     all_below
+>   })
+>
+>   run_test("test_log_concavity_check", {
+>     log_f_normal <- function(x) dnorm(x, log = TRUE)
+>     is_conc <- check_log_concavity(c(-2, -1, 0, 1, 2), log_f_normal)
+>     cat("  Normal is log-concave: ", is_conc, "\n")
+>     log_f_bimodal <- function(x) log(0.5 * dnorm(x, -5, 0.5) + 0.5 * dnorm(x, 5, 0.5))
+>     is_not_conc <- !check_log_concavity(c(-6, -5, 0, 5, 6), log_f_bimodal)
+>     cat("  Bimodal mixture is NOT log-concave: ", is_not_conc, "\n")
+>     is_conc && is_not_conc
+>   })
+>
+>   run_test("test_sample_size", {
+>     set.seed(303)
+>     samples <- ars(500, dnorm)
+>     correct_size <- length(samples) == 500
+>     cat("  Requested 500 samples, got ", length(samples), "\n")
+>     correct_size
+>   })
+>
+>   run_test("test_uniform", {
+>     set.seed(404)
+>     g <- function(x) dunif(x, min = 0, max = 1)
+>     samples <- ars(1000, g, lb = 0, ub = 1)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     cat("  Uniform(0,1): sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean = 0.5, sd = ", round(1/sqrt(12), 4), "\n")
+>     ks <- ks.test(samples, "punif")
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m - 0.5) < 0.1 && abs(s - 1/sqrt(12)) < 0.1 && ks$p.value > 0.01
+>   })
+>
+>   run_test("test_unnormalized_density", {
+>     set.seed(505)
+>     g <- function(x) 100 * exp(-x^2/2)
+>     samples <- ars(1000, g)
+>     m <- mean(samples)
+>     s <- sd(samples)
+>     cat("  Unnormalized Normal: sample mean = ", round(m, 4),
+>         ", sample sd = ", round(s, 4), "\n", sep="")
+>     cat("  Expected: mean ~ 0, sd ~ 1\n")
+>     ks <- ks.test(samples, "pnorm")
+>     cat("  KS test p-value = ", round(ks$p.value, 4), "\n")
+>     abs(m) < 0.15 && abs(s - 1) < 0.2 && ks$p.value > 0.01
+>   })
+>
+>   cat("\n=============================================================\n")
+>   cat("  Summary: ", pass_count, " PASSED, ", fail_count, " FAILED\n", sep="")
+>   cat("  out of ", pass_count + fail_count, " tests\n", sep="")
+>   cat("=============================================================\n")
+>
+>   invisible(list(passed = pass_count, failed = fail_count))
+> }
+>
+> # Run tests if executed as a script
+> if (!interactive()) {
+>   test()
+> }
+> '''.strip()
+>
+> with open('/app/ars.R', 'w') as f:
+>     f.write(code + '\n')
+>
+> print(f'Written {len(code.splitlines())} lines to /app/ars.R')
+> PYEOF
+[2]-  Done                    apt-get update -qq && apt-get install -y -qq r-base > /tmp/r_install.log 2>&1
+root@4ee17a04-b091-4040-a9f5-9d373474cb30:/app#

@@ -1,0 +1,89 @@
+New Terminal Output:
+
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app# python3 << 'PYEOF'
+> import struct
+>
+> V,C,T,L = 50257,768,1024,12
+>
+> f = open('gpt2-124M.ckpt','rb')
+> base = V*C + T*C
+>
+> # If grouped: ln1w is 12*768 = 9216 floats, then ln1b is 9216 floats
+> # So at offset base + 9216, we should find ln1b[0]
+> # And at offset base + 18432, we should find qkvw start
+>
+> # If per-block: at offset base + 768 + 768 = base + 1536, we find c_attn_w
+>
+> # Let's check: at offset base+9216 (grouped ln1b start)
+> f.seek((base + 9216) * 4)
+> d1 = struct.unpack('<10f', f.read(40))
+> print(f'At base+9216 (grouped ln1b[0]): {[round(v,4) for v in d1]}')
+>
+> # At offset base+1536 (per-block c_attn_w start)
+> f.seek((base + 1536) * 4)
+> d2 = struct.unpack('<10f', f.read(40))
+> print(f'At base+1536 (per-block c_attn_w[0]): {[round(v,4) for v in d2]}')
+>
+> # At offset base+18432 (grouped qkvw start)
+> f.seek((base + 18432) * 4)
+> d3 = struct.unpack('<10f', f.read(40))
+> print(f'At base+18432 (grouped qkvw start): {[round(v,4) for v in d3]}')
+>
+> # Let's also check what's at offset base + 768 (could be ln1b[0] for per-block or ln1w[1] for grouped)
+> f.seek((base + 768) * 4)
+> d4 = struct.unpack('<10f', f.read(40))
+> print(f'At base+768: {[round(v,4) for v in d4]}')
+>
+> # Let's check block boundary: if per-block, block_size = 7087872
+> # Block 1 starts at base + 7087872
+> # Its ln1_g should be at that offset
+> f.seek((base + 7087872) * 4)
+> d5 = struct.unpack('<10f', f.read(40))
+> print(f'At base+7087872 (per-block: block1 ln1_g): {[round(v,4) for v in d5]}')
+> print(f'  mean abs: {sum(abs(v) for v in d5)/10:.4f}')
+>
+> # If grouped, at base + 768, it should be ln1w for layer 1
+> # The values should look similar to ln1w for layer 0 (small values around 0)
+> # If per-block, at base + 768, it should be ln1b for layer 0
+> # The values should look like bias values (also small, around 0)
+> # Hard to distinguish...
+>
+> # Better test: check if at base + 12*768 (=9216), the values look like
+> # the start of a weight matrix (many small values) or a bias (also small values)
+> # Actually, let me check a large block of values
+>
+> # If grouped: at base + 9216*2 = 18432, we have qkvw start (768*2304 matrix)
+> # If per-block: at base + 1536, we have c_attn_w (768*2304 matrix)
+> # Both are weight matrices, hard to distinguish
+>
+> # Key test: at base + 1536 + 768*2304 = base + 1536 + 1769472 = base + 1771008
+> # Per-block: this should be c_attn_b (2304 bias values)
+> # Grouped: this would be somewhere in the middle of qkvw
+>
+> f.seek((base + 1771008) * 4)
+> d6 = struct.unpack('<20f', f.read(80))
+> print(f'At base+1771008 (per-block: c_attn_b): {[round(v,4) for v in d6]}')
+> print(f'  These look like biases? mean abs: {sum(abs(v) for v in d6)/20:.4f}')
+>
+> # Compare with the known qkvb location in grouped format
+> # grouped qkvb is at base + 12*768*2 + 12*768*3*768 = base + 18432 + 21233664 = base + 21252096
+> f.seek((base + 21252096) * 4)
+> d7 = struct.unpack('<20f', f.read(80))
+> print(f'At base+21252096 (grouped: qkvb): {[round(v,4) for v in d7]}')
+> print(f'  These look like biases? mean abs: {sum(abs(v) for v in d7)/20:.4f}')
+>
+> f.close()
+> PYEOF
+At base+9216 (grouped ln1b[0]): [0.024, 0.0429, -0.0241, -0.0179, -0.1271, 0.0495, 0.0544, -0.0132, 0.0773, 0.1802]
+At base+1536 (per-block c_attn_w[0]): [0.1053, -0.1532, 0.0007, 0.0586, -0.0348, -0.287, 0.094, -0.1456, -0.0122, 0.3316]
+At base+18432 (grouped qkvw start): [0.0736, 0.0973, -0.0026, -0.0659, -0.0224, -0.2941, -0.0238, 0.1386, 0.0114, -0.0754]
+At base+768: [0.2512, -0.0236, -0.1021, -0.0354, 0.1762, 0.2391, -0.0084, -0.102, 0.0322, 0.0686]
+At base+7087872 (per-block: block1 ln1_g): [-0.0426, -0.1885, -0.172, 0.1367, 0.0091, 0.0312, 0.0843, 0.0389, 0.0044, -0.3104]
+  mean abs: 0.1018
+At base+1771008 (per-block: c_attn_b): [-0.1006, -0.0163, 0.056, -0.1402, 0.0201, 0.0181, -0.068, 0.0214, 0.0219, 0.011, 0.1382, -0.0019, 0.1524, 0.0112, 0.0806
+, 0.0806, 0.0469, 0.0157, -0.0668, 0.0863]
+  These look like biases? mean abs: 0.0577
+At base+21252096 (grouped: qkvb): [0.0004, -0.1801, 0.0424, -0.3436, -0.0057, -0.1943, 0.0248, -0.1286, -0.0189, 0.1008, 0.0683, -0.0228, 0.1074, -0.0904, 0.050
+1, 0.0179, 0.0576, 0.0612, -0.2455, 0.072]
+  These look like biases? mean abs: 0.0916
+root@e6f8d8bb-d70c-4ffd-ac35-1124061dc5bb:/app#
