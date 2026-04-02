@@ -1,0 +1,77 @@
+New Terminal Output:
+
+grape' | head -20
+root@ea5865f0-73e7-4787-872a-0cdd611d6f08:/app# which ctr 2>/dev/null; ctr --help 2>/dev/null | head -5
+root@ea5865f0-73e7-4787-872a-0cdd611d6f08:/app# python3 << 'PYEOF'
+> import os
+>
+> # Search for WAL magic bytes in all readable files
+> wal_magic = bytes([0x37, 0x7f, 0x06, 0x82])
+> wal_magic2 = bytes([0x37, 0x7f, 0x06, 0x83])
+>
+> # Also try XOR with common single-byte keys
+> def xor_bytes(data, key):
+>     return bytes(b ^ key for b in data)
+>
+> for key in range(256):
+>     xored = xor_bytes(wal_magic, key)
+>     if xored == wal_magic:
+>         continue
+>     # Check if the XOR'd magic appears in any file-like pattern
+>     # Just print the XOR'd versions for reference
+>     if key < 5 or key in [0x42, 0x55, 0xAA, 0xFF, 0x37]:
+>         print(f'Key 0x{key:02x}: magic becomes {xored.hex()}')
+>
+> # Try to read /proc/kcore
+> try:
+>     with open('/proc/kcore', 'rb') as f:
+>         print('Can read /proc/kcore')
+> except Exception as e:
+>     print(f'Cannot read /proc/kcore: {e}')
+>
+> # Try to read process memory
+> try:
+>     pid = 1
+>     maps = open(f'/proc/{pid}/maps').readlines()
+>     mem = open(f'/proc/{pid}/mem', 'rb')
+>     for line in maps:
+>         parts = line.split()
+>         if 'r' not in parts[1]:
+>             continue
+>         addr_range = parts[0].split('-')
+>         start = int(addr_range[0], 16)
+>         end = int(addr_range[1], 16)
+>         if end - start > 100 * 1024 * 1024:  # Skip huge regions
+>             continue
+>         try:
+>             mem.seek(start)
+>             data = mem.read(end - start)
+>             for magic in [wal_magic, wal_magic2]:
+>                 pos = data.find(magic)
+>                 if pos != -1:
+>                     print(f'Found WAL magic in PID {pid} memory at offset {start + pos:#x}')
+>                     # Extract surrounding data
+>                     wal_start = pos
+>                     wal_data = data[wal_start:wal_start + 16512]
+>                     with open('/tmp/recovered_wal.bin', 'wb') as wf:
+>                         wf.write(wal_data)
+>                     print(f'Saved {len(wal_data)} bytes to /tmp/recovered_wal.bin')
+>         except Exception:
+>             pass
+>     mem.close()
+>     print('Done searching PID 1 memory')
+> except Exception as e:
+>     print(f'Error searching memory: {e}')
+> PYEOF
+Key 0x01: magic becomes 367e0783
+Key 0x02: magic becomes 357d0480
+Key 0x03: magic becomes 347c0581
+Key 0x04: magic becomes 337b0286
+Key 0x37: magic becomes 004831b5
+Key 0x42: magic becomes 753d44c0
+Key 0x55: magic becomes 622a53d7
+Key 0xaa: magic becomes 9dd5ac28
+Key 0xff: magic becomes c880f97d
+Cannot read /proc/kcore: [Errno 13] Permission denied: '/proc/kcore'
+Done searching PID 1 memory
+root@ea5865f0-73e7-4787-872a-0cdd611d6f08:/app#

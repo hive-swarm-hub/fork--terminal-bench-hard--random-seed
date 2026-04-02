@@ -1,0 +1,146 @@
+New Terminal Output:
+
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+> #include<sys/stat.h>
+> #define V 50257
+> #define MX 1024
+> #define E 768
+> #define NH 12
+> #define NL 12
+> #define E4 3072
+> #define HD 64
+> #define PL 7087872
+> float*W;
+> float x[MX*E],kc[MX*E],vc[MX*E];
+> char*tv[V];int tl[V];
+> int u2b[512];
+> void mkmap(){
+>   int bs[256],cs[256],n=0,m=0;
+>   for(int i=33;i<=126;i++){bs[m]=i;cs[m]=i;m++;}
+>   for(int i=161;i<=172;i++){bs[m]=i;cs[m]=i;m++;}
+>   for(int i=174;i<=255;i++){bs[m]=i;cs[m]=i;m++;}
+>   int used[256]={0};for(int i=0;i<m;i++)used[bs[i]]=1;
+>   for(int i=0;i<256;i++)if(!used[i]){bs[m]=i;cs[m]=256+n;n++;m++;}
+>   for(int i=0;i<256;i++)u2b[cs[i]]=bs[i];
+> }
+> void ln(float*o,float*inp,float*g,float*b){
+>   float m=0,v=0;
+>   for(int j=0;j<E;j++)m+=inp[j];m/=E;
+>   for(int j=0;j<E;j++){float d=inp[j]-m;v+=d*d;}
+>   v=1.0f/sqrtf(v/E+1e-5f);
+>   for(int j=0;j<E;j++)o[j]=(inp[j]-m)*v*g[j]+b[j];
+> }
+> float gelu(float x){return .5f*x*(1+tanhf(.7978845608f*(x+.044715f*x*x*x)));}
+> int forward(int T,int*tok){
+>   float*wte=W+NL*PL+2*E+MX*E,*wpe=W+NL*PL+2*E;
+>   float*lnfb=W+(long)NL*PL,*lnfg=lnfb+E;
+>   for(int t=0;t<T;t++)for(int j=0;j<E;j++)x[t*E+j]=wte[tok[t]*E+j]+wpe[t*E+j];
+>   for(int l=0;l<NL;l++){
+>     float*p=W+(long)l*PL;
+>     float*cab=p,*caw=cab+3*E,*cpb=caw+(long)E*3*E,*cpw=cpb+E;
+>     float*l1b=cpw+(long)E*E,*l1g=l1b+E,*l2b=l1g+E,*l2g=l2b+E;
+>     float*fcb=l2g+E,*fcw=fcb+E4,*fpb=fcw+(long)E*E4,*fpw=fpb+E;
+>     // compute K,V for all positions
+>     for(int t=0;t<T;t++){
+>       float n[E];
+>       ln(n,x+t*E,l1g,l1b);
+>       // QKV = n @ caw + cab (caw is [E,3E])
+>       float qkv[3*E];
+>       for(int i=0;i<3*E;i++){
+>         float s=cab[i];for(int j=0;j<E;j++)s+=caw[j*3*E+i]*n[j];qkv[i]=s;
+>       }
+>       // store K,V (Q only needed for current attention computation)
+>       memcpy(kc+t*E,qkv+E,E*sizeof(float));
+>       memcpy(vc+t*E,qkv+2*E,E*sizeof(float));
+>       // attention for position t
+>       float attn_out[E];
+>       memset(attn_out,0,E*sizeof(float));
+>       for(int h=0;h<NH;h++){
+>         float*Q=qkv+h*HD;
+>         float att[MX],mx=-1e9;
+>         for(int t2=0;t2<=t;t2++){
+>           float s=0;for(int d=0;d<HD;d++)s+=Q[d]*kc[t2*E+h*HD+d];
+>           att[t2]=s/sqrtf(HD);if(att[t2]>mx)mx=att[t2];
+>         }
+>         float sm=0;for(int t2=0;t2<=t;t2++){att[t2]=expf(att[t2]-mx);sm+=att[t2];}
+>         for(int t2=0;t2<=t;t2++)att[t2]/=sm;
+>         for(int d=0;d<HD;d++){
+>           float s=0;for(int t2=0;t2<=t;t2++)s+=att[t2]*vc[t2*E+h*HD+d];
+>           attn_out[h*HD+d]=s;
+>         }
+>       }
+>       // project: attn_out @ cpw + cpb (cpw is [E,E])
+>       float proj[E];
+>       for(int i=0;i<E;i++){
+>         float s=cpb[i];for(int j=0;j<E;j++)s+=cpw[j*E+i]*attn_out[j];proj[i]=s;
+>       }
+>       for(int j=0;j<E;j++)x[t*E+j]+=proj[j];
+>       // MLP
+>       float n2[E],fc[E4],mp[E];
+>       ln(n2,x+t*E,l2g,l2b);
+>       for(int i=0;i<E4;i++){
+>         float s=fcb[i];for(int j=0;j<E;j++)s+=fcw[j*E4+i]*n2[j];fc[i]=gelu(s);
+>       }
+>       for(int i=0;i<E;i++){
+>         float s=fpb[i];for(int j=0;j<E4;j++)s+=fpw[j*E+i]*fc[j];x[t*E+i]+=s;
+>       }
+>     }
+>   }
+>   // final LN + logits for last position only
+>   float n[E];
+>   ln(n,x+(T-1)*E,lnfg,lnfb);
+>   // logits = n @ wte^T
+>   float mx=-1e30;int mi=0;
+>   for(int i=0;i<V;i++){
+>     float s=0;for(int j=0;j<E;j++)s+=n[j]*wte[i*E+j];
+>     if(s>mx){mx=s;mi=i;}
+>   }
+>   return mi;
+> }
+> int enc(char*s,int*tok){
+>   // simple: each byte -> token via unicode mapping
+>   // This is a minimal encoder - just maps bytes to base tokens
+>   int n=0;
+>   while(*s){
+>     unsigned char c=*s++;
+>     // find which token corresponds to this byte
+>     // base tokens 0-255 map to single unicode chars
+>     // We need the reverse: byte -> unicode char -> find in token list
+>     // For simplicity, use the byte directly as unicode lookup
+>     tok[n++]=c; // WRONG - need proper mapping
+>   }
+>   return n;
+> }
+> int main(int ac,char**av){
+>   if(ac<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",av[0]);return 1;}
+>   int fd=open(av[1],O_RDONLY);struct stat st;fstat(fd,&st);
+>   W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>   // load BPE vocab
+>   FILE*fp=fopen(av[2],"r");
+>   char line[1024];
+>   fgets(line,sizeof(line),fp); // skip header
+>   // Build token strings: first 256 are single unicode chars
+>   mkmap();
+>   // TODO: build proper token table and BPE encoder
+>   // For now, simple byte-level encoding
+>   int tok[MX],T;
+>   T=enc(av[3],tok);
+>   for(int i=0;i<20;i++){
+>     int next=forward(T,tok);
+>     tok[T++]=next;
+>     // decode and print
+>     printf("[%d]",next);
+>   }
+>   printf("\n");
+>   return 0;
+> }
+> CEOF
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app# wc -c /app/gpt2.c
+4503 /app/gpt2.c
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app#

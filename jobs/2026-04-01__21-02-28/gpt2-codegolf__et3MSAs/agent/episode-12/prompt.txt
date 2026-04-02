@@ -1,0 +1,186 @@
+New Terminal Output:
+
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+> #include<sys/stat.h>
+> #define V 50257
+> #define MX 1024
+> #define E 768
+> #define NH 12
+> #define NL 12
+> #define E4 3072
+> #define HD 64
+> #define PL 7087872L
+> float*W,x[E];
+> float KC[NL][MX*E],VC[NL][MX*E];
+> char*ts[V];int tn[V];
+> int b2u[256];
+> void mkmap(){
+>   int bs[256],cs[256],n=0,m=0;
+>   for(int i=33;i<=126;i++){bs[m]=i;cs[m]=i;m++;}
+>   for(int i=161;i<=172;i++){bs[m]=i;cs[m]=i;m++;}
+>   for(int i=174;i<=255;i++){bs[m]=i;cs[m]=i;m++;}
+>   int u[256]={};for(int i=0;i<m;i++)u[bs[i]]=1;
+>   for(int i=0;i<256;i++)if(!u[i]){bs[m]=i;cs[m]=256+n;n++;m++;}
+>   for(int i=0;i<256;i++)b2u[bs[i]]=cs[i];
+> }
+> int u2b(int cp){// unicode codepoint to byte
+>   for(int i=0;i<256;i++)if(b2u[i]==cp)return i;
+>   return -1;
+> }
+> void ln(float*o,float*a,float*g,float*b){
+>   float m=0,v=0;
+>   for(int i=0;i<E;i++)m+=a[i];m/=E;
+>   for(int i=0;i<E;i++){float d=a[i]-m;v+=d*d;}
+>   v=1/sqrtf(v/E+1e-5f);
+>   for(int i=0;i<E;i++)o[i]=(a[i]-m)*v*g[i]+b[i];
+> }
+> float gelu(float a){return .5f*a*(1+tanhf(.7978845608f*(a+.044715f*a*a*a)));}
+> // Process one position t through all layers. x[] has the residual stream.
+> void step(int t){
+>   for(int l=0;l<NL;l++){
+>     float*p=W+l*PL;
+>     float*cab=p,*caw=cab+3*E,*cpb=caw+E*3L*E,*cpw=cpb+E;
+>     float*l1b=cpw+(long)E*E,*l1g=l1b+E,*l2b=l1g+E,*l2g=l2b+E;
+>     float*fcb=l2g+E,*fcw=fcb+E4,*fpb=fcw+(long)E*E4,*fpw=fpb+E;
+>     float n[E],qkv[3*E],ao[E];
+>     ln(n,x,l1g,l1b);
+>     for(int i=0;i<3*E;i++){float s=cab[i];for(int j=0;j<E;j++)s+=caw[j*3L*E+i]*n[j];qkv[i]=s;}
+>     memcpy(KC[l]+t*E,qkv+E,E*4);
+>     memcpy(VC[l]+t*E,qkv+2*E,E*4);
+>     memset(ao,0,E*4);
+>     for(int h=0;h<NH;h++){
+>       float*Q=qkv+h*HD,att[MX],mx=-1e9;
+>       for(int t2=0;t2<=t;t2++){
+>         float s=0;for(int d=0;d<HD;d++)s+=Q[d]*KC[l][t2*E+h*HD+d];
+>         att[t2]=s*.125f;if(att[t2]>mx)mx=att[t2];
+>       }
+>       float sm=0;for(int t2=0;t2<=t;t2++){att[t2]=expf(att[t2]-mx);sm+=att[t2];}
+>       for(int d=0;d<HD;d++){float s=0;for(int t2=0;t2<=t;t2++)s+=att[t2]/sm*VC[l][t2*E+h*HD+d];ao[h*HD+d]=s;}
+>     }
+>     float pr[E];
+>     for(int i=0;i<E;i++){float s=cpb[i];for(int j=0;j<E;j++)s+=cpw[j*(long)E+i]*ao[j];pr[i]=s;}
+>     for(int i=0;i<E;i++)x[i]+=pr[i];
+>     float n2[E],fc[E4];
+>     ln(n2,x,l2g,l2b);
+>     for(int i=0;i<E4;i++){float s=fcb[i];for(int j=0;j<E;j++)s+=fcw[j*(long)E4+i]*n2[j];fc[i]=gelu(s);}
+>     for(int i=0;i<E;i++){float s=fpb[i];for(int j=0;j<E4;j++)s+=fpw[j*(long)E+i]*fc[j];x[i]+=s;}
+>   }
+> }
+> int argmax(){
+>   float*lnfb=W+NL*PL,*lnfg=lnfb+E,*wte=W+NL*PL+2*E+MX*E;
+>   float n[E];ln(n,x,lnfg,lnfb);
+>   float mx=-1e30;int mi=0;
+>   for(int i=0;i<V;i++){float s=0;for(int j=0;j<E;j++)s+=n[j]*wte[i*E+j];if(s>mx){mx=s;mi=i;}}
+>   return mi;
+> }
+> void loadbpe(char*fn){
+>   FILE*f=fopen(fn,"r");char line[4096];
+>   fgets(line,sizeof line,f);
+>   mkmap();
+>   // base tokens: single unicode chars for bytes 0-255
+>   for(int i=0;i<256;i++){
+>     int cp=b2u[i];char buf[8];int n=0;
+>     if(cp<128)buf[n++]=cp;else if(cp<2048){buf[n++]=192|(cp>>6);buf[n++]=128|(cp&63);}
+>     buf[n]=0;ts[i]=strdup(buf);tn[i]=n;
+>   }
+>   int id=256;
+>   while(fgets(line,sizeof line,f)&&id<V){
+>     char*sp=strchr(line,' ');
+>     if(!sp)continue;
+>     int nl=strlen(line);if(line[nl-1]=='\n')line[--nl]=0;
+>     *sp=0;char*a=line,*b=sp+1;
+>     // find tokens a and b
+>     int ai=-1,bi=-1;
+>     for(int i=0;i<id;i++){
+>       if(ai<0&&tn[i]==strlen(a)&&!memcmp(ts[i],a,tn[i]))ai=i;
+>       if(bi<0&&tn[i]==strlen(b)&&!memcmp(ts[i],b,tn[i]))bi=i;
+>     }
+>     int la=strlen(a),lb=strlen(b);
+>     ts[id]=malloc(la+lb+1);
+>     memcpy(ts[id],a,la);memcpy(ts[id]+la,b,lb);ts[id][la+lb]=0;
+>     tn[id]=la+lb;
+>     id++;
+>   }
+>   fclose(f);
+> }
+> int encode(char*text,int*tok){
+>   // convert bytes to unicode tokens
+>   int n=0;
+>   unsigned char*s=(unsigned char*)text;
+>   while(*s){tok[n++]=b2u[*s];s++;} // store as unicode codepoints temporarily
+>   // Now tok[] has unicode codepoints, need to convert to token IDs
+>   // Build array of token strings from the codepoints
+>   // Actually let me build a list of UTF-8 token strings and do BPE
+>   char*pieces[MX];int pn=n;
+>   for(int i=0;i<n;i++){
+>     int cp=tok[i];char buf[4];int bl=0;
+>     if(cp<128)buf[bl++]=cp;else{buf[bl++]=192|(cp>>6);buf[bl++]=128|(cp&63);}
+>     pieces[i]=malloc(bl+1);memcpy(pieces[i],buf,bl);pieces[i][bl]=0;
+>   }
+>   // BPE merge loop
+>   for(int mid=256;mid<V;mid++){
+>     if(pn<=1)break;
+>     for(int i=0;i<pn-1;i++){
+>       if(strlen(pieces[i])==strlen(ts[mid])-strlen(pieces[i+1])){
+>         // check if concat matches
+>         int la=strlen(pieces[i]),lb=strlen(pieces[i+1]);
+>         if(la+lb==tn[mid]&&!memcmp(pieces[i],ts[mid],la)&&!memcmp(pieces[i+1],ts[mid]+la,lb)){
+>           free(pieces[i]);
+>           pieces[i]=strdup(ts[mid]);
+>           free(pieces[i+1]);
+>           for(int j=i+1;j<pn-1;j++)pieces[j]=pieces[j+1];
+>           pn--;i--;
+>         }
+>       }
+>     }
+>   }
+>   // convert pieces to token IDs
+>   for(int i=0;i<pn;i++){
+>     int sl=strlen(pieces[i]);
+>     tok[i]=0;
+>     for(int j=0;j<V;j++)if(tn[j]==sl&&!memcmp(ts[j],pieces[i],sl)){tok[i]=j;break;}
+>     free(pieces[i]);
+>   }
+>   return pn;
+> }
+> void decode(int id){
+>   char*s=ts[id];int n=tn[id];
+>   int i=0;
+>   while(i<n){
+>     int cp;unsigned char c=s[i];
+>     if(c<128){cp=c;i++;}else{cp=((c&31)<<6)|(s[i+1]&63);i+=2;}
+>     int b=u2b(cp);
+>     if(b>=0)putchar(b);
+>   }
+> }
+> int main(int ac,char**av){
+>   if(ac<4)return 1;
+>   int fd=open(av[1],O_RDONLY);struct stat st;fstat(fd,&st);
+>   W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>   loadbpe(av[2]);
+>   int tok[MX],T=encode(av[3],tok);
+>   float*wte=W+NL*PL+2*E+MX*E,*wpe=W+NL*PL+2*E;
+>   for(int t=0;t<T;t++){
+>     for(int j=0;j<E;j++)x[j]=wte[tok[t]*E+j]+wpe[t*E+j];
+>     step(t);
+>   }
+>   for(int i=0;i<20;i++){
+>     int next=argmax();
+>     tok[T]=next;
+>     decode(next);fflush(stdout);
+>     for(int j=0;j<E;j++)x[j]=wte[next*E+j]+wpe[T*E+j];
+>     T++;step(T-1);
+>   }
+>   printf("\n");
+>   return 0;
+> }
+> CEOF
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app# wc -c /app/gpt2.c
+5835 /app/gpt2.c
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app#

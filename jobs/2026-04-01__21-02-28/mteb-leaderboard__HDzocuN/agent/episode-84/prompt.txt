@@ -1,0 +1,114 @@
+New Terminal Output:
+__
+root@adb2683c-1792-4b5d-9d92-49cc37e72cfe:/app# sed -n '131,240p' /usr/local/lib/python3.10/site-packages/mteb/leaderboard/table.py
+def scores_to_tables(scores_long: list[dict], search_query: str | None = None):
+    if not scores_long:
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return gr.DataFrame(no_results_frame), gr.DataFrame(no_results_frame)
+    data = pd.DataFrame.from_records(scores_long)
+    per_task = data.pivot(index="model_name", columns="task_name", values="score")
+    mean_per_type = get_means_per_types(per_task)
+    mean_per_type = mean_per_type.pivot(
+        index="model_name", columns="task_type", values="score"
+    )
+    mean_per_type.columns = [
+        split_on_capital(column) for column in mean_per_type.columns
+    ]
+    to_remove = per_task.isna().all(axis="columns")
+    if search_query:
+        names = per_task.index.get_level_values("model_name")
+        names = pd.Series(names, index=per_task.index)
+        to_remove |= ~names.str.contains(search_query, regex=True)
+    if to_remove.all():
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return gr.DataFrame(no_results_frame), gr.DataFrame(no_results_frame)
+    models_to_remove = list(per_task[to_remove].index)
+    typed_mean = mean_per_type.mean(skipna=False, axis=1)
+    overall_mean = per_task.mean(skipna=False, axis=1)
+    joint_table = mean_per_type.copy()
+    per_task = per_task.drop(models_to_remove, axis=0)
+    joint_table = joint_table.drop(models_to_remove, axis=0)
+    joint_table.insert(0, "mean", overall_mean)
+    joint_table.insert(1, "mean_by_task_type", typed_mean)
+    joint_table["borda_rank"] = get_borda_rank(per_task)
+    joint_table = joint_table.sort_values("borda_rank", ascending=True)
+    per_task["borda_rank"] = joint_table["borda_rank"]
+    per_task = per_task.sort_values("borda_rank", ascending=True)
+    per_task = per_task.drop(columns=["borda_rank"])
+    joint_table = joint_table.reset_index()
+    model_metas = joint_table["model_name"].map(failsafe_get_model_meta)
+    joint_table = joint_table[model_metas.notna()]
+    joint_table["model_link"] = model_metas.map(lambda m: m.reference)
+    joint_table.insert(
+        1,
+        "Max Tokens",
+        model_metas.map(lambda m: format_max_tokens(m.max_tokens)),
+    )
+    joint_table.insert(
+        1,
+        "Embedding Dimensions",
+        model_metas.map(lambda m: str(int(m.embed_dim)) if m.embed_dim else "Unknown"),
+    )
+    joint_table.insert(
+        1,
+        "Number of Parameters",
+        model_metas.map(lambda m: format_n_parameters(m.n_parameters)),
+    )
+    joint_table.insert(
+        1,
+        "Memory Usage (MB)",
+        model_metas.map(
+            lambda m: str(int(m.memory_usage_mb)) if m.memory_usage_mb else "Unknown"
+        ),
+    )
+    tasks = get_tasks(tasks=list(data["task_name"].unique()))
+    joint_table.insert(
+        1, "Zero-shot", model_metas.map(lambda m: m.zero_shot_percentage(tasks))
+    )
+    joint_table["Zero-shot"] = joint_table["Zero-shot"].fillna(-1)
+    # joint_table = joint_table[joint_table["Zero-shot"].notna()]
+    # Removing HF organization from model
+    joint_table["model_name"] = joint_table["model_name"].map(
+        lambda name: name.split("/")[-1]
+    )
+    # Adding markdown link to model names
+    name_w_link = (
+        "[" + joint_table["model_name"] + "](" + joint_table["model_link"] + ")"
+    )
+    joint_table["model_name"] = joint_table["model_name"].mask(
+        joint_table["model_link"].notna(), name_w_link
+    )
+    joint_table = joint_table.drop(columns=["model_link"])
+    joint_table = joint_table.rename(
+        columns={
+            "model_name": "Model",
+            "mean_by_task_type": "Mean (TaskType)",
+            "mean": "Mean (Task)",
+        }
+    )
+    per_task = per_task.reset_index()
+    per_task["model_name"] = per_task["model_name"].map(
+        lambda name: name.split("/")[-1]
+    )
+    per_task = per_task.rename(
+        columns={
+            "model_name": "Model",
+        }
+    )
+    joint_table.insert(0, "Rank (Borda)", joint_table.pop("borda_rank"))
+    column_types = get_column_types(joint_table)
+    # setting model name column to markdown
+    column_types[1] = "markdown"
+    score_columns = ["Mean (Task)", "Mean (TaskType)", *mean_per_type.columns]
+
+    return joint_table, per_task, score_columns, column_types
+
+
+def apply_styling(
+    joint_table: pd.DataFrame,
+    per_task: pd.DataFrame,
+root@adb2683c-1792-4b5d-9d92-49cc37e72cfe:/app#

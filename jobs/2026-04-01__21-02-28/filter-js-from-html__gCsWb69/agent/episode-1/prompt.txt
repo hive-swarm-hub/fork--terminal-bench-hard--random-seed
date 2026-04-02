@@ -1,0 +1,258 @@
+New Terminal Output:
+root@343124a9-2417-4218-81f4-bea01fcc2c60:/app# export PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS='-F -X'
+root@343124a9-2417-4218-81f4-bea01fcc2c60:/app# cat > /app/filter.py << 'PYTHON_EOF'
+> import sys
+> import re
+>
+> def remove_javascript(html):
+>     # Remove <script> tags and their contents (case-insensitive, handles attributes)
+>     # Handle both <script>...</script> and self-closing <script/> variations
+>     html = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Remove standalone <script> tags that might not have closing tags
+>     html = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove <script> open tags without close (edge case)
+>     html = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove </script> close tags (orphaned)
+>     html = re.sub(
+>         r'</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Remove <noscript> tags and their contents
+>     # Actually, noscript is not JavaScript - it's content shown when JS is disabled
+>     # We should preserve noscript content. Let's skip this.
+>
+>     # Function to process a single HTML tag - remove dangerous attributes
+>     def clean_tag(match):
+>         tag = match.group(0)
+>
+>         # Don't process comments or closing tags
+>         if tag.startswith('<!--') or tag.startswith('</'):
+>             return tag
+>
+>         # Remove on* event handler attributes
+>         # This handles: onclick="..." onclick='...' onclick=value
+>         # Need to be careful with quotes and escaping
+>
+>         # Remove on* attributes with double quotes
+>         tag = re.sub(
+>             r'\s+on\w+\s*=\s*"[^"]*"',
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with single quotes
+>         tag = re.sub(
+>             r"\s+on\w+\s*=\s*'[^']*'",
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with no quotes (value ends at space or >)
+>         tag = re.sub(
+>             r'\s+on\w+\s*=\s*[^\s\'">`]+',
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with no value
+>         tag = re.sub(
+>             r'\s+on\w+(?=\s|/?>)',
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Replace javascript: URLs in href, src, action, formaction, data, etc.
+>         # Match attribute="javascript:..." and replace the value
+>         def replace_js_url_double(m):
+>             attr_name = m.group(1)
+>             return attr_name + '=""'
+>
+>         def replace_js_url_single(m):
+>             attr_name = m.group(1)
+>             return attr_name + "=''"
+>
+>         def replace_js_url_bare(m):
+>             attr_name = m.group(1)
+>             return attr_name + '=""'
+>
+>         # javascript: in double-quoted attributes
+>         tag = re.sub(
+>             r'((?:href|src|action|formaction|data|background|dynsrc|lowsrc|xlink:href)\s*=\s*)"\s*(?:javascript|vbscript|livescript)\s*:[^"]*"',
+>             replace_js_url_double,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # javascript: in single-quoted attributes
+>         tag = re.sub(
+>             r"((?:href|src|action|formaction|data|background|dynsrc|lowsrc|xlink:href)\s*=\s*)'\s*(?:javascript|vbscript|livescript)\s*:[^']*'",
+>             replace_js_url_single,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # javascript: in unquoted attributes
+>         tag = re.sub(
+>             r'((?:href|src|action|formaction|data|background|dynsrc|lowsrc|xlink:href)\s*=\s*)(?:javascript|vbscript|livescript)\s*:[^\s>]*',
+>             replace_js_url_bare,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Handle data: URIs that could contain script (data:text/html with script)
+>         # Be conservative - only remove data: URIs in src/href that contain script
+>         def check_data_uri_double(m):
+>             attr_name = m.group(1)
+>             value = m.group(2)
+>             if re.search(r'<script|javascript:|on\w+\s*=', value, re.IGNORECASE):
+>                 return attr_name + '""'
+>             return m.group(0)
+>
+>         tag = re.sub(
+>             r'((?:href|src)\s*=\s*)("data:[^"]*")',
+>             check_data_uri_double,
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         return tag
+>
+>     # Process all HTML tags (opening tags with attributes)
+>     # Match opening tags: <tagname ...>
+>     html = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         clean_tag,
+>         html
+>     )
+>
+>     # Remove HTML comments that might contain conditional JS or IE hacks
+>     # Be careful: only remove comments that contain script-like content
+>     # Actually, let's remove comments that contain suspicious content
+>     def clean_comment(match):
+>         comment = match.group(0)
+>         # Check if comment contains script tags or javascript
+>         if re.search(r'<script|javascript:|on\w+\s*=', comment, re.IGNORECASE):
+>             return ''
+>         return comment
+>
+>     html = re.sub(
+>         r'<!--.*?-->',
+>         clean_comment,
+>         html,
+>         flags=re.DOTALL
+>     )
+>
+>     # Remove <meta> tags with http-equiv="refresh" containing javascript
+>     html = re.sub(
+>         r'<meta[^>]*http-equiv\s*=\s*["\']?refresh["\']?[^>]*javascript[^>]*/?>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Remove <iframe> tags with javascript: src (but keep iframes with normal src)
+>     # Already handled by the javascript: URL removal above
+>
+>     # Remove <object> and <embed> tags that reference scripts
+>     # Be conservative - only remove if they contain javascript references
+>
+>     # Remove <base> tags with javascript: href
+>     # Already handled above
+>
+>     # Remove SVG event handlers - already handled by the on* attribute removal
+>
+>     # Handle expression() in style attributes (IE CSS expression)
+>     def clean_style_attr_double(match):
+>         prefix = match.group(1)
+>         style_val = match.group(2)
+>         # Remove expression(), url(javascript:), and similar
+>         cleaned = re.sub(r'expression\s*\([^)]*\)', '', style_val, flags=re.IGNORECASE)
+>         cleaned = re.sub(r'url\s*\(\s*["\']?\s*javascript:[^)]*\)', '', cleaned, flags=re.IGNORECASE)
+>         cleaned = re.sub(r'-moz-binding\s*:[^;"]*', '', cleaned, flags=re.IGNORECASE)
+>         cleaned = re.sub(r'behavior\s*:[^;"]*', '', cleaned, flags=re.IGNORECASE)
+>         return prefix + cleaned + '"'
+>
+>     def clean_style_attr_single(match):
+>         prefix = match.group(1)
+>         style_val = match.group(2)
+>         cleaned = re.sub(r'expression\s*\([^)]*\)', '', style_val, flags=re.IGNORECASE)
+>         cleaned = re.sub(r"url\s*\(\s*[\"']?\s*javascript:[^)]*\)", '', cleaned, flags=re.IGNORECASE)
+>         cleaned = re.sub(r'-moz-binding\s*:[^;\']*', '', cleaned, flags=re.IGNORECASE)
+>         cleaned = re.sub(r"behavior\s*:[^;\']*", '', cleaned, flags=re.IGNORECASE)
+>         return prefix + cleaned + "'"
+>
+>     html = re.sub(
+>         r'(style\s*=\s*")([^"]*)',
+>         clean_style_attr_double,
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     html = re.sub(
+>         r"(style\s*=\s*')([^']*)",
+>         clean_style_attr_single,
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # Remove <style> blocks containing expression() or javascript
+>     def clean_style_block(match):
+>         open_tag = match.group(1)
+>         content = match.group(2)
+>         close_tag = match.group(3)
+>         # Remove expression() calls
+>         content = re.sub(r'expression\s*\([^)]*\)', '', content, flags=re.IGNORECASE)
+>         content = re.sub(r'url\s*\(\s*["\']?\s*javascript:[^)]*\)', '', content, flags=re.IGNORECASE)
+>         content = re.sub(r'-moz-binding\s*:[^;}}]*', '', content, flags=re.IGNORECASE)
+>         content = re.sub(r'behavior\s*:[^;}}]*', '', content, flags=re.IGNORECASE)
+>         return open_tag + content + close_tag
+>
+>     html = re.sub(
+>         r'(<style\b[^>]*>)(.*?)(</style\s*>)',
+>         clean_style_block,
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     # Read the file
+>     with open(filepath, 'r', encoding='utf-8', errors='surrogateescape') as f:
+>         content = f.read()
+>
+>     # Remove JavaScript
+>     cleaned = remove_javascript(content)
+>
+>     # Write back in-place
+>     with open(filepath, 'w', encoding='utf-8', errors='surrogateescape') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@343124a9-2417-4218-81f4-bea01fcc2c60:/app#

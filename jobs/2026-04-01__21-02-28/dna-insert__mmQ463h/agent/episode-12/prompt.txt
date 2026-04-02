@@ -1,0 +1,186 @@
+New Terminal Output:
+
+root@c679916f-2427-42d4-9a71-273856fbd718:/app# cat > /app/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+> from Bio import SeqIO
+>
+> def get_tm(seq):
+>     """Get melting temperature using primer3's oligotm with specified parameters."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> # Read sequences
+> records = list(SeqIO.parse('sequences.fasta', 'fasta'))
+> input_seq = str(records[0].seq).lower()
+> output_seq = str(records[1].seq).lower()
+>
+> # Find the mutation
+> prefix_len = 0
+> while prefix_len < min(len(input_seq), len(output_seq)) and input_seq[prefix_len] == output_seq[prefix_len]:
+>     prefix_len += 1
+>
+> suffix_len = 0
+> while suffix_len < min(len(input_seq), len(output_seq)) - prefix_len and input_seq[-(suffix_len+1)] == output_seq[-(suffix_len+1)]:
+>     suffix_len += 1
+>
+> in_start = prefix_len
+> in_end = len(input_seq) - suffix_len
+> out_start = prefix_len
+> out_end = len(output_seq) - suffix_len
+>
+> input_deleted = input_seq[in_start:in_end]
+> output_inserted = output_seq[out_start:out_end]
+>
+> print(f"Mutation type: deletion of '{input_deleted}' ({len(input_deleted)} bp), insertion of '{output_inserted}' ({len(output_inserted)} bp)")
+> print(f"Insertion point in input: position {in_start}")
+> print()
+>
+> # For Q5 SDM kit with an insertion:
+> # Forward primer: 5'-[inserted sequence]-[annealing downstream of insertion point]
+> # Reverse primer: reverse complement of sequence upstream of insertion point
+> # Both anneal to the input template
+>
+> # The input is circular, so we can wrap around
+> # Position in_start (215) is the insertion point
+> # Forward primer anneals starting at position in_start going forward
+> # Reverse primer anneals ending at position in_start-1 going backward (i.e., RC of upstream)
+>
+> # Since the plasmid is circular, handle wrapping
+> def get_circular_seq(seq, start, length):
+>     """Get a subsequence from a circular sequence."""
+>     result = []
+>     for i in range(length):
+>         result.append(seq[(start + i) % len(seq)])
+>     return ''.join(result)
+>
+> # Find optimal annealing lengths
+> min_len = 15
+> max_len = 45
+> min_tm = 58.0
+> max_tm = 72.0
+> max_tm_diff = 5.0
+>
+> # Compute Tm for all possible forward annealing lengths
+> fwd_options = []
+> for length in range(min_len, max_len + 1):
+>     anneal_seq = get_circular_seq(input_seq, in_start, length)
+>     tm = get_tm(anneal_seq)
+>     if min_tm <= tm <= max_tm:
+>         fwd_options.append((length, anneal_seq, tm))
+>
+> print("Forward annealing options (length, Tm):")
+> for length, seq, tm in fwd_options:
+>     print(f"  len={length}, Tm={tm:.2f}, seq={seq.upper()}")
+>
+> # Compute Tm for all possible reverse annealing lengths
+> # Reverse primer anneals upstream of the insertion point
+> # The annealing part is the reverse complement of input_seq[in_start-length:in_start]
+> rev_options = []
+> for length in range(min_len, max_len + 1):
+>     # Get the upstream region
+>     start_pos = (in_start - length) % len(input_seq)
+>     anneal_template = get_circular_seq(input_seq, start_pos, length)
+>     anneal_seq = reverse_complement(anneal_template)
+>     tm = get_tm(anneal_seq)
+>     if min_tm <= tm <= max_tm:
+>         rev_options.append((length, anneal_seq, tm))
+>
+> print("\nReverse annealing options (length, Tm):")
+> for length, seq, tm in rev_options:
+>     print(f"  len={length}, Tm={tm:.2f}, seq={seq.upper()}")
+>
+> # Find best pair with Tm within 5°C of each other
+> best_pair = None
+> best_diff = float('inf')
+> for fwd_len, fwd_seq, fwd_tm in fwd_options:
+>     for rev_len, rev_seq, rev_tm in rev_options:
+>         diff = abs(fwd_tm - rev_tm)
+>         if diff <= max_tm_diff:
+>             if best_pair is None or diff < best_diff:
+>                 best_diff = diff
+>                 best_pair = (fwd_len, fwd_seq, fwd_tm, rev_len, rev_seq, rev_tm)
+>
+> if best_pair is None:
+>     print("ERROR: No valid primer pair found!")
+>     sys.exit(1)
+>
+> fwd_len, fwd_anneal, fwd_tm, rev_len, rev_anneal, rev_tm = best_pair
+>
+> # Construct full primers
+> # Forward: insertion tail + annealing region
+> if len(output_inserted) > 0:
+>     fwd_primer = output_inserted.upper() + fwd_anneal.upper()
+> else:
+>     fwd_primer = fwd_anneal.upper()
+>
+> # Reverse: just the annealing region (already RC)
+> rev_primer = rev_anneal.upper()
+>
+> print(f"\n=== Selected Primer Pair ===")
+> print(f"Forward primer: {fwd_primer}")
+> print(f"  Tail (insertion): {output_inserted.upper()} ({len(output_inserted)} bp)")
+> print(f"  Annealing: {fwd_anneal.upper()} ({fwd_len} bp, Tm={fwd_tm:.2f})")
+> print(f"Reverse primer: {rev_primer}")
+> print(f"  Annealing: {rev_anneal.upper()} ({rev_len} bp, Tm={rev_tm:.2f})")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}")
+>
+> # Write output
+> with open('primers.fasta', 'w') as f:
+>     f.write(f">forward_primer\n{fwd_primer}\n")
+>     f.write(f">reverse_primer\n{rev_primer}\n")
+>
+> print("\nPrimers written to primers.fasta")
+> PYEOF
+root@c679916f-2427-42d4-9a71-273856fbd718:/app# python3 /app/design_primers.py
+Mutation type: deletion of '' (0 bp), insertion of 'tagattagaagaagaattaagaagaagattaacagaaag' (39 bp)
+Insertion point in input: position 215
+
+Forward annealing options (length, Tm):
+  len=15, Tm=59.54, seq=CAAGGGCGAGGAGCT
+  len=16, Tm=61.24, seq=CAAGGGCGAGGAGCTG
+  len=17, Tm=63.28, seq=CAAGGGCGAGGAGCTGT
+  len=18, Tm=63.81, seq=CAAGGGCGAGGAGCTGTT
+  len=19, Tm=64.67, seq=CAAGGGCGAGGAGCTGTTC
+  len=20, Tm=66.29, seq=CAAGGGCGAGGAGCTGTTCA
+  len=21, Tm=67.18, seq=CAAGGGCGAGGAGCTGTTCAC
+  len=22, Tm=69.15, seq=CAAGGGCGAGGAGCTGTTCACC
+  len=23, Tm=71.14, seq=CAAGGGCGAGGAGCTGTTCACCG
+
+Reverse annealing options (length, Tm):
+  len=28, Tm=58.04, seq=CTCATATGTATATCTCCTTCTTAAAGTT
+  len=30, Tm=58.45, seq=CTCATATGTATATCTCCTTCTTAAAGTTAA
+  len=31, Tm=58.93, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAA
+  len=32, Tm=59.84, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAAC
+  len=33, Tm=60.95, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACA
+  len=34, Tm=61.31, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+  len=35, Tm=61.65, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  len=36, Tm=61.96, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  len=37, Tm=62.15, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  len=38, Tm=62.44, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  len=39, Tm=62.25, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  len=40, Tm=62.42, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  len=41, Tm=62.68, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  len=42, Tm=62.93, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  len=43, Tm=63.35, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  len=44, Tm=64.00, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  len=45, Tm=63.81, seq=CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+
+=== Selected Primer Pair ===
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+  Tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 bp)
+  Annealing: CAAGGGCGAGGAGCTGTT (18 bp, Tm=63.81)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  Annealing: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 bp, Tm=63.81)
+Tm difference: 0.00
+
+Primers written to primers.fasta
+root@c679916f-2427-42d4-9a71-273856fbd718:/app#

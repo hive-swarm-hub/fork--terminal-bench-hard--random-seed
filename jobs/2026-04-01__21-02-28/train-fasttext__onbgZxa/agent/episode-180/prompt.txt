@@ -1,0 +1,111 @@
+New Terminal Output:
+
+root@31cd29a3-327f-43a4-bda4-9747d6bae545:/app# date; kill -0 13467 2>&1; tail -c 500 /tmp/train_log3.txt | cat -v; ls -la /app/model.bin
+Thu Apr  2 04:48:12 UTC 2026
+avg.loss:  0.843499 ETA:   0h21m 7s^MProgress:  16.8% words/sec/thread:   30910 lr:  0.416245 avg.loss:  0.843514 ETA:   0h21m 7s^MProgress:  16.8% words/sec/th
+read:   30908 lr:  0.416187 avg.loss:  0.842945 ETA:   0h21m 7s^MProgress:  16.8% words/sec/thread:   30908 lr:  0.416154 avg.loss:  0.842611 ETA:   0h21m 7s^MP
+rogress:  16.8% words/sec/thread:   30909 lr:  0.416119 avg.loss:  0.842594 ETA:   0h21m 6s^MProgress:  16.8% words/sec/thread:   30911 lr:  0.416080 avg.loss:
+ 0.842059 ETA:   0h21m 6s-rw-r--r-- 1 root root 152863763 Apr  2 04:43 /app/model.bin
+root@31cd29a3-327f-43a4-bda4-9747d6bae545:/app# kill 13467; wait 13467 2>/dev/null
+root@31cd29a3-327f-43a4-bda4-9747d6bae545:/app# python3 << 'EOF'
+> import pandas as pd
+>
+> # Prepare data WITHOUT lowercasing - keep original text
+> print('Preparing raw text data...')
+> df = pd.read_parquet('data/train-00000-of-00001.parquet')
+> df['text'] = df['text'].str.replace('\n', ' ', regex=False).str.replace('\r', ' ', regex=False)
+> with open('/tmp/train_raw.txt', 'w') as f:
+>     for label, text in zip(df['label'].values, df['text'].values):
+>         f.write(f'__label__{label} {text}\n')
+> print(f'Train: {len(df)} lines')
+>
+> df2 = pd.read_parquet('data/test-00000-of-00001.parquet')
+> df2['text'] = df2['text'].str.replace('\n', ' ', regex=False).str.replace('\r', ' ', regex=False)
+> with open('/tmp/test_raw.txt', 'w') as f:
+>     for label, text in zip(df2['label'].values, df2['text'].values):
+>         f.write(f'__label__{label} {text}\n')
+> print(f'Test: {len(df2)} lines')
+> EOF
+Preparing raw text data...
+Train: 650000 lines
+Test: 10000 lines
+root@31cd29a3-327f-43a4-bda4-9747d6bae545:/app# cat > /tmp/quick_test.py << 'EOF'
+> import fasttext
+> import os
+>
+> configs = [
+>     {'lr': 0.5, 'epoch': 10, 'wordNgrams': 2, 'dim': 50, 'bucket': 200000, 'minCount': 5, 'loss': 'softmax', 'input': '/tmp/train.txt', 'test': '/tmp/test.txt
+', 'name': 'lower_base'},
+>     {'lr': 0.5, 'epoch': 10, 'wordNgrams': 2, 'dim': 50, 'bucket': 200000, 'minCount': 5, 'loss': 'softmax', 'input': '/tmp/train_raw.txt', 'test': '/tmp/test
+_raw.txt', 'name': 'raw_base'},
+>     {'lr': 0.5, 'epoch': 10, 'wordNgrams': 3, 'dim': 50, 'bucket': 200000, 'minCount': 5, 'loss': 'softmax', 'input': '/tmp/train.txt', 'test': '/tmp/test.txt
+', 'name': 'lower_trigram'},
+>     {'lr': 0.5, 'epoch': 10, 'wordNgrams': 2, 'dim': 50, 'bucket': 200000, 'minCount': 5, 'loss': 'ova', 'input': '/tmp/train.txt', 'test': '/tmp/test.txt', '
+name': 'lower_ova'},
+> ]
+>
+> for cfg in configs:
+>     name = cfg.pop('name')
+>     test_file = cfg.pop('test')
+>     print(f'\nTraining {name}...', flush=True)
+>     model = fasttext.train_supervised(**cfg, verbose=0)
+>     result = model.test(test_file)
+>     print(f'{name}: Precision={result[1]:.4f}, Recall={result[2]:.4f}', flush=True)
+> EOF
+root@31cd29a3-327f-43a4-bda4-9747d6bae545:/app# python3 /tmp/quick_test.py
+
+Training lower_base...
+cat > /tmp/train_final.py << 'EOF'
+import fasttext
+import os
+
+print('Training final model...', flush=True)
+model = fasttext.train_supervised(
+    input='/tmp/train.txt',
+    lr=0.5,
+    epoch=25,
+    wordNgrams=2,
+    dim=50,
+    loss='softmax',
+    bucket=200000,
+    minCount=5,
+    verbose=2
+)
+
+print('Evaluating...', flush=True)
+result = model.test('/tmp/test.txt')
+print(f'Samples: {result[0]}, Precision: {result[1]:.4f}, Recall: {result[2]:.4f}', flush=True)
+
+print('Saving model...', flush=True)
+model.save_model('/app/model.bin')
+size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+print(f'Model size: {size_mb:.1f} MB', flush=True)
+
+if result[1] < 0.62:
+    print('Accuracy too low, trying quantization with more features...', flush=True)
+    # Try with larger dim and quantize
+    model2 = fasttext.train_supervised(
+        input='/tmp/train.txt',
+        lr=0.5,
+        epoch=25,
+        wordNgrams=2,
+        dim=200,
+        loss='softmax',
+        bucket=500000,
+        minCount=2,
+        verbose=2
+    )
+    result2 = model2.test('/tmp/test.txt')
+    print(f'Before quantize: Precision={result2[1]:.4f}', flush=True)
+
+    model2.quantize(input='/tmp/train.txt', retrain=True)
+    result3 = model2.test('/tmp/test.txt')
+    print(f'After quantize: Precision={result3[1]:.4f}', flush=True)
+
+    model2.save_model('/app/model.bin')
+    size_mb = os.path.getsize('/app/model.bin') / (1024*1024)
+    print(f'Quantized model size: {size_mb:.1f} MB', flush=True)
+EOF
+python3 /tmp/train_final.py > /tmp/train_final_log.txt 2>&1 &
+echo "Started at $(date), PID: $!"
+

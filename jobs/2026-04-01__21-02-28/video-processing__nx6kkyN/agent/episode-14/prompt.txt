@@ -1,0 +1,180 @@
+New Terminal Output:
+
+root@8fb8e2d5-9211-4279-b642-64741b055c36:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (guaranteed no runner)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     frame_data = []
+>     frame_idx = 0  # frame 0 is background, we start reading from frame 1
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         diff = cv2.absdiff(bg_blur, blur)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>         thresh = cv2.dilate(thresh, None, iterations=2)
+>
+>         fg_pixels = np.where(thresh > 0)
+>         fg_count = len(fg_pixels[0])
+>
+>         if fg_count > 500:  # significant motion
+>             bottom = int(np.max(fg_pixels[0]))
+>             top = int(np.min(fg_pixels[0]))
+>             left = int(np.min(fg_pixels[1]))
+>             right = int(np.max(fg_pixels[1]))
+>             mean_y = float(np.mean(fg_pixels[0]))
+>             height = bottom - top
+>
+>             # Compute the bottom region density - how many pixels are near the bottom
+>             # This helps distinguish running (feet on ground) from jumping
+>             bottom_threshold = bottom - max(int(height * 0.15), 10)
+>             bottom_pixel_count = int(np.sum(fg_pixels[0] >= bottom_threshold))
+>
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'bottom': bottom,
+>                 'top': top,
+>                 'left': left,
+>                 'right': right,
+>                 'mean_y': mean_y,
+>                 'fg_count': fg_count,
+>                 'height': height,
+>                 'bottom_pixels': bottom_pixel_count
+>             })
+u>         else:
+>             frame_data.append({
+>                 'frame': frame_idx,
+>                 'bottom': -1,
+>                 'top': -1,
+>                 'left': -1,
+>                 'right': -1,
+>                 'mean_y': -1,
+>                 'fg_count': fg_count,
+>                 'height': 0,
+>                 'bottom_pixels': 0
+>             })
+>
+>     cap.release()
+>
+>     # Filter to frames with significant motion (athlete present)
+>     active_frames = [d for d in frame_data if d['bottom'] > 0 and d['fg_count'] > 2000]
+>
+>     if len(active_frames) < 5:
+>         raise ValueError("Not enough active frames detected")
+>
+>     # Determine ground level from the running phases
+>     # The ground level is the maximum 'bottom' value seen during active frames
+>     bottoms = [d['bottom'] for d in active_frames]
+>     ground_level = np.percentile(bottoms, 85)  # Use high percentile as ground level
+>
+>     # The airborne phase is when the bottom drops significantly below ground level
+>     # Define a threshold - if bottom is more than 30 pixels above ground, athlete is airborne
+>     airborne_threshold = ground_level - 30
+>
+>     # Find continuous airborne phase
+>     airborne_frames = []
+>     for d in active_frames:
+>         if d['bottom'] < airborne_threshold and d['height'] > 50:
+>             airborne_frames.append(d['frame'])
+>
+>     if not airborne_frames:
+>         # Try with a less strict threshold
+>         airborne_threshold = ground_level - 20
+>         for d in active_frames:
+>             if d['bottom'] < airborne_threshold and d['height'] > 50:
+>                 airborne_frames.append(d['frame'])
+>
+>     if not airborne_frames:
+>         raise ValueError("Could not detect airborne phase")
+>
+>     # The airborne phase should be a continuous block
+>     # Find the main cluster of airborne frames
+>     airborne_start = min(airborne_frames)
+>     airborne_end = max(airborne_frames)
+>
+>     # Takeoff frame: the frame just before the airborne phase starts
+>     # We look for the last frame before airborne_start where bottom is near ground level
+>     takeoff_frame = airborne_start - 1
+>
+>     # Verify: scan backwards from airborne_start to find the actual takeoff
+>     # The takeoff is the last frame where the bottom is at or near ground level
+>     for d in reversed(active_frames):
+>         if d['frame'] < airborne_start and d['bottom'] >= ground_level - 15:
+>             takeoff_frame = d['frame']
+>             break
+>
+>     # Landing frame: the first frame after the airborne phase where bottom returns to ground level
+>     landing_frame = airborne_end + 1
+>
+>     # Scan forward from airborne_end to find actual landing
+>     for d in active_frames:
+>         if d['frame'] > airborne_end and d['bottom'] >= ground_level - 15:
+>             landing_frame = d['frame']
+>             break
+>         elif d['frame'] > airborne_end:
+>             # First frame after airborne is the landing
+>             landing_frame = d['frame']
+>             break
+>
+>     # Also check: the landing frame might be the first frame where bottom returns to ground
+>     # after the minimum bottom point
+>     min_bottom_frame = min(active_frames, key=lambda d: d['bottom'] if d['frame'] >= airborne_start and d['frame'] <= airborne_end else 9999)
+>
+>     # Refine landing: find first frame after min_bottom where bottom >= ground_level - 10
+>     for d in active_frames:
+>         if d['frame'] > min_bottom_frame['frame'] and d['bottom'] >= ground_level - 10:
+>             landing_frame = d['frame']
+>             break
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@8fb8e2d5-9211-4279-b642-64741b055c36:/app#

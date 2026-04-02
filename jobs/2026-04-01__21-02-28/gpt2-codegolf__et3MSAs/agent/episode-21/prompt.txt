@@ -1,0 +1,113 @@
+New Terminal Output:
+
+root@4a6da1c6-a39b-4d25-95cf-eb03d18dc077:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(offset, count):
+>     return list(struct.unpack_from(f'{count}f', mm, offset*4))
+>
+> V, C, E, L = 50257, 1024, 768, 12
+> E4 = 3072
+> PL = 7087872
+> HD = 64
+> NH = 12
+>
+> wte_off = L*PL + 2*E + C*E
+> wpe_off = L*PL + 2*E
+> wte = rf(wte_off, V*E)
+> wpe = rf(wpe_off, C*E)
+>
+> tok = 15496
+> x = [wte[tok*E+j] + wpe[j] for j in range(E)]
+>
+> def layernorm(inp, g, b):
+>     m = sum(inp)/E
+>     v = sum((xi-m)**2 for xi in inp)/E
+>     v = 1.0/(v + 1e-5)**0.5
+>     return [(inp[i]-m)*v*g[i]+b[i] for i in range(E)]
+>
+> def gelu(a):
+>     return 0.5*a*(1+math.tanh(0.7978845608*(a+0.044715*a*a*a)))
+>
+> def matmul_t(w, inp, rows, cols):
+>     # w is [rows, cols], compute inp @ w = output[i] = sum_j w[j*cols+i]*inp[j] for each i in cols
+>     out = [0.0]*cols
+>     for i in range(cols):
+>         s = 0.0
+>         for j in range(rows):
+>             s += w[j*cols+i]*inp[j]
+>         out[i] = s
+>     return out
+>
+> for l in range(1):  # just layer 0 for now
+>     p = l*PL
+>     cab = rf(p, 3*E)
+>     caw = rf(p+3*E, E*3*E)
+>     cpb = rf(p+3*E+E*3*E, E)
+>     cpw = rf(p+3*E+E*3*E+E, E*E)
+>     l1b = rf(p+3*E+E*3*E+E+E*E, E)
+>     l1g = rf(p+3*E+E*3*E+E+E*E+E, E)
+>     l2b = rf(p+3*E+E*3*E+E+E*E+2*E, E)
+>     l2g = rf(p+3*E+E*3*E+E+E*E+3*E, E)
+>     fcb = rf(p+3*E+E*3*E+E+E*E+4*E, E4)
+>     fcw = rf(p+3*E+E*3*E+E+E*E+4*E+E4, E*E4)
+>     fpb = rf(p+3*E+E*3*E+E+E*E+4*E+E4+E*E4, E)
+>     fpw = rf(p+3*E+E*3*E+E+E*E+4*E+E4+E*E4+E, E4*E)
+>
+>     n = layernorm(x, l1g, l1b)
+>     # QKV
+>     qkv = [0.0]*(3*E)
+>     for i in range(3*E):
+>         s = cab[i]
+>         for j in range(E):
+>             s += caw[j*3*E+i]*n[j]
+>         qkv[i] = s
+>
+>     # For single position, attention output = V values
+>     # V = qkv[2*E:3*E]
+>     ao = qkv[2*E:3*E]  # attention output = V for single position
+>     print(f"V[0:5] = {ao[:5]}")
+>
+>     # Project: ao @ cpw + cpb
+>     pr = [0.0]*E
+>     for i in range(E):
+>         s = cpb[i]
+>         for j in range(E):
+>             s += cpw[j*E+i]*ao[j]
+>         pr[i] = s
+>
+>     # Residual
+>     for i in range(E):
+>         x[i] += pr[i]
+>     print(f"After attn residual x[0:5] = {x[:5]}")
+>
+>     # MLP
+>     n2 = layernorm(x, l2g, l2b)
+>     fc = [0.0]*E4
+>     for i in range(E4):
+>         s = fcb[i]
+>         for j in range(E):
+>             s += fcw[j*E4+i]*n2[j]
+>         fc[i] = gelu(s)
+>
+>     mp = [0.0]*E
+>     for i in range(E):
+>         s = fpb[i]
+>         for j in range(E4):
+>             s += fpw[j*E+i]*fc[j]
+>         mp[i] = s
+>
+>     for i in range(E):
+>         x[i] += mp[i]
+>     print(f"After MLP residual x[0:5] = {x[:5]}")
+>
+> print("Layer 0 done")
+> mm.close()
+> f.close()
+> PYEOF
+V[0:5] = [0.16369692308197337, 0.2041683307619233, -0.04364284065333628, 0.07657921801783821, 0.03815733197480776]
+After attn residual x[0:5] = [0.16152708945632685, -0.7301920287900086, -0.22379617001716456, -0.17235533111258922, -0.05975622409014755]
+

@@ -1,0 +1,92 @@
+New Terminal Output:
+
+root@ea5865f0-73e7-4787-872a-0cdd611d6f08:/app# python3 << 'PYEOF'
+> import os, struct
+>
+> # In SQLite record format, a text field with "fig" (3 chars) has serial type 2*3+13=19=0x13
+> # A text field with "grape" (5 chars) has serial type 2*5+13=23=0x17
+> # etc.
+> # The record header for (id INTEGER, name TEXT, value INTEGER) would be:
+> # header_size, type_id, type_name, type_value
+>
+> # For id=6, name='fig', value=600:
+> # id serial type: 1 byte int (serial type 1) or 2 byte int (serial type 2)
+> # name serial type: 2*3+13 = 19 (0x13) for 'fig'
+> # value serial type: 2 byte int (serial type 2) for values < 32768
+> # Record: header_len=4, types=[1,0x13,2], then data: 06, 'fig', 0x0258
+>
+> # Let's construct the exact bytes for each possible record
+> records_to_search = []
+> fruits = {
+>     6: 'fig', 7: 'grape', 8: 'honeydew', 9: 'kiwi',
+>     10: 'lemon', 11: 'mango'
+> }
+>
+> for item_id, name in fruits.items():
+>     name_bytes = name.encode('utf-8')
+>     name_serial = 2 * len(name_bytes) + 13
+>     # Try different value patterns
+>     for value in [item_id * 100, item_id * 100 + 50, item_id * 10, item_id]:
+>         # Determine value serial type
+>         if -128 <= value <= 127:
+>             val_serial = 1
+>             val_bytes = struct.pack('>b', value)
+>         elif -32768 <= value <= 32767:
+>             val_serial = 2
+>             val_bytes = struct.pack('>h', value)
+>         elif -8388608 <= value <= 8388607:
+>             val_serial = 3
+>             val_bytes = struct.pack('>i', value)[1:]
+>         else:
+>             val_serial = 4
+>             val_bytes = struct.pack('>i', value)
+>
+>         # id serial type
+>         if 0 <= item_id <= 127:
+>             id_serial = 1
+>             id_bytes = struct.pack('>b', item_id)
+>         else:
+>             id_serial = 2
+>             id_bytes = struct.pack('>h', item_id)
+>
+>         header_size = 4  # 1 byte for header_size + 3 type bytes
+>         header = bytes([header_size, id_serial, name_serial, val_serial])
+>         record = header + id_bytes + name_bytes + val_bytes
+>         records_to_search.append((item_id, name, value, record))
+>
+> # Search for these patterns in all process memory
+> pid = 1
+> try:
+>     maps_data = open(f'/proc/{pid}/maps').readlines()
+>     mem = open(f'/proc/{pid}/mem', 'rb')
+>
+>     for line in maps_data:
+>         parts = line.split()
+>         if 'r' not in parts[1]:
+>             continue
+>         addr_range = parts[0].split('-')
+>         start = int(addr_range[0], 16)
+>         end = int(addr_range[1], 16)
+>         size = end - start
+>         if size > 100 * 1024 * 1024:
+>             continue
+>         try:
+>             mem.seek(start)
+>             data = mem.read(size)
+>             for item_id, name, value, record in records_to_search:
+>                 if record in data:
+>                     pos = data.find(record)
+>                     print(f'FOUND: id={item_id}, name={name}, value={value} at {start+pos:#x}')
+>                     print(f'  Record: {record.hex()}')
+>                     context = data[max(0,pos-16):pos+len(record)+16]
+>                     print(f'  Context: {context.hex()}')
+>         except Exception:
+>             pass
+>     mem.close()
+> except Exception as e:
+>     print(f'Error: {e}')
+>
+> print('Done')
+> PYEOF
+Done
+root@ea5865f0-73e7-4787-872a-0cdd611d6f08:/app#
