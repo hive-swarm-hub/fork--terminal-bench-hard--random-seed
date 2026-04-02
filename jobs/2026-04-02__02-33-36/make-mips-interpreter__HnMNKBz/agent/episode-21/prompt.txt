@@ -1,0 +1,408 @@
+New Terminal Output:
+
+root@1def17a1-76f5-4fb2-ac52-248adf7a83dd:/app# python3 << 'PYEND'
+> with open('/app/vm.js', 'w') as f:
+>     f.write(r"""'use strict';
+> const fs = require('fs');
+> const path = require('path');
+>
+> // Sparse Memory System
+> const PAGE_BITS = 12;
+> const PAGE_SIZE = 1 << PAGE_BITS;
+> const PAGE_MASK = PAGE_SIZE - 1;
+>
+> class SparseMemory {
+>   constructor() { this.pages = new Map(); }
+>   _getPage(addr) {
+>     const pi = addr >>> PAGE_BITS;
+>     let p = this.pages.get(pi);
+>     if (!p) { p = new Uint8Array(PAGE_SIZE); this.pages.set(pi, p); }
+>     return p;
+>   }
+>   r8(addr) { addr >>>= 0; const p = this.pages.get(addr >>> PAGE_BITS); return p ? p[addr & PAGE_MASK] : 0; }
+>   w8(addr, v) { addr >>>= 0; this._getPage(addr)[addr & PAGE_MASK] = v & 0xFF; }
+>   r16(addr) { addr >>>= 0; return this.r8(addr) | (this.r8(addr+1) << 8); }
+>   w16(addr, v) { addr >>>= 0; this.w8(addr, v & 0xFF); this.w8(addr+1, (v>>8) & 0xFF); }
+>   r32(addr) { addr >>>= 0; return (this.r8(addr) | (this.r8(addr+1)<<8) | (this.r8(addr+2)<<16) | (this.r8(addr+3)<<24)) >>> 0; }
+>   w32(addr, v) { addr >>>= 0; this.w8(addr,v&0xFF); this.w8(addr+1,(v>>8)&0xFF); this.w8(addr+2,(v>>16)&0xFF); this.w8(addr+3,(v>>24)&0xFF); }
+>   readString(addr) {
+>     addr >>>= 0; let s = '';
+>     for (let i = 0; i < 4096; i++) { const c = this.r8(addr+i); if (c === 0) break; s += String.fromCharCode(c); }
+>     return s;
+>   }
+>   readBytes(addr, len) { const b = Buffer.alloc(len); for (let i = 0; i < len; i++) b[i] = this.r8(addr+i); return b; }
+>   writeBytes(addr, buf) { for (let i = 0; i < buf.length; i++) this.w8(addr+i, buf[i]); }
+> }
+>
+> // In-Memory Filesystem
+> class InMemoryFS {
+>   constructor() {
+>     this.files = new Map();
+>     this.dirs = new Set(['/']);
+>     this.fds = new Map();
+>     this.nextFd = 5;
+>     this._loadWad();
+>   }
+>   _loadWad() {
+>     try {
+>       const data = fs.readFileSync(path.join(process.cwd(), 'doom.wad'));
+>       const f = { data: Buffer.from(data), size: data.length };
+>       this.files.set('/doom.wad', f);
+>       this.files.set('doom.wad', f);
+>       console.log('Loaded doom.wad (' + data.length + ' bytes)');
+>     } catch(e) { console.error('Failed to load doom.wad:', e.message); }
+>   }
+>   _norm(p) { if (p.startsWith('./')) p = p.substring(2); return p.startsWith('/') ? p : '/' + p; }
+>   _getFile(p) { return this.files.get(p) || this.files.get(this._norm(p)) || (p.startsWith('/') ? this.files.get(p.substring(1)) : null); }
+>   open(pathname, flags) {
+>     let file = this._getFile(pathname);
+>     const np = this._norm(pathname);
+>     if (!file && (flags & 64)) { file = { data: Buffer.alloc(0), size: 0 }; this.files.set(np, file); this.files.set(pathname, file); }
+>     if (!file) return -2;
+>     if (flags & 512) { file.data = Buffer.alloc(0); file.size = 0; }
+>     const fd = this.nextFd++;
+>     this.fds.set(fd, { path: np, file, position: (flags & 1024) ? file.size : 0, mode: flags & 3 });
+>     return fd;
+>   }
+>   close(fd) {
+>     if (!this.fds.has(fd)) return -9;
+>     const info = this.fds.get(fd);
+>     if (info.path.startsWith('/tmp/')) this._saveReal(info.path, info.file);
+>     this.fds.delete(fd);
+>     return 0;
+>   }
+>   _saveReal(vp, file) {
+>     try {
+>       const rp = path.join(process.cwd(), vp);
+>       fs.mkdirSync(path.dirname(rp), { recursive: true });
+>       fs.writeFileSync(rp, file.data.slice(0, file.size));
+>       console.log('Saved ' + vp + ' (' + file.size + ' bytes)');
+>     } catch(e) { console.error('Save failed:', e.message); }
+>   }
+>   read(fd, buf, count, mem) {
+>     if (!this.fds.has(fd)) return -9;
+>     const info = this.fds.get(fd);
+>     const avail = info.file.size - info.position;
+>     if (avail <= 0) return 0;
+>     const n = Math.min(count, avail);
+>     for (let i = 0; i < n; i++) mem.w8(buf+i, info.file.data[info.position+i]);
+>     info.position += n;
+>     return n;
+>   }
+>   write(fd, buf, count, mem) {
+>     if (!this.fds.has(fd)) return -9;
+>     const info = this.fds.get(fd);
+>     const end = info.position + count;
+>     if (end > info.file.data.length) {
+>       const nc = Math.max(end, info.file.data.length * 2, 4096);
+>       const nb = Buffer.alloc(nc);
+>       info.file.data.copy(nb, 0, 0, info.file.size);
+>       info.file.data = nb;
+>     }
+>     for (let i = 0; i < count; i++) info.file.data[info.position+i] = mem.r8(buf+i);
+>     info.position = end;
+>     if (end > info.file.size) info.file.size = end;
+>     return count;
+>   }
+>   lseek(fd, offset, whence) {
+>     if (!this.fds.has(fd)) return -9;
+>     const info = this.fds.get(fd);
+>     let np;
+>     if (whence === 0) np = offset;
+>     else if (whence === 1) np = info.position + offset;
+>     else if (whence === 2) np = info.file.size + offset;
+>     else return -22;
+>     if (np < 0) return -22;
+>     info.position = np;
+>     return np;
+>   }
+>   mkdir(p) { this.dirs.add(this._norm(p)); return 0; }
+>   unlink(p) { const np = this._norm(p); if (this.files.has(np)) { this.files.delete(np); return 0; } return -2; }
+>   rename(op, np) { const no = this._norm(op); const nn = this._norm(np); const f = this.files.get(no); if (!f) return -2; this.files.set(nn, f); this.files.de
+lete(no); return 0; }
+>   fsync(fd) {
+>     if (!this.fds.has(fd)) return -9;
+>     const info = this.fds.get(fd);
+>     if (info.path.startsWith('/tmp/')) this._saveReal(info.path, info.file);
+>     return 0;
+>   }
+> }
+>
+L> // MIPS CPU
+> class MIPSCPU {
+>   constructor() {
+>     this.mem = new SparseMemory();
+>     this.r = new Int32Array(32);
+>     this.pc = 0; this.hi = 0; this.lo = 0;
+>     this.inDelay = false; this.delayPC = 0;
+>     this.fs = new InMemoryFS();
+>     this.heapPtr = 0;
+>     this.running = true;
+>     this.ic = 0;
+>   }
+>
+>   loadELF(fn) {
+>     const data = fs.readFileSync(fn);
+>     const entry = data.readUInt32LE(24);
+>     const phoff = data.readUInt32LE(28);
+>     const phsz = data.readUInt16LE(42);
+>     const phnum = data.readUInt16LE(44);
+>     console.log('Entry: 0x' + entry.toString(16));
+>     let maxAddr = 0;
+>     for (let i = 0; i < phnum; i++) {
+>       const o = phoff + i * phsz;
+>       const ptype = data.readUInt32LE(o);
+>       const poff = data.readUInt32LE(o+4);
+>       const pvaddr = data.readUInt32LE(o+8);
+>       const pfsz = data.readUInt32LE(o+16);
+>       const pmsz = data.readUInt32LE(o+20);
+>       if (ptype === 1) {
+>         console.log('LOAD: vaddr=0x' + pvaddr.toString(16) + ' filesz=0x' + pfsz.toString(16) + ' memsz=0x' + pmsz.toString(16));
+>         for (let j = 0; j < pfsz; j++) this.mem.w8(pvaddr + j, data[poff + j]);
+>         if (pvaddr + pmsz > maxAddr) maxAddr = pvaddr + pmsz;
+>       }
+>     }
+>     this.pc = entry;
+>     this.r[29] = 0x7FFF0000;
+>     this.r[28] = 0x00475000;
+>     this.heapPtr = (maxAddr + 0xFFF) & ~0xFFF;
+>     console.log('Heap: 0x' + this.heapPtr.toString(16));
+>   }
+>
+>   sx16(v) { return (v << 16) >> 16; }
+>   sx8(v) { return (v << 24) >> 24; }
+>
+>   handleSyscall() {
+>     const num = this.r[2];
+>     const a0 = this.r[4], a1 = this.r[5], a2 = this.r[6], a3 = this.r[7];
+>     let res = 0;
+>     switch (num) {
+>       case 0: // read
+>         if (a0 <= 4) res = 0;
+>         else res = this.fs.read(a0, a1>>>0, a2>>>0, this.mem);
+>         break;
+>       case 1: // write
+>         if (a0 === 0 || a0 === 1) { process.stdout.write(this.mem.readBytes(a1>>>0, a2>>>0)); res = a2; }
+>         else if (a0 === 2) { process.stderr.write(this.mem.readBytes(a1>>>0, a2>>>0)); res = a2; }
+>         else res = this.fs.write(a0, a1>>>0, a2>>>0, this.mem);
+>         break;
+>       case 2: // open
+>         res = this.fs.open(this.mem.readString(a0>>>0), a1, a2);
+>         break;
+>       case 3: // close
+>         if (a0 <= 4) res = 0; else res = this.fs.close(a0);
+>         break;
+>       case 8: // lseek
+>         res = this.fs.lseek(a0, a1, a2);
+>         break;
+>       case 74: // fsync
+>         res = this.fs.fsync(a0);
+>         break;
+>       case 82: // rename
+>         res = this.fs.rename(this.mem.readString(a0>>>0), this.mem.readString(a1>>>0));
+>         break;
+>       case 83: // mkdir
+>         res = this.fs.mkdir(this.mem.readString(a0>>>0));
+>         break;
+>       case 87: // unlink
+>         res = this.fs.unlink(this.mem.readString(a0>>>0));
+>         break;
+>       case 45: // brk
+>         if (a0 === 0) res = this.heapPtr;
+>         else { if ((a0>>>0) >= (this.heapPtr>>>0)) this.heapPtr = a0>>>0; res = this.heapPtr; }
+>         break;
+>       case 60: case 4001: case 4246:
+>         console.log('Exit with code ' + a0);
+>         this.running = false; res = 0;
+>         break;
+>       default:
+>         console.log('Unknown syscall: ' + num + ' a0=' + a0 + ' a1=' + a1);
+>         res = -22;
+>     }
+>     this.r[2] = res | 0;
+>     this.r[7] = (res < 0) ? 1 : 0;
+>   }
+>
+>   step() {
+>     const pc = this.pc >>> 0;
+>     const instr = this.mem.r32(pc);
+>     const op = (instr >>> 26) & 0x3F;
+>     const rs = (instr >>> 21) & 0x1F;
+>     const rt = (instr >>> 16) & 0x1F;
+>     const rd = (instr >>> 11) & 0x1F;
+>     const sa = (instr >>> 6) & 0x1F;
+>     const fn = instr & 0x3F;
+>     const imm = instr & 0xFFFF;
+>     const simm = this.sx16(imm);
+>     const tgt = instr & 0x3FFFFFF;
+>     let npc = pc + 4;
+>     let branch = false, btgt = 0;
+>     this.r[0] = 0;
+>
+>     switch (op) {
+>     case 0: // R-type
+>       switch (fn) {
+>       case 0: this.r[rd] = (this.r[rt] << sa)|0; break; // SLL
+>       case 2: this.r[rd] = (this.r[rt] >>> sa)|0; break; // SRL
+>       case 3: this.r[rd] = (this.r[rt] >> sa)|0; break; // SRA
+>       case 4: this.r[rd] = (this.r[rt] << (this.r[rs]&0x1F))|0; break; // SLLV
+>       case 6: this.r[rd] = (this.r[rt] >>> (this.r[rs]&0x1F))|0; break; // SRLV
+>       case 7: this.r[rd] = (this.r[rt] >> (this.r[rs]&0x1F))|0; break; // SRAV
+>       case 8: branch=true; btgt=this.r[rs]>>>0; break; // JR
+>       case 9: this.r[rd||31]=(pc+8)|0; branch=true; btgt=this.r[rs]>>>0; break; // JALR
+>       case 10: if(this.r[rt]===0) this.r[rd]=this.r[rs]; break; // MOVZ
+>       case 11: if(this.r[rt]!==0) this.r[rd]=this.r[rs]; break; // MOVN
+>       case 12: this.handleSyscall(); break; // SYSCALL
+>       case 13: console.log('BREAK@0x'+pc.toString(16)); this.running=false; break;
+>       case 16: this.r[rd]=this.hi|0; break; // MFHI
+>       case 17: this.hi=this.r[rs]|0; break; // MTHI
+>       case 18: this.r[rd]=this.lo|0; break; // MFLO
+>       case 19: this.lo=this.r[rs]|0; break; // MTLO
+>       case 24: { const a=BigInt(this.r[rs]),b=BigInt(this.r[rt]),c=a*b; this.lo=Number(c&0xFFFFFFFFn)|0; this.hi=Number((c>>32n)&0xFFFFFFFFn)|0; break; } // M
+ULT
+>       case 25: { const a=BigInt(this.r[rs]>>>0),b=BigInt(this.r[rt]>>>0),c=a*b; this.lo=Number(c&0xFFFFFFFFn)|0; this.hi=Number((c>>32n)&0xFFFFFFFFn)|0; break
+; } // MULTU
+>       case 26: { const d=this.r[rt]; if(d) { this.lo=(this.r[rs]/d)|0; this.hi=(this.r[rs]%d)|0; } break; } // DIV
+>       case 27: { const d=this.r[rt]>>>0; if(d) { this.lo=((this.r[rs]>>>0)/d)|0; this.hi=((this.r[rs]>>>0)%d)|0; } break; } // DIVU
+>       case 32: case 33: this.r[rd]=(this.r[rs]+this.r[rt])|0; break; // ADD/ADDU
+>       case 34: case 35: this.r[rd]=(this.r[rs]-this.r[rt])|0; break; // SUB/SUBU
+>       case 36: this.r[rd]=(this.r[rs]&this.r[rt])|0; break; // AND
+>       case 37: this.r[rd]=(this.r[rs]|this.r[rt])|0; break; // OR
+>       case 38: this.r[rd]=(this.r[rs]^this.r[rt])|0; break; // XOR
+>       case 39: this.r[rd]=(~(this.r[rs]|this.r[rt]))|0; break; // NOR
+>       case 42: this.r[rd]=(this.r[rs]<this.r[rt])?1:0; break; // SLT
+>       case 43: this.r[rd]=((this.r[rs]>>>0)<(this.r[rt]>>>0))?1:0; break; // SLTU
+>       case 48: case 52: break; // TGE/TEQ trap - NOP
+>       default: console.log('R fn='+fn+' @0x'+pc.toString(16)+' instr=0x'+instr.toString(16)); this.running=false;
+>       }
+>       break;
+>     case 1: // REGIMM
+>       switch (rt) {
+>       case 0: if(this.r[rs]<0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BLTZ
+>       case 1: if(this.r[rs]>=0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BGEZ
+>       case 16: this.r[31]=(pc+8)|0; if(this.r[rs]<0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BLTZAL
+>       case 17: this.r[31]=(pc+8)|0; if(this.r[rs]>=0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BGEZAL
+>       default: console.log('REGIMM rt='+rt+' @0x'+pc.toString(16)); this.running=false;
+>       }
+>       break;
+>     case 2: branch=true; btgt=((pc&0xF0000000)|(tgt<<2))>>>0; break; // J
+>     case 3: this.r[31]=(pc+8)|0; branch=true; btgt=((pc&0xF0000000)|(tgt<<2))>>>0; break; // JAL
+>     case 4: if(this.r[rs]===this.r[rt]){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BEQ
+>     case 5: if(this.r[rs]!==this.r[rt]){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BNE
+>     case 6: if(this.r[rs]<=0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BLEZ
+>     case 7: if(this.r[rs]>0){branch=true;btgt=(pc+4+(simm<<2))>>>0;} break; // BGTZ
+>     case 8: case 9: this.r[rt]=(this.r[rs]+simm)|0; break; // ADDI/ADDIU
+>     case 10: this.r[rt]=(this.r[rs]<simm)?1:0; break; // SLTI
+>     case 11: this.r[rt]=((this.r[rs]>>>0)<(simm>>>0))?1:0; break; // SLTIU
+>     case 12: this.r[rt]=(this.r[rs]&imm)|0; break; // ANDI
+>     case 13: this.r[rt]=(this.r[rs]|imm)|0; break; // ORI
+>     case 14: this.r[rt]=(this.r[rs]^imm)|0; break; // XORI
+>     case 15: this.r[rt]=(imm<<16)|0; break; // LUI
+>     case 28: // SPECIAL2
+>       switch(fn) {
+>       case 2: this.r[rd]=Math.imul(this.r[rs],this.r[rt])|0; break; // MUL
+>       case 0: { const a=BigInt(this.r[rs]),b=BigInt(this.r[rt]); let h=(BigInt(this.hi)<<32n)|BigInt(this.lo>>>0); h+=a*b; this.lo=Number(h&0xFFFFFFFFn)|0; th
+is.hi=Number((h>>32n)&0xFFFFFFFFn)|0; break; } // MADD
+>       case 1: { const a=BigInt(this.r[rs]>>>0),b=BigInt(this.r[rt]>>>0); let h=(BigInt(this.hi>>>0)<<32n)|BigInt(this.lo>>>0); h+=a*b; this.lo=Number(h&0xFFFF
+FFFFn)|0; this.hi=Number((h>>32n)&0xFFFFFFFFn)|0; break; } // MADDU
+>       case 32: this.r[rd]=Math.clz32(this.r[rs]>>>0); break; // CLZ
+>       default: console.log('SP2 fn='+fn+' @0x'+pc.toString(16)); this.running=false;
+>       }
+>       break;
+>     case 31: // SPECIAL3
+>       switch(fn) {
+>       case 0: { const pos=sa,sz=rd+1,mask=(1<<sz)-1; this.r[rt]=((this.r[rs]>>>pos)&mask)|0; break; } // EXT
+>       case 4: { const pos=sa,sz=rd-pos+1,mask=((1<<sz)-1)<<pos; this.r[rt]=((this.r[rt]&~mask)|((this.r[rs]<<pos)&mask))|0; break; } // INS
+>       case 32: // BSHFL
+>         switch(sa) {
+>         case 2: { const v=this.r[rt]>>>0; this.r[rd]=(((v&0x00FF00FF)<<8)|((v&0xFF00FF00)>>>8))|0; break; } // WSBH
+>         case 16: this.r[rd]=this.sx8(this.r[rt]&0xFF); break; // SEB
+>         case 24: this.r[rd]=this.sx16(this.r[rt]&0xFFFF); break; // SEH
+>         default: console.log('BSHFL sa='+sa+' @0x'+pc.toString(16)); this.running=false;
+>         }
+>         break;
+>       default: console.log('SP3 fn='+fn+' @0x'+pc.toString(16)); this.running=false;
+>       }
+>       break;
+>     case 32: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.sx8(this.mem.r8(a)); break; } // LB
+>     case 33: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.sx16(this.mem.r16(a)); break; } // LH
+>     case 34: { // LWL
+>       const a=((this.r[rs]+simm)|0)>>>0, al=a&~3, bo=a&3, mw=this.mem.r32(al), rv=this.r[rt]>>>0;
+>       if(bo===0) this.r[rt]=((mw&0xFF)<<24)|(rv&0x00FFFFFF);
+>       else if(bo===1) this.r[rt]=((mw&0xFFFF)<<16)|(rv&0x0000FFFF);
+>       else if(bo===2) this.r[rt]=((mw&0xFFFFFF)<<8)|(rv&0x000000FF);
+>       else this.r[rt]=mw|0;
+>       break;
+>     }
+>     case 35: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.mem.r32(a)|0; break; } // LW
+>     case 36: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.mem.r8(a); break; } // LBU
+>     case 37: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.mem.r16(a); break; } // LHU
+>     case 38: { // LWR
+>       const a=((this.r[rs]+simm)|0)>>>0, al=a&~3, bo=a&3, mw=this.mem.r32(al), rv=this.r[rt]>>>0;
+>       if(bo===0) this.r[rt]=mw|0;
+>       else if(bo===1) this.r[rt]=((rv&0xFF000000)|(mw>>>8))|0;
+>       else if(bo===2) this.r[rt]=((rv&0xFFFF0000)|(mw>>>16))|0;
+>       else this.r[rt]=((rv&0xFFFFFF00)|(mw>>>24))|0;
+>       break;
+>     }
+>     case 40: { const a=((this.r[rs]+simm)|0)>>>0; this.mem.w8(a,this.r[rt]&0xFF); break; } // SB
+>     case 41: { const a=((this.r[rs]+simm)|0)>>>0; this.mem.w16(a,this.r[rt]&0xFFFF); break; } // SH
+>     case 42: { // SWL
+>       const a=((this.r[rs]+simm)|0)>>>0, al=a&~3, bo=a&3, mw=this.mem.r32(al), rv=this.r[rt]>>>0;
+>       let nw;
+>       if(bo===0) nw=(mw&0xFFFFFF00)|(rv>>>24);
+>       else if(bo===1) nw=(mw&0xFFFF0000)|(rv>>>16);
+>       else if(bo===2) nw=(mw&0xFF000000)|(rv>>>8);
+>       else nw=rv;
+>       this.mem.w32(al,nw>>>0);
+>       break;
+>     }
+>     case 43: { const a=((this.r[rs]+simm)|0)>>>0; this.mem.w32(a,this.r[rt]>>>0); break; } // SW
+>     case 46: { // SWR
+>       const a=((this.r[rs]+simm)|0)>>>0, al=a&~3, bo=a&3, mw=this.mem.r32(al), rv=this.r[rt]>>>0;
+>       let nw;
+>       if(bo===0) nw=rv;
+>       else if(bo===1) nw=(rv<<8)|(mw&0x000000FF);
+>       else if(bo===2) nw=(rv<<16)|(mw&0x0000FFFF);
+>       else nw=(rv<<24)|(mw&0x00FFFFFF);
+>       this.mem.w32(al,nw>>>0);
+>       break;
+>     }
+>     case 48: { const a=((this.r[rs]+simm)|0)>>>0; this.r[rt]=this.mem.r32(a)|0; break; } // LL
+>     case 56: { const a=((this.r[rs]+simm)|0)>>>0; this.mem.w32(a,this.r[rt]>>>0); this.r[rt]=1; break; } // SC
+>     case 47: case 51: break; // CACHE/PREF NOP
+>     default:
+>       console.log('Unknown op='+op+' @0x'+pc.toString(16)+' instr=0x'+instr.toString(16));
+>       this.running=false;
+>     }
+>     this.r[0] = 0;
+>     if (this.inDelay) { this.pc = this.delayPC; this.inDelay = false; }
+>     else if (branch) { this.pc = npc; this.inDelay = true; this.delayPC = btgt; }
+>     else { this.pc = npc; }
+>     this.ic++;
+>   }
+>
+>   run() {
+>     console.log('Starting MIPS emulation...');
+>     const t0 = Date.now();
+>     while (this.running) {
+>       this.step();
+>       if ((this.ic & 0xFFFFFF) === 0) {
+>         const el = (Date.now()-t0)/1000;
+>         console.log('IC=' + this.ic + ' T=' + el.toFixed(1) + 's MIPS=' + (this.ic/el/1e6).toFixed(2) + ' PC=0x' + this.pc.toString(16));
+>       }
+>     }
+>     console.log('Done. ' + this.ic + ' instructions in ' + ((Date.now()-t0)/1000).toFixed(1) + 's');
+>   }
+> }
+>
+> const cpu = new MIPSCPU();
+> cpu.loadELF(path.join(process.cwd(), 'doomgeneric_mips'));
+> cpu.run();
+> """)
+> print('vm.js written: ' + str(os.path.getsize('/app/vm.js')) + ' bytes')
+> PYEND
+Traceback (most recent call last):
+  File "<stdin>", line 395, in <module>
+NameError: name 'os' is not defined. Did you forget to import 'os'?
+root@1def17a1-76f5-4fb2-ac52-248adf7a83dd:/app#

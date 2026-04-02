@@ -1,0 +1,106 @@
+New Terminal Output:
+
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> V,C,E,L = 50257, 1024, 768, 12
+> E4 = 3072
+> NH = 12
+> HS = 64
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', data, off*4))
+>
+> # TF ordering
+> o = 0
+> lay = []
+> for l in range(L):
+>     d = {}
+>     d['qb']=o; o+=3*E
+>     d['qw']=o; o+=E*3*E
+>     d['pb']=o; o+=E
+>     d['pw']=o; o+=E*E
+>     d['l1b']=o; o+=E
+>     d['l1g']=o; o+=E
+>     d['l2b']=o; o+=E
+>     d['l2g']=o; o+=E
+>     d['fb']=o; o+=E4
+>     d['fw']=o; o+=E*E4
+>     d['mb']=o; o+=E
+>     d['mw']=o; o+=E4*E
+>     lay.append(d)
+> lnfb=o; o+=E
+> lnfg=o; o+=E
+> wpe_off=o; o+=C*E
+> wte_off=o; o+=V*E
+>
+> def layernorm(x, g_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     g = F(g_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*g[i]+b[i] for i in range(n)]
+>
+> def matmul(x, w_off, n, d):
+>     w = F(w_off, n*d)
+>     out = [0.0]*d
+>     for i in range(d):
+>         for j in range(n):
+>             out[i] += x[j] * w[j*d+i]
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> tok = 464
+> pos = 0
+> we = F(wte_off+tok*E, E)
+> pe = F(wpe_off+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+> print(f'Emb first5: {x[:5]}')
+>
+> # Layer 0
+> d = lay[0]
+> h = layernorm(x, d['l1g'], d['l1b'])
+> print(f'LN1 first5: {h[:5]}')
+>
+> qkv = matmul(h, d['qw'], E, 3*E)
+> bi = F(d['qb'], 3*E)
+> for i in range(3*E): qkv[i] += bi[i]
+> print(f'Q first5: {qkv[:5]}')
+> print(f'K first5: {qkv[E:E+5]}')
+> print(f'V first5: {qkv[2*E:2*E+5]}')
+>
+> # For pos=0, attn output = V
+> v_vals = qkv[2*E:3*E]
+> attn_out = matmul(v_vals, d['pw'], E, E)
+> bi_ap = F(d['pb'], E)
+> for i in range(E): x[i] += attn_out[i] + bi_ap[i]
+> print(f'After attn residual first5: {x[:5]}')
+>
+> h2 = layernorm(x, d['l2g'], d['l2b'])
+> fc = matmul(h2, d['fw'], E, E4)
+> bi_fc = F(d['fb'], E4)
+> for i in range(E4): fc[i] = gelu(fc[i]+bi_fc[i])
+> proj = matmul(fc, d['mw'], E4, E)
+> bi_proj = F(d['mb'], E)
+> for i in range(E): x[i] += proj[i] + bi_proj[i]
+> print(f'After MLP residual first5: {x[:5]}')
+> print(f'After L0 mean: {sum(x)/E:.4f}')
+>
+> PYEOF
+Emb first5: [-0.08744361437857151, -0.21771634183824062, 0.06849727686494589, -0.050737722776830196, -0.049695029854774475]
+LN1 first5: [-0.05292352548620776, -0.0777903682779395, -0.03243910201482743, -0.028004391531450214, -0.03955240494174235]
+Q first5: [0.1531938948946011, -0.4147512217317668, 0.36701318993375576, -1.177977887382314, 0.16780285933112232]
+K first5: [-0.9420208942786031, 1.902251352834726, 0.8721914303938231, -0.15018044603276087, 0.40399637158728]
+V first5: [-0.01306633060280305, -0.014464070906786013, 0.1269401900161433, -0.022084157559343877, -0.20818818666843517]
+After attn residual first5: [0.12177938963626436, -0.4313147704778836, 0.8060512915377558, -0.0635174407347218, -0.04263863503609841]
+After MLP residual first5: [0.1558640669615784, -0.7946462221477096, 0.39427582164245856, 0.3412739431052377, -0.5653269718213092]
+After L0 mean: 0.0810
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app#

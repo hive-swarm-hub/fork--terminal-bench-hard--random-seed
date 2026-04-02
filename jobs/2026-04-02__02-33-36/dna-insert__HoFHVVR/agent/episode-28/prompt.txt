@@ -1,0 +1,181 @@
+New Terminal Output:
+
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# cat > /app/grader_sim.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+> doubled = input_seq + input_seq  # circular
+>
+> primers = parse_fasta('primers.fasta')
+> primer_list = list(primers.items())
+>
+> print("=== GRADER SIMULATION ===")
+> print(f"Input plasmid: {len(input_seq)} bp")
+> print(f"Output plasmid: {len(output_seq)} bp")
+> print(f"Number of primer pairs: {len(primer_list) // 2}")
+> print()
+>
+> for i in range(0, len(primer_list), 2):
+>     fwd_name, fwd_seq = primer_list[i]
+>     rev_name, rev_seq = primer_list[i+1]
+>     fwd_seq = fwd_seq.upper()
+>     rev_seq = rev_seq.upper()
+>
+>     print(f"Pair {i//2 + 1}:")
+>     print(f"  Forward: {fwd_name} = {fwd_seq} ({len(fwd_seq)} bp)")
+>     print(f"  Reverse: {rev_name} = {rev_seq} ({len(rev_seq)} bp)")
+>
+>     # Find longest 3' match for forward primer on + strand of template
+>     fwd_anneal_len = 0
+>     fwd_anneal_pos = -1
+>     for l in range(1, len(fwd_seq) + 1):
+>         suffix = fwd_seq[-l:]
+>         pos = doubled.find(suffix)
+>         if pos >= 0:
+>             fwd_anneal_len = l
+>             fwd_anneal_pos = pos % len(input_seq)
+>         else:
+>             break
+>
+>     fwd_anneal = fwd_seq[-fwd_anneal_len:]
+>     fwd_tail = fwd_seq[:-fwd_anneal_len] if fwd_anneal_len < len(fwd_seq) else ""
+>
+>     print(f"  Fwd annealing (longest 3' match on + strand): {fwd_anneal} ({fwd_anneal_len} bp)")
+>     print(f"  Fwd tail: {fwd_tail} ({len(fwd_tail)} bp)")
+>     print(f"  Fwd anneal position on template: {fwd_anneal_pos}")
+>
+>     # Find longest 3' match for reverse primer on - strand of template
+>     # This means: find longest suffix of rev_seq whose RC appears in the template
+>     rev_anneal_len = 0
+>     rev_anneal_pos = -1
+>     for l in range(1, len(rev_seq) + 1):
+>         suffix = rev_seq[-l:]
+>         rc_suffix = reverse_complement(suffix)
+>         pos = doubled.find(rc_suffix)
+>         if pos >= 0:
+>             rev_anneal_len = l
+>             rev_anneal_pos = pos % len(input_seq)
+>         else:
+>             break
+>
+>     rev_anneal = rev_seq[-rev_anneal_len:]
+>     rev_tail = rev_seq[:-rev_anneal_len] if rev_anneal_len < len(rev_seq) else ""
+>
+>     print(f"  Rev annealing (longest 3' match on - strand): {rev_anneal} ({rev_anneal_len} bp)")
+>     print(f"  Rev tail: {rev_tail} ({len(rev_tail)} bp)")
+>     print(f"  Rev anneal RC position on template: {rev_anneal_pos}")
+>
+>     # Compute Tms
+>     fwd_tm = get_tm(fwd_anneal)
+>     rev_tm = get_tm(rev_anneal)
+>     tm_diff = abs(fwd_tm - rev_tm)
+>
+>     print(f"  Fwd Tm: {fwd_tm:.2f}")
+>     print(f"  Rev Tm: {rev_tm:.2f}")
+>     print(f"  Tm diff: {tm_diff:.2f}")
+>
+>     # Check constraints
+>     print(f"  Constraints:")
+>     print(f"    Fwd anneal 15-45: {15 <= fwd_anneal_len <= 45} ({fwd_anneal_len})")
+>     print(f"    Rev anneal 15-45: {15 <= rev_anneal_len <= 45} ({rev_anneal_len})")
+>     print(f"    Fwd Tm 58-72: {58 <= fwd_tm <= 72} ({fwd_tm:.2f})")
+>     print(f"    Rev Tm 58-72: {58 <= rev_tm <= 72} ({rev_tm:.2f})")
+>     print(f"    Tm diff <= 5: {tm_diff <= 5} ({tm_diff:.2f})")
+>
+>     # Simulate product
+>     # Forward primer anneals at fwd_anneal_pos on + strand
+>     # Reverse primer RC anneals at rev_anneal_pos on + strand
+>     rc_rev_anneal = reverse_complement(rev_anneal)
+>     rev_template_end = rev_anneal_pos + len(rc_rev_anneal)  # exclusive end on + strand
+>
+>     print(f"\n  Product simulation:")
+>     print(f"    Fwd anneals at template [{fwd_anneal_pos}, {fwd_anneal_pos + fwd_anneal_len})")
+>     print(f"    Rev RC on template [{rev_anneal_pos}, {rev_template_end})")
+>
+>     # For back-to-back: rev_template_end should equal fwd_anneal_pos
+>     # The product inserts: rev_tail_RC + fwd_tail at the junction
+>     print(f"    Back-to-back: rev_end {rev_template_end} == fwd_start {fwd_anneal_pos}: {rev_template_end == fwd_anneal_pos}")
+>
+>     if rev_template_end == fwd_anneal_pos:
+>         # Product = input[:fwd_anneal_pos] + RC(rev_tail) + fwd_tail + input[fwd_anneal_pos:]
+>         rev_tail_rc = reverse_complement(rev_tail) if rev_tail else ""
+>         product = input_seq[:fwd_anneal_pos] + rev_tail_rc + fwd_tail + input_seq[fwd_anneal_pos:]
+>         print(f"    Product length: {len(product)}")
+>         print(f"    Output length: {len(output_seq)}")
+>         print(f"    Product == Output: {product == output_seq}")
+>         if product != output_seq:
+>             for j in range(min(len(product), len(output_seq))):
+>                 if product[j] != output_seq[j]:
+>                     print(f"    First diff at {j}: product={product[j]}, output={output_seq[j]}")
+>                     ctx = 20
+>                     print(f"    Product: ...{product[max(0,j-ctx):j+ctx]}...")
+>                     print(f"    Output:  ...{output_seq[max(0,j-ctx):j+ctx]}...")
+>                     break
+>     else:
+>         gap = fwd_anneal_pos - rev_template_end
+>         print(f"    Gap/overlap: {gap} bp")
+> PYEOF
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# python3 /app/grader_sim.py
+=== GRADER SIMULATION ===
+Input plasmid: 3591 bp
+Output plasmid: 3630 bp
+Number of primer pairs: 1
+
+Pair 1:
+  Forward: primer_forward = AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG (54 bp)
+  Reverse: primer_reverse = CATATGTATATCTCCTTCTTAAAGTTAAACAA (32 bp)
+  Fwd annealing (longest 3' match on + strand): AGCAAGGGCGAGGAG (15 bp)
+  Fwd tail: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39 bp)
+  Fwd anneal position on template: 213
+  Rev annealing (longest 3' match on - strand): CATATGTATATCTCCTTCTTAAAGTTAAACAA (32 bp)
+  Rev tail:  (0 bp)
+  Rev anneal RC position on template: 181
+  Fwd Tm: 59.54
+  Rev Tm: 59.74
+  Tm diff: 0.21
+  Constraints:
+    Fwd anneal 15-45: True (15)
+    Rev anneal 15-45: True (32)
+    Fwd Tm 58-72: True (59.54)
+    Rev Tm 58-72: True (59.74)
+    Tm diff <= 5: True (0.21)
+
+  Product simulation:
+    Fwd anneals at template [213, 228)
+    Rev RC on template [181, 213)
+    Back-to-back: rev_end 213 == fwd_start 213: True
+    Product length: 3630
+    Output length: 3630
+    Product == Output: True
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app#

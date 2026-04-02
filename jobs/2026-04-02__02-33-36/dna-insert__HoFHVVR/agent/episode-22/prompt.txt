@@ -1,0 +1,285 @@
+New Terminal Output:
+
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# cat > /app/final2.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Use insertion point p=213 where left_overlap=0
+> # This means the forward primer's 5' tail does NOT match the template before the annealing region
+> insertion_point = 213
+> insertion_seq = output_seq[213:213+39]  # AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+>
+> print(f"Insertion point: {insertion_point}")
+> print(f"Insertion sequence: {insertion_seq} ({len(insertion_seq)} bp)")
+>
+> # Verify
+> assert output_seq == input_seq[:insertion_point] + insertion_seq + input_seq[insertion_point:]
+> print("Insertion verified!")
+>
+> # Verify no left overlap (tail end doesn't match template before insertion point)
+> print(f"Last base of insertion: {insertion_seq[-1]}")
+> print(f"Template at pos {insertion_point-1}: {input_seq[insertion_point-1]}")
+> print(f"Match: {insertion_seq[-1] == input_seq[insertion_point-1]}")
+>
+> # Check: from the 3' end of the forward primer, how far does the match extend?
+> # Forward primer = insertion_seq + input[213:213+N]
+> # The 3' end is input[213:213+N]
+> # Going further 5', the next base is insertion_seq[-1] = 'A'
+> # Template at pos 212 = input[212]
+> print(f"\nTemplate at pos 212: {input_seq[212]}")
+> print(f"Last char of insertion: {insertion_seq[-1]}")
+> print(f"These match: {input_seq[212] == insertion_seq[-1]}")
+> # If they don't match, the 3' annealing region is exactly N bases - no ambiguity!
+>
+> # Now also check the right overlap (affects the reverse primer side)
+> # The insertion starts with 'AG' which matches input[213:215]
+> # This means the reverse primer's annealing region could extend into the insertion
+> # But the reverse primer anneals BEFORE the insertion point, so its 3' end
+> # on the template corresponds to position 212 (or wherever it ends)
+> # The reverse primer's 5' end corresponds to the highest position on the template
+> # For back-to-back: reverse primer covers input[213-rev_len:213]
+> # The reverse primer = RC(input[213-rev_len:213])
+> # The 3' end of the reverse primer on the - strand = position 213-rev_len on + strand
+> # The 5' end of the reverse primer on the - strand = position 212 on + strand
+> #
+> # Now, does the reverse primer's 5' end extend into the insertion?
+> # The reverse primer is RC(input[213-rev_len:213])
+> # On the - strand, reading 5'->3': RC(input[213-rev_len:213])
+> # The 5' base of the reverse primer = complement of input[212] = complement of 'G' = 'C'
+> # The next base in the 5' direction (into the insertion) would be complement of input[213] = complement of 'A' = 'T'
+> # But the insertion starts with 'A', so on the - strand it's 'T'
+> # The reverse primer's 5' end is 'C' (complement of G at 212)
+> # Going further 5' on the - strand: complement of A at 213 = T
+> # Does the reverse primer extend? Only if we add more bases to its 5' end
+> # But we don't - the reverse primer is exactly RC(input[213-rev_len:213])
+> # So no overlap issue for the reverse primer
+>
+> # Actually wait - the right_overlap=2 means the first 2 bases of the insertion ("AG")
+> # match input[213:215]. But this is the template AFTER the insertion point.
+> # For the forward primer, the annealing starts at position 213.
+> # The forward primer = insertion_seq + input[213:213+N]
+> # = "AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA" + input[213:213+N]
+> # The 3' annealing region is input[213:213+N]
+> # The first 2 bases of the insertion "AG" match input[213:215]
+> # So the forward primer from 5' to 3' has:
+> # ...CAGAA|AGCAAGGGCGAGGAG...
+> #          ^--- annealing starts here (pos 213)
+> # But wait - the insertion ends with "...CAGAA" and the annealing starts with "AG" (pos 213-214)
+> # Going from 3' to 5' through the annealing region into the tail:
+> # ...GAGGAGCGGGAACGA|AAGAC...
+> # Wait let me be more careful.
+>
+> # Forward primer (5'->3'):
+> # AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT
+> # |-------- insertion tail (39bp) --------||-- annealing (18bp) --|
+> #
+> # From 3' end going backward:
+> # TTGTCGAGGEGCGGGAAACGA  <- wait, let me just print it
+>
+> fwd_anneal_len = 18
+> fwd_anneal = input_seq[insertion_point:insertion_point+fwd_anneal_len]
+> fwd_primer = insertion_seq + fwd_anneal
+> print(f"\nForward primer: {fwd_primer}")
+> print(f"  Tail: {insertion_seq}")
+> print(f"  Anneal: {fwd_anneal}")
+>
+> # Check longest 3' match to template
+> doubled = input_seq + input_seq  # for circular
+> for match_len in range(len(fwd_primer), 0, -1):
+>     candidate = fwd_primer[-match_len:]
+>     if candidate in doubled:
+>         print(f"\nLongest 3' match to template: {match_len} bp")
+>         print(f"  Sequence: {candidate}")
+>         pos = doubled.find(candidate)
+>         print(f"  Found at template position: {pos % len(input_seq)}")
+>         break
+>
+> # If the longest 3' match is exactly fwd_anneal_len, we're clean!
+> if match_len == fwd_anneal_len:
+>     print("  CLEAN - no overlap ambiguity!")
+> else:
+>     print(f"  WARNING - match extends {match_len - fwd_anneal_len} bases into tail!")
+>
+> print()
+>
+> # Now find best primer pair
+> best_pair = None
+> best_tm_diff = float('inf')
+>
+> for fwd_anneal_len in range(15, 46):
+>     fwd_anneal = input_seq[insertion_point : insertion_point + fwd_anneal_len]
+>
+>     # Verify no overlap: check that the base just before the annealing in the primer
+>     # (last base of insertion) doesn't match the template base before insertion_point
+>     if insertion_seq[-1] == input_seq[insertion_point - 1]:
+>         # Check how far the overlap extends
+>         extra = 0
+>         for i in range(1, len(insertion_seq)+1):
+>             if fwd_anneal_len + i > 45:
+>                 break
+>             if insertion_seq[-i] == input_seq[insertion_point - i]:
+>                 extra = i
+>             else:
+>                 break
+>         actual_anneal_len = fwd_anneal_len + extra
+>         actual_anneal = input_seq[insertion_point - extra : insertion_point + fwd_anneal_len]
+>     else:
+>         actual_anneal_len = fwd_anneal_len
+>         actual_anneal = fwd_anneal
+>
+>     if actual_anneal_len < 15 or actual_anneal_len > 45:
+>         continue
+>
+>     try:
+>         fwd_tm = get_tm(actual_anneal)
+>     except:
+>         continue
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_anneal_len in range(15, 46):
+>         rev_end = insertion_point
+>         rev_start = insertion_point - rev_anneal_len
+>         if rev_start < 0:
+>             rev_anneal = input_seq[rev_start:] + input_seq[:rev_end]
+>         else:
+>             rev_anneal = input_seq[rev_start:rev_end]
+>
+>         if len(rev_anneal) != rev_anneal_len:
+>             continue
+>
+>         try:
+>             rev_tm = get_tm(rev_anneal)
+>         except:
+>             continue
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > 5:
+>             continue
+>
+>         fwd_primer = insertion_seq + input_seq[insertion_point:insertion_point+fwd_anneal_len]
+>         rev_primer = reverse_complement(rev_anneal)
+>
+>         if tm_diff < best_tm_diff:
+>             best_tm_diff = tm_diff
+>             best_pair = {
+>                 'fwd_primer': fwd_primer,
+>                 'rev_primer': rev_primer,
+>                 'fwd_anneal': actual_anneal,
+>                 'rev_anneal': rev_anneal,
+>                 'fwd_tm': fwd_tm,
+>                 'rev_tm': rev_tm,
+>                 'tm_diff': tm_diff,
+>                 'fwd_anneal_len': actual_anneal_len,
+>                 'rev_anneal_len': rev_anneal_len,
+>                 'fwd_designed_anneal_len': fwd_anneal_len
+>             }
+>
+> if best_pair:
+>     p = best_pair
+>     print(f"Best primer pair:")
+>     print(f"  Forward: {p['fwd_primer']} ({len(p['fwd_primer'])} bp)")
+>     print(f"    Designed anneal len: {p['fwd_designed_anneal_len']}")
+>     print(f"    Actual anneal (incl overlap): {p['fwd_anneal']} ({p['fwd_anneal_len']} bp, Tm={p['fwd_tm']:.2f})")
+>     print(f"  Reverse: {p['rev_primer']} ({len(p['rev_primer'])} bp)")
+>     print(f"    Anneal: {p['rev_anneal']} ({p['rev_anneal_len']} bp, Tm={p['rev_tm']:.2f})")
+>     print(f"  Tm diff: {p['tm_diff']:.2f}")
+>
+>     # Verify longest 3' match
+>     doubled = input_seq + input_seq
+>     for ml in range(len(p['fwd_primer']), 0, -1):
+>         if p['fwd_primer'][-ml:] in doubled:
+>             print(f"\n  Fwd longest 3' match: {ml} bp (anneal computed for: {p['fwd_anneal_len']} bp)")
+>             break
+>     for ml in range(len(p['rev_primer']), 0, -1):
+>         rc_candidate = reverse_complement(p['rev_primer'][-ml:])
+>         if rc_candidate in doubled:
+>             # Actually for reverse primer, check if the primer itself matches
+>             # The reverse primer anneals to the - strand
+>             # Its 3' end matches the - strand, which means RC matches the + strand
+>             print(f"  Rev longest 3' match (as RC on + strand): {ml} bp (anneal computed for: {p['rev_anneal_len']} bp)")
+>             break
+>
+>     # Product verification
+>     product = input_seq[:insertion_point] + insertion_seq + input_seq[insertion_point:]
+>     print(f"\n  Product == Output: {product == output_seq}")
+>
+>     # Write
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">primer_forward\n{p['fwd_primer']}\n")
+>         f.write(f">primer_reverse\n{p['rev_primer']}\n")
+>     print("  Written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>     sys.exit(1)
+> PYEOF
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# python3 /app/final2.py
+Insertion point: 213
+Insertion sequence: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39 bp)
+Insertion verified!
+Last base of insertion: A
+Template at pos 212: G
+Match: False
+
+Template at pos 212: G
+Last char of insertion: A
+These match: False
+
+Forward primer: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG
+  Tail: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+  Anneal: AGCAAGGGCGAGGAGCTG
+
+Longest 3' match to template: 18 bp
+  Sequence: AGCAAGGGCGAGGAGCTG
+  Found at template position: 213
+  CLEAN - no overlap ambiguity!
+
+Best primer pair:
+  Forward: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG (54 bp)
+    Designed anneal len: 15
+    Actual anneal (incl overlap): AGCAAGGGCGAGGAG (15 bp, Tm=59.54)
+  Reverse: CATATGTATATCTCCTTCTTAAAGTTAAACAA (32 bp)
+    Anneal: TTGTTTAACTTTAAGAAGGAGATATACATATG (32 bp, Tm=59.74)
+  Tm diff: 0.21
+
+  Fwd longest 3' match: 15 bp (anneal computed for: 15 bp)
+  Rev longest 3' match (as RC on + strand): 32 bp (anneal computed for: 32 bp)
+
+  Product == Output: True
+  Written to primers.fasta
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app#

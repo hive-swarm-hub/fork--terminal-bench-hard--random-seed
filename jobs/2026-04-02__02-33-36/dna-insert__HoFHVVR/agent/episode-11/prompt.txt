@@ -1,0 +1,233 @@
+New Terminal Output:
+
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# cat > /app/verify.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Read sequences
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Read primers
+> primers = parse_fasta('primers.fasta')
+> primer_names = list(primers.keys())
+> print(f"Primers found: {primer_names}")
+> fwd_primer = primers[primer_names[0]].upper()
+> rev_primer = primers[primer_names[1]].upper()
+>
+> print(f"Forward primer: {fwd_primer} ({len(fwd_primer)} bp)")
+> print(f"Reverse primer: {rev_primer} ({len(rev_primer)} bp)")
+>
+> # For Q5 SDM with insertion:
+> # The forward primer has a 5' tail (insertion) + annealing region
+> # The reverse primer is entirely annealing, on the opposite strand
+>
+> # Find where the forward primer anneals to the input template
+> # The 3' end of the forward primer should match the input template
+> fwd_anneal = None
+> fwd_anneal_start = None
+> for anneal_len in range(15, min(len(fwd_primer)+1, 46)):
+>     candidate = fwd_primer[-anneal_len:]
+>     pos = input_seq.find(candidate)
+>     if pos >= 0:
+>         fwd_anneal = candidate
+>         fwd_anneal_start = pos
+>         # Keep looking for longer matches
+>     # Also check circular
+>     doubled = input_seq + input_seq
+>     pos2 = doubled.find(candidate)
+>     if pos2 >= 0:
+>         fwd_anneal = candidate
+>         fwd_anneal_start = pos2 % len(input_seq)
+>
+> print(f"\nForward primer annealing region: {fwd_anneal} ({len(fwd_anneal)} bp)")
+> print(f"  Anneals at input position: {fwd_anneal_start}")
+> fwd_tail = fwd_primer[:len(fwd_primer)-len(fwd_anneal)]
+> print(f"  5' tail (insertion): {fwd_tail} ({len(fwd_tail)} bp)")
+>
+> # Find where the reverse primer anneals
+> # The reverse primer anneals to the opposite strand
+> rev_anneal = rev_primer  # For SDM, the entire reverse primer may be annealing
+> rev_complement_on_template = reverse_complement(rev_primer)
+>
+> # Find the reverse complement on the template
+> rev_anneal_region = None
+> rev_anneal_start = None
+> for anneal_len in range(len(rev_primer), 14, -1):
+>     candidate_rc = reverse_complement(rev_primer[-anneal_len:])
+>     doubled = input_seq + input_seq
+>     pos = doubled.find(candidate_rc)
+>     if pos >= 0:
+>         rev_anneal_region = rev_primer[-anneal_len:]
+>         rev_anneal_start = pos % len(input_seq)
+>         break
+>
+> if rev_anneal_region is None:
+>     # Try from 3' end
+>     for anneal_len in range(len(rev_primer), 14, -1):
+>         candidate_rc = reverse_complement(rev_primer[:anneal_len])
+>         doubled = input_seq + input_seq
+>         pos = doubled.find(candidate_rc)
+>         if pos >= 0:
+>             rev_anneal_region = rev_primer[:anneal_len]
+>             # The annealing is on the minus strand
+>             rev_anneal_start = pos % len(input_seq)
+>             break
+>
+> print(f"\nReverse primer annealing region: {rev_anneal_region} ({len(rev_anneal_region)} bp)")
+> print(f"  RC on template starts at: {rev_anneal_start}")
+>
+> rev_tail = rev_primer[:len(rev_primer)-len(rev_anneal_region)] if rev_anneal_region != rev_primer else ""
+> print(f"  5' tail: '{rev_tail}' ({len(rev_tail)} bp)")
+>
+> # Compute Tms
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_anneal_region)
+> print(f"\nForward annealing Tm: {fwd_tm:.2f}°C")
+> print(f"Reverse annealing Tm: {rev_tm:.2f}°C")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}°C")
+>
+> # Verify constraints
+> print("\n=== CONSTRAINT CHECKS ===")
+> print(f"Fwd anneal length {len(fwd_anneal)}: {'PASS' if 15 <= len(fwd_anneal) <= 45 else 'FAIL'}")
+> print(f"Rev anneal length {len(rev_anneal_region)}: {'PASS' if 15 <= len(rev_anneal_region) <= 45 else 'FAIL'}")
+> print(f"Fwd Tm {fwd_tm:.2f}: {'PASS' if 58 <= fwd_tm <= 72 else 'FAIL'}")
+> print(f"Rev Tm {rev_tm:.2f}: {'PASS' if 58 <= rev_tm <= 72 else 'FAIL'}")
+> print(f"Tm diff {abs(fwd_tm-rev_tm):.2f}: {'PASS' if abs(fwd_tm-rev_tm) <= 5 else 'FAIL'}")
+>
+> # Simulate the Q5 SDM reaction
+> # In Q5 SDM:
+> # 1. Primers bind back-to-back on the template
+> # 2. Extension goes around the plasmid
+> # 3. The product is a linear molecule that gets ligated
+> #
+> # Forward primer anneals at position fwd_anneal_start on the + strand
+> # Reverse primer anneals on the - strand, ending just before fwd_anneal_start
+> #
+> # The product should be:
+> # fwd_tail + template from fwd_anneal_start going forward ... around ... to where rev primer anneals
+>
+> # Let me verify by constructing the product
+> # The forward primer contributes: fwd_tail + fwd_anneal + extension forward
+> # The reverse primer contributes: rev_anneal (rc) + extension backward
+> # After ligation, the circular product is:
+> # fwd_tail + input_seq starting from fwd_anneal_start, going around to where rev primer ends
+>
+> # Rev primer anneals to template: reverse_complement(rev_primer) at position rev_anneal_start
+> # This means the rev primer's 3' end points toward the 5' direction on template
+> # The rev primer's 3' end is at template position: rev_anneal_start
+> # The rev primer's 5' end is at template position: rev_anneal_start + len(rev_anneal_region) - 1
+>
+> rc_rev = reverse_complement(rev_anneal_region)
+> rc_pos = input_seq.find(rc_rev)
+> print(f"\nRC of reverse primer found at input position: {rc_pos}")
+> print(f"RC of reverse primer ends at input position: {rc_pos + len(rc_rev) - 1}")
+>
+> # The reverse primer's 3' end on template is at rc_pos (it extends from rc_pos to rc_pos+len-1)
+> # But since the reverse primer is on the minus strand, its 3' end extends toward lower positions
+> # So the reverse primer's 3' end corresponds to template position rc_pos + len(rc_rev) - 1
+> # And extension from the reverse primer goes toward even higher positions
+> # Wait, no. The reverse primer binds the minus strand. Its 3' end on the minus strand
+> # corresponds to the LOWEST template position it covers.
+> # Extension from the 3' end of the reverse primer goes in the 3'->5' direction on the template (minus strand)
+> # which means going toward LOWER template positions.
+>
+> # Actually for back-to-back primers in SDM:
+> # Forward primer anneals starting at position A on + strand, extends forward (increasing positions)
+> # Reverse primer anneals ending at position A-1 on + strand (its RC), extends backward (decreasing positions)
+> # Together they amplify the entire plasmid
+>
+> # Forward anneals at positions [fwd_anneal_start, fwd_anneal_start + len(fwd_anneal) - 1] on + strand
+> # Reverse primer's RC on template is at [rc_pos, rc_pos + len(rc_rev) - 1]
+> # For back-to-back: rc_pos + len(rc_rev) should equal fwd_anneal_start (they're adjacent)
+>
+> print(f"\nFwd anneal starts at: {fwd_anneal_start}")
+> print(f"Rev RC ends at: {rc_pos + len(rc_rev)}")
+> print(f"Back-to-back check: {rc_pos + len(rc_rev)} == {fwd_anneal_start}: {rc_pos + len(rc_rev) == fwd_anneal_start}")
+>
+> # Construct the product plasmid (circular)
+> # The product is: fwd_tail + input_seq from fwd_anneal_start going around to rc_pos + len(rc_rev) - 1
+> # Since they're back-to-back, the product is: fwd_tail + entire input_seq starting from fwd_anneal_start
+> # But it's circular, so: fwd_tail inserted at position fwd_anneal_start
+>
+> product = input_seq[:fwd_anneal_start] + fwd_tail + input_seq[fwd_anneal_start:]
+> print(f"\nProduct length: {len(product)}")
+> print(f"Output length: {len(output_seq)}")
+> print(f"Product matches output: {product == output_seq}")
+>
+> if product != output_seq:
+>     # Find where they differ
+>     for i in range(min(len(product), len(output_seq))):
+>         if product[i] != output_seq[i]:
+>             print(f"First diff at pos {i}: product={product[i]}, output={output_seq[i]}")
+>             print(f"Product context: ...{product[max(0,i-20):i+20]}...")
+>             print(f"Output context:  ...{output_seq[max(0,i-20):i+20]}...")
+>             break
+> PYEOF
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# python3 /app/verify.py
+Primers found: ['primer_forward', 'primer_reverse']
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT (57 bp)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 bp)
+
+Forward primer annealing region: AGCAAGGGCGAGGAGCTGTT (20 bp)
+  Anneals at input position: 213
+  5' tail (insertion): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (37 bp)
+
+Reverse primer annealing region: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 bp)
+  RC on template starts at: 170
+  5' tail: '' (0 bp)
+
+Forward annealing Tm: 68.19°C
+Reverse annealing Tm: 63.81°C
+Tm difference: 4.39°C
+
+=== CONSTRAINT CHECKS ===
+Fwd anneal length 20: PASS
+Rev anneal length 45: PASS
+Fwd Tm 68.19: PASS
+Rev Tm 63.81: PASS
+Tm diff 4.39: PASS
+
+RC of reverse primer found at input position: 170
+RC of reverse primer ends at input position: 214
+
+Fwd anneal starts at: 213
+Rev RC ends at: 215
+Back-to-back check: 215 == 213: False
+
+Product length: 3628
+Output length: 3630
+Product matches output: False
+First diff at pos 213: product=T, output=A
+Product context: ...AAGAAGGAGATATACATATGTAGATTAGAAGAAGAATTAA...
+Output context:  ...AAGAAGGAGATATACATATGAGTAGATTAGAAGAAGAATT...
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app#

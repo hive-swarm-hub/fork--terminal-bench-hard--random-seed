@@ -1,0 +1,163 @@
+New Terminal Output:
+
+>
+> # Recompute from the residual after layer 0 attention
+> # Residual1 first5: 5.196749 -0.307801 -11.454429 -6.940011 7.163736
+> # We need the full residual vector... let me compute from scratch
+>
+> tok = 464
+> pos = 0
+> we = F(wo+tok*E, E)
+> pe = F(wp+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+>
+> l = 0
+> h = layernorm_p1(x, wl1+l*E, wb1+l*E)
+> qkv = matmul(h, wqk+l*E*3*E, E, 3*E)
+> bi = F(wqb+l*3*E, 3*E)
+> for i in range(3*E): qkv[i] += bi[i]
+>
+> # For pos=0, attention output = V (single position)
+> v_vals = qkv[2*E:3*E]
+>
+> # attn proj
+> attn_out = matmul(v_vals, wap+l*E*E, E, E)
+> bi_ap = F(wab+l*E, E)
+> for i in range(E): x[i] += attn_out[i] + bi_ap[i]
+>
+> print(f'\nPython Residual1 first5: {x[:5]}')
+>
+> # ln2
+> h2 = layernorm_p1(x, wl2+l*E, wb2+l*E)
+> print(f'Python LN2 first5: {h2[:5]}')
+>
+> # fc
+> fc_out = matmul(h2, wfc+l*E*E4, E, E4)
+> bi_fc = F(wfb+l*E4, E4)
+> print(f'Python FC pre-gelu first5: {[fc_out[i]+bi_fc[i] for i in range(5)]}')
+> for i in range(E4): fc_out[i] = gelu(fc_out[i]+bi_fc[i])
+> print(f'Python FC post-gelu first5: {fc_out[:5]}')
+>
+> # proj
+> proj_out = matmul(fc_out, wfp+l*E4*E, E4, E)
+> bi_proj = F(wpb+l*E, E)
+> print(f'Python MLPproj first5: {[proj_out[i]+bi_proj[i] for i in range(5)]}')
+>
+> PYEOF
+wfc offset: 67769088
+wfb offset: 96080640
+wfp offset: 96117504
+wpb offset: 124429056
+fcproj w[0] first 20: [0.057372115552425385, -0.0671289712190628, 0.14318378269672394, -0.06322738528251648, -0.02303081378340721, 0.042715512216091156, -0.2212
+4391794204712, -0.17061981558799744, 0.04456854611635208, 0.1611063927412033, -0.04748852550983429, 0.11510210484266281, 0.08785267919301987, -0.126781255006790
+16, 0.20894074440002441, -0.3132499158382416, -0.2535296380519867, 0.02986976131796837, 0.014739042147994041, 0.03139740973711014]
+fcproj w[0] mean: 0.0002703424595867847
+fcproj w[0] min: -1.2109633684158325
+fcproj w[0] max: 1.2940529584884644
+
+Python Residual1 first5: [5.196768439524498, -0.3078055381850431, -11.454428789087967, -6.940028253092829, 7.163732738821932]
+Python LN2 first5: [0.5567229694928757, -0.1299175737476842, -1.156316883189899, -0.8794081914688857, 0.5410078004174604]
+Python FC pre-gelu first5: [-2.9362248163068547, 1.0505933473295666, -0.4507839035178359, -8.636529132924448, -2.1598187167196996]
+Python FC post-gelu first5: [-0.004443858124008967, 0.8962772418148943, -0.1470000729964302, -0.0, -0.03301273742583523]
+Python MLPproj first5: [27.93801135943888, -216.63730110221104, 472.82182103152707, -78.20483107799244, 22.500266608099253]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> V,C,E,L = 50257, 1024, 768, 12
+> E4 = 3072
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', data, off*4))
+>
+> o=0
+> wo=o;o+=V*E;wp=o;o+=C*E
+> wl1=o;o+=L*E;wb1=o;o+=L*E
+> wqk=o;o+=L*E*3*E;wqb=o;o+=L*3*E
+> wap=o;o+=L*E*E;wab=o;o+=L*E
+> wl2=o;o+=L*E;wb2=o;o+=L*E
+> wfc=o;o+=L*E*E4;wfb=o;o+=L*E4
+> wfp=o;o+=L*E4*E;wpb=o;o+=L*E
+> wlf=o;o+=E;wlb=o
+>
+> def layernorm(x, w_off, b_off, plus1=True):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     if plus1:
+>         return [(x[i]-m)*s*(w[i]+1)+b[i] for i in range(n)]
+>     else:
+>         return [(x[i]-m)*s*w[i]+b[i] for i in range(n)]
+>
+> def matmul(x, w_off, n, d):
+>     w = F(w_off, n*d)
+>     out = [0.0]*d
+>     for i in range(d):
+>         for j in range(n):
+>             out[i] += x[j] * w[j*d+i]
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> def full_layer(x, l, plus1=True):
+>     h = layernorm(x, wl1+l*E, wb1+l*E, plus1)
+>     qkv = matmul(h, wqk+l*E*3*E, E, 3*E)
+>     bi = F(wqb+l*3*E, 3*E)
+>     for i in range(3*E): qkv[i] += bi[i]
+>     v_vals = qkv[2*E:3*E]  # for pos=0, attn out = V
+>     attn_out = matmul(v_vals, wap+l*E*E, E, E)
+>     bi_ap = F(wab+l*E, E)
+>     for i in range(E): x[i] += attn_out[i] + bi_ap[i]
+>     h2 = layernorm(x, wl2+l*E, wb2+l*E, plus1)
+>     fc = matmul(h2, wfc+l*E*E4, E, E4)
+>     bi_fc = F(wfb+l*E4, E4)
+>     for i in range(E4): fc[i] = gelu(fc[i]+bi_fc[i])
+>     proj = matmul(fc, wfp+l*E4*E, E4, E)
+>     bi_proj = F(wpb+l*E, E)
+>     for i in range(E): x[i] += proj[i] + bi_proj[i]
+>     return x
+>
+> tok = 464
+> pos = 0
+> we = F(wo+tok*E, E)
+> pe = F(wp+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+>
+> for l in range(L):
+>     x = full_layer(x, l, plus1=True)
+>     print(f'Layer {l} done, x first3: {x[:3]}, mean: {sum(x)/E:.4f}')
+>
+> # Final LN
+> x = layernorm(x, wlf, wlb, plus1=True)
+> print(f'Final LN first3: {x[:3]}')
+>
+> # Logits for top tokens
+> logits = matmul(x, wo, E, V)
+> top = sorted(range(V), key=lambda i: -logits[i])[:10]
+> print(f'Top 10 tokens: {top}')
+> print(f'Top 10 logits: {[round(logits[i],2) for i in top]}')
+>
+> PYEOF
+Layer 0 done, x first3: [33.13477979896338, -216.9451066403961, 461.3673922424391], mean: 2.4652
+Layer 1 done, x first3: [39.89753820081237, -427.20096629830016, 933.153247778404], mean: 4.1022
+Layer 2 done, x first3: [8.603811410633547, -725.0087268048346, 1564.432196255383], mean: 6.2366
+Layer 3 done, x first3: [-13.164520437960864, -905.4694509835974, 1970.374750250834], mean: 7.5686
+Layer 4 done, x first3: [-55.27413325687089, -1134.1941420458145, 2432.4815203854496], mean: 8.9133
+Layer 5 done, x first3: [-75.3519325220289, -1356.4666998678133, 2868.0084079169756], mean: 10.7207
+Layer 6 done, x first3: [-102.3030872103291, -1691.7947533433712, 3441.1255536100066], mean: 12.7977
+Layer 7 done, x first3: [-103.78966648601151, -1991.732921429554, 3946.8485735983363], mean: 15.1020
+Layer 8 done, x first3: [-147.0234791370392, -2273.53280967106, 4472.832565252006], mean: 17.2393
+Layer 9 done, x first3: [-167.0453853823124, -2502.1972523408867, 4984.23342864155], mean: 20.3634
+Layer 10 done, x first3: [-212.52039272677922, -2818.9913169431043, 5571.060488144645], mean: 17.4881
+Layer 11 done, x first3: [-205.71779627661053, -3102.107771560667, 6122.407243145321], mean: 27.7577
+Final LN first3: [-0.018612585985822133, -0.8316771127762499, 1.6608714214929399]
+Top 10 tokens: [22936, 41335, 13568, 28949, 22334, 6684, 46160, 36022, 10805, 14506]
+Top 10 logits: [18.24, 17.32, 17.21, 16.88, 16.74, 15.82, 15.75, 15.41, 15.35, 15.1]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app#

@@ -1,0 +1,290 @@
+New Terminal Output:
+
+root@aca2a533-a8c9-4ddd-9b7d-939dd852bc9d:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+>
+> def remove_javascript(html):
+>     # 1. Remove <script> tags and their contents (case-insensitive, dotall)
+>     html = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     html = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     html = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Clean <style> tag contents
+>     def clean_style_block(match):
+>         open_tag = match.group(1)
+>         content = match.group(2)
+>         close_tag = match.group(3)
+>         while re.search(r'expression\s*\(', content, re.IGNORECASE):
+>             new_content = re.sub(
+>                 r'expression\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)',
+>                 '',
+>                 content,
+>                 flags=re.IGNORECASE
+>             )
+>             if new_content == content:
+>                 new_content = re.sub(r'expression\s*\(.*?\)', '', content, flags=re.IGNORECASE | re.DOTALL)
+>             if new_content == content:
+>                 new_content = re.sub(r'expression\s*\(.*', '', content, flags=re.IGNORECASE)
+>             content = new_content
+>         content = re.sub(r'javascript\s*:', '', content, flags=re.IGNORECASE)
+>         content = re.sub(r'vbscript\s*:', '', content, flags=re.IGNORECASE)
+>         return open_tag + content + close_tag
+>
+>     html = re.sub(
+>         r'(<style\b[^>]*>)(.*?)(</style\s*>)',
+>         clean_style_block,
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     # 3. Process each HTML opening tag to remove dangerous attributes
+>     def process_tag(match):
+>         tag = match.group(0)
+>         # Parse tag name
+>         tag_name_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)', tag)
+>         if not tag_name_match:
+>             return tag
+>
+>         # Parse attributes from the tag
+>         # We need to carefully extract attribute name=value pairs
+>         # preserving exact formatting
+>         tag_name = tag_name_match.group(1)
+>         rest = tag[tag_name_match.end():]
+>
+>         # Build new tag by scanning through attributes
+>         result = '<' + tag_name
+>         i = 0
+>         while i < len(rest):
+>             # Check for end of tag
+>             if rest[i] == '>':
+>                 result += rest[i:]
+>                 break
+>             if rest[i:i+2] == '/>':
+>                 result += rest[i:]
+>                 break
+>
+>             # Check for whitespace
+>             if rest[i] in ' \t\n\r\f':
+>                 # Collect whitespace
+>                 ws_start = i
+>                 while i < len(rest) and rest[i] in ' \t\n\r\f':
+>                     i += 1
+>                 if i >= len(rest):
+>                     result += rest[ws_start:]
+>                     break
+>                 if rest[i] == '>' or rest[i:i+2] == '/>':
+>                     result += rest[ws_start:]
+>                     continue
+>
+>                 # Try to parse attribute name
+>                 attr_start = ws_start
+>                 attr_name_start = i
+>                 # Attribute name: sequence of non-whitespace, non =, non >, non /
+>                 attr_name_end = i
+>                 while attr_name_end < len(rest) and rest[attr_name_end] not in ' \t\n\r\f=>/"\'':
+>                     attr_name_end += 1
+>
+>                 if attr_name_end == i:
+>                     # No attribute name found, just add the character
+>                     result += rest[i]
+>                     i += 1
+>                     continue
+>
+>                 attr_name = rest[attr_name_start:attr_name_end]
+>                 i = attr_name_end
+>
+>                 # Skip whitespace after attr name
+>                 j = i
+>                 while j < len(rest) and rest[j] in ' \t\n\r\f':
+>                     j += 1
+>
+>                 # Check if there's an = sign
+>                 if j < len(rest) and rest[j] == '=':
+>                     j += 1
+>                     # Skip whitespace after =
+>                     while j < len(rest) and rest[j] in ' \t\n\r\f':
+>                         j += 1
+>
+>                     # Parse attribute value
+>                     if j < len(rest) and rest[j] == '"':
+>                         # Double-quoted value
+>                         end = rest.index('"', j + 1) if '"' in rest[j+1:] else len(rest) - 1
+>                         end += 1  # include closing quote
+>                         attr_value = rest[j:end]
+>                         attr_full = rest[attr_start:end]
+>                         i = end
+>                     elif j < len(rest) and rest[j] == "'":
+>                         # Single-quoted value
+>                         end = rest.index("'", j + 1) if "'" in rest[j+1:] else len(rest) - 1
+>                         end += 1
+>                         attr_value = rest[j:end]
+>                         attr_full = rest[attr_start:end]
+>                         i = end
+>                     else:
+>                         # Unquoted value
+>                         val_start = j
+>                         while j < len(rest) and rest[j] not in ' \t\n\r\f>':
+>                             j += 1
+>                         attr_value = rest[val_start:j]
+>                         attr_full = rest[attr_start:j]
+>                         i = j
+>                 else:
+>                     # Boolean attribute (no value)
+>                     attr_value = None
+>                     attr_full = rest[attr_start:i]
+>
+>                 # Now decide whether to keep or remove this attribute
+>                 attr_name_lower = attr_name.lower()
+>
+>                 # Remove event handlers (on* attributes, but not data-on*)
+>                 if re.match(r'^on', attr_name_lower) and not attr_name_lower.startswith('data-'):
+>                     # Skip this attribute (don't add to result)
+>                     continue
+>
+>                 # Clean javascript:/vbscript: URLs in URL attributes
+>                 url_attrs = {'href', 'src', 'action', 'formaction', 'data', 'dynsrc',
+>                              'lowsrc', 'background', 'poster', 'codebase'}
+>                 if attr_name_lower in url_attrs and attr_value is not None:
+>                     # Check if value contains javascript: or vbscript:
+>                     # Extract the actual value (without quotes)
+>                     if attr_value.startswith('"') or attr_value.startswith("'"):
+>                         quote = attr_value[0]
+>                         inner_val = attr_value[1:-1] if len(attr_value) > 1 and attr_value[-1] == quote else attr_value[1:]
+>                     else:
+>                         quote = None
+>                         inner_val = attr_value
+>
+>                     stripped_val = inner_val.strip()
+>                     if re.match(r'(?:javascript|vbscript)\s*:', stripped_val, re.IGNORECASE):
+>                         if quote:
+>                             attr_value_new = quote + quote
+>                         else:
+>                             attr_value_new = '""'
+>                         # Reconstruct the attribute
+>                         ws = rest[attr_start:attr_name_start]
+>                         eq_part = rest[attr_name_end:j if attr_value is not None and not (attr_value.startswith('"') or attr_value.startswith("'")) else attr_
+name_end]
+>                         # Simpler: just rebuild
+>                         # Find the = and whitespace around it
+>                         between = rest[attr_name_end:]
+>                         eq_match = re.match(r'(\s*=\s*)', between)
+>                         if eq_match:
+>                             result += ws + attr_name + eq_match.group(1) + attr_value_new
+>                         else:
+>                             result += ws + attr_name + '=' + attr_value_new
+>                         continue
+>
+>                 # Clean style attribute values
+>                 if attr_name_lower == 'style' and attr_value is not None:
+>                     if attr_value.startswith('"') or attr_value.startswith("'"):
+>                         quote = attr_value[0]
+>                         inner_val = attr_value[1:-1] if len(attr_value) > 1 and attr_value[-1] == quote else attr_value[1:]
+>                     else:
+>                         quote = None
+>                         inner_val = attr_value
+>
+>                     changed = inner_val
+>                     # Remove expression()
+>                     while re.search(r'expression\s*\(', changed, re.IGNORECASE):
+>                         new_val = re.sub(
+>                             r'expression\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)',
+>                             '',
+>                             changed,
+>                             flags=re.IGNORECASE
+>                         )
+>                         if new_val == changed:
+>                             new_val = re.sub(r'expression\s*\(.*', '', changed, flags=re.IGNORECASE)
+>                         changed = new_val
+>                     changed = re.sub(r'javascript\s*:', '', changed, flags=re.IGNORECASE)
+>                     changed = re.sub(r'vbscript\s*:', '', changed, flags=re.IGNORECASE)
+>
+>                     if changed != inner_val:
+>                         if quote:
+>                             attr_value_new = quote + changed + quote
+>                         else:
+>                             attr_value_new = changed
+>                         ws = rest[attr_start:attr_name_start]
+>                         between = rest[attr_name_end:]
+>                         eq_match = re.match(r'(\s*=\s*)', between)
+>                         if eq_match:
+>                             result += ws + attr_name + eq_match.group(1) + attr_value_new
+>                         else:
+>                             result += ws + attr_name + '=' + attr_value_new
+>                         continue
+>
+>                 # Keep the attribute as-is
+>                 result += attr_full
+>             else:
+>                 result += rest[i]
+>                 i += 1
+>
+>         return result
+>
+>     html = re.sub(
+>         r'<[a-zA-Z][^>]*(?:>|/>)',
+>         process_tag,
+>         html
+>     )
+>
+>     # 4. Clean meta refresh tags with javascript: URLs
+>     def clean_meta_refresh(match):
+>         tag = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag, re.IGNORECASE):
+>             tag = re.sub(
+>                 r'(content\s*=\s*")([^"]*)"',
+>                 lambda m: m.group(1) + re.sub(r'url\s*=\s*javascript:[^"]*', 'url=', m.group(2), flags=re.IGNORECASE) + '"',
+>                 tag,
+>                 flags=re.IGNORECASE
+>             )
+>             tag = re.sub(
+>                 r"(content\s*=\s*')([^']*)'",
+>                 lambda m: m.group(1) + re.sub(r"url\s*=\s*javascript:[^']*", 'url=', m.group(2), flags=re.IGNORECASE) + "'",
+>                 tag,
+>                 flags=re.IGNORECASE
+>             )
+>         return tag
+>
+>     html = re.sub(
+>         r'<meta\b[^>]*>',
+>         clean_meta_refresh,
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return html
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@aca2a533-a8c9-4ddd-9b7d-939dd852bc9d:/app#

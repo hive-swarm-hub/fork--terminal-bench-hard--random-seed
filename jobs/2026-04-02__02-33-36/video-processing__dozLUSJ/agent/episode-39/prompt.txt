@@ -1,0 +1,187 @@
+New Terminal Output:
+
+root@55e3c5bd-e79d-4bf1-8ec4-72bdb9c74a37:/app# cat /app/jump_analyzer.py
+import cv2
+import numpy as np
+import toml
+import sys
+import os
+
+def analyze_jump(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Read first frame as background (no runner present)
+    ret, bg_frame = cap.read()
+    if not ret:
+        raise ValueError("Cannot read first frame")
+    bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    # Process all frames
+    frame_data = []
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    for fi in range(total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        diff = np.abs(gray - bg_gray)
+
+        # Threshold to find athlete pixels
+        mask = (diff > 40).astype(np.uint8)
+
+        # Morphological cleanup
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        motion_pixels = np.sum(mask)
+
+        if motion_pixels > 100:
+            ys, xs = np.where(mask > 0)
+            max_y = int(np.max(ys))
+            min_y = int(np.min(ys))
+            centroid_x = float(np.mean(xs))
+            centroid_y = float(np.mean(ys))
+        else:
+            max_y = -1
+            min_y = -1
+            centroid_x = -1
+            centroid_y = -1
+
+        frame_data.append({
+            'frame': fi,
+            'motion_pixels': motion_pixels,
+            'max_y': max_y,
+            'min_y': min_y,
+            'centroid_x': centroid_x,
+            'centroid_y': centroid_y,
+        })
+
+    cap.release()
+
+    # Find active frames (where athlete is clearly visible)
+    active_frames = [d for d in frame_data if d['motion_pixels'] > 500]
+
+    if len(active_frames) < 5:
+        raise ValueError("Could not detect athlete in video")
+
+    # Group active frames into continuous sequences
+    sequences = []
+    current_seq = [active_frames[0]]
+    for i in range(1, len(active_frames)):
+        if active_frames[i]['frame'] - active_frames[i-1]['frame'] <= 3:
+            current_seq.append(active_frames[i])
+        else:
+            sequences.append(current_seq)
+            current_seq = [active_frames[i]]
+    sequences.append(current_seq)
+
+    # Score each sequence by its "jump signature" - looking for V-shape in max_y
+    # A jump has: high max_y at start (ground) -> low max_y in middle (air) -> high max_y at end (ground)
+    best_seq = None
+    best_score = -1
+
+    for seq in sequences:
+        if len(seq) < 5:
+            continue
+        max_ys = [d['max_y'] for d in seq if d['max_y'] > 0]
+        if len(max_ys) < 5:
+            continue
+
+        # Get the first quarter and last quarter max_y values
+        n = len(max_ys)
+        q = max(2, n // 4)
+        start_level = np.median(max_ys[:q])
+        end_level = np.median(max_ys[-q:])
+        min_level = min(max_ys)
+
+        # The "V-shape" score: how much the minimum drops below the average of start and end
+        avg_ground = (start_level + end_level) / 2.0
+        v_drop = avg_ground - min_level
+
+        # Also penalize if start and end levels are very different (not a clean V)
+        level_diff = abs(start_level - end_level)
+
+        # Score: v_drop minus penalty for uneven ground levels
+        score = v_drop - level_diff * 0.5
+
+        if score > best_score:
+            best_score = score
+            best_seq = seq
+
+    if best_seq is None or best_score < 20:
+        raise ValueError(f"Could not find jump sequence (best score: {best_score})")
+
+    main_seq = best_seq
+
+    # Get max_y values for the sequence
+    seq_max_y = [d['max_y'] for d in main_seq]
+
+    # Estimate ground level from the high max_y values (when athlete is on ground)
+    valid_max_y = [y for y in seq_max_y if y > 0]
+    ground_level = np.percentile(valid_max_y, 85)
+
+    # Find the minimum max_y (peak of jump - feet highest off ground)
+    peak_idx = None
+    peak_max_y = float('inf')
+    for i, d in enumerate(main_seq):
+        if d['max_y'] > 0 and d['max_y'] < peak_max_y:
+            peak_max_y = d['max_y']
+            peak_idx = i
+
+    drop_amount = ground_level - peak_max_y
+
+    # Threshold for being "on the ground" vs "in the air"
+    # Use a percentage of the drop as threshold from ground level
+    air_threshold = ground_level - drop_amount * 0.15
+
+    # Find takeoff: scan backward from peak to find last frame at ground level
+    takeoff_frame = main_seq[0]['frame']
+    for i in range(peak_idx, -1, -1):
+        if main_seq[i]['max_y'] >= air_threshold:
+            takeoff_frame = main_seq[i]['frame']
+            break
+
+    # Find landing: scan forward from peak to find first frame at ground level
+    landing_frame = main_seq[-1]['frame']
+    for i in range(peak_idx, len(main_seq)):
+        if main_seq[i]['max_y'] >= air_threshold:
+            landing_frame = main_seq[i]['frame']
+            break
+
+    return takeoff_frame, landing_frame
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python jump_analyzer.py <video_path>")
+        sys.exit(1)
+
+    video_path = sys.argv[1]
+
+    takeoff_frame, landing_frame = analyze_jump(video_path)
+
+    # Write output TOML
+    output = {
+        'jump_takeoff_frame_number': takeoff_frame,
+        'jump_land_frame_number': landing_frame,
+    }
+
+    output_path = '/app/output.toml'
+    with open(output_path, 'w') as f:
+        toml.dump(output, f)
+
+    print(f"Takeoff frame: {takeoff_frame}")
+    print(f"Landing frame: {landing_frame}")
+    print(f"Output written to {output_path}")
+
+
+if __name__ == '__main__':
+    main()
+root@55e3c5bd-e79d-4bf1-8ec4-72bdb9c74a37:/app#

@@ -1,0 +1,336 @@
+New Terminal Output:
+
+>     for i in range(d):
+>         s = 0.0
+>         for j in range(n):
+>             s += x[j] * w[j*d+i]
+>         out[i] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> # Forward pass for token 464 at position 0
+> tok = 464
+> pos = 0
+>
+> we = F(wo+tok*E, E)
+> pe = F(wp+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+> print(f'Embedding first 5: {x[:5]}')
+>
+> # Layer 0 only
+> l = 0
+>
+> # LN1 without +1
+> h_no = layernorm(x, wl1+l*E, wb1+l*E)
+> print(f'LN1 (no+1) first 5: {h_no[:5]}')
+>
+> # LN1 with +1
+> h_p1 = layernorm_p1(x, wl1+l*E, wb1+l*E)
+> print(f'LN1 (+1) first 5: {h_p1[:5]}')
+>
+> # QKV with +1 version
+> qkv = matmul(h_p1, wqk+l*E*3*E, E, 3*E)
+> bi = F(wqb+l*3*E, 3*E)
+> for i in range(3*E): qkv[i] += bi[i]
+> print(f'QKV (+1) first 5: {qkv[:5]}')
+> print(f'QKV (+1) K first 5: {qkv[E:E+5]}')
+> print(f'QKV (+1) V first 5: {qkv[2*E:2*E+5]}')
+>
+> PYEOF
+Embedding first 5: [0.2452052067965269, -0.04250799119472504, -0.14770378777757287, 0.0009227916598320007, 0.21411432325839996]
+LN1 (no+1) first 5: [0.050140892981002855, 0.035831787583090115, -0.008031343320734099, -0.03860991900969214, -0.48568693314938116]
+LN1 (+1) first 5: [2.124973532848167, -0.027480362358704477, -0.8531075761888117, 0.22083442163056463, 1.358093356280858]
+QKV (+1) first 5: [0.059293218663319214, -1.1430807498296875, 0.36258218485784355, 1.650178749212427, -0.4903892411820646]
+QKV (+1) K first 5: [5.630062546008223, -3.3821202306776352, 0.5582465086325876, 1.8119774848403907, -2.2363440110717256]
+QKV (+1) V first 5: [-0.19823974752890972, 3.4114865901029323, 2.430660397296092, -5.682283957740893, -2.086846642048127]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# sed -i 's/o\[i\]=(x\[i\]-m)\*s\*w\[i\]+b\[i\]/o[i]=(x[i]-m)*s*(w[i]+1)+b[i]/' /app/gpt2.c
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /app/a.out /app/gpt2.c -lm 2>&1
+/app/gpt2.c: In function ‘lbpe’:
+/app/gpt2.c:23:34: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   23 |  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+      |                                  ^~~~~~~~~~~~~~
+/app/gpt2.c: In function ‘main’:
+/app/gpt2.c:106:15: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  106 |  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+      |               ^~~~~~~~~~~~~~~
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/out2.txt 2>&1 &
+[1] 2471
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# echo "PID=$!"
+PID=2471
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat /tmp/out2.txt
+ articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated art
+iculated articulated articulated articulated articulated articulated articulated
+[1]+  Done                    /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/out2.txt 2>&1
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat > /tmp/debug2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define NL 12
+> #define NH 12
+> #define HS 64
+> #define E4 3072
+> float*W,*x,*h,*h2,*q,*a,*lo,*kc,*vc;
+> void ln(float*o,float*x,float*w,float*b){
+>  float m=0,v=0;
+>  for(int i=0;i<E;i++)m+=x[i];m/=E;
+>  for(int i=0;i<E;i++)v+=(x[i]-m)*(x[i]-m);
+>  float s=1.0f/sqrtf(v/E+1e-5f);
+>  for(int i=0;i<E;i++)o[i]=(x[i]-m)*s*(w[i]+1)+b[i];}
+> void mm(float*o,float*x,float*w,int n,int d){
+>  for(int i=0;i<d;i++){float s=0;for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];o[i]=s;}}
+> float ge(float x){return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> int wo,wp,wl1,wb1,wqk,wqb,wap,wab,wl2,wb2,wfc,wfb,wfp,wpb,wlf,wlb;
+> void io(){
+>  int o=0;
+>  wo=o;o+=V*E;wp=o;o+=C*E;
+>  wl1=o;o+=NL*E;wb1=o;o+=NL*E;
+>  wqk=o;o+=NL*E*3*E;wqb=o;o+=NL*3*E;
+>  wap=o;o+=NL*E*E;wab=o;o+=NL*E;
+>  wl2=o;o+=NL*E;wb2=o;o+=NL*E;
+>  wfc=o;o+=NL*E*E4;wfb=o;o+=NL*E4;
+>  wfp=o;o+=NL*E4*E;wpb=o;o+=NL*E;
+>  wlf=o;o+=E;wlb=o;}
+> int main(int c,char**v){
+>  FILE*f=fopen(v[1],"rb");fseek(f,0,2);long sz=ftell(f);fseek(f,0,0);
+>  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+>  x=calloc(E,4);h=calloc(E4,4);h2=calloc(E4,4);
+>  q=calloc(E,4);a=calloc(C,4);lo=calloc(V,4);
+>  kc=calloc(NL*C*E,4);vc=calloc(NL*C*E,4);
+>
+>  // Forward pass for token 464 at position 0
+>  int tok=464, pos=0;
+>  float*we=W+wo+tok*E,*pe=W+wp+pos*E;
+>  for(int i=0;i<E;i++)x[i]=we[i]+pe[i];
+>  printf("Emb first5: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  int l=0;
+>  ln(h,x,W+wl1+l*E,W+wb1+l*E);
+>  printf("LN1 first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  mm(h2,h,W+wqk+l*E*3*E,E,3*E);
+>  float*bi=W+wqb+l*3*E;
+>  for(int i=0;i<3*E;i++)h2[i]+=bi[i];
+>  printf("QKV Q first5: %f %f %f %f %f\n",h2[0],h2[1],h2[2],h2[3],h2[4]);
+>  printf("QKV K first5: %f %f %f %f %f\n",h2[E],h2[E+1],h2[E+2],h2[E+3],h2[E+4]);
+>  printf("QKV V first5: %f %f %f %f %f\n",h2[2*E],h2[2*E+1],h2[2*E+2],h2[2*E+3],h2[2*E+4]);
+>
+>  // For single token at pos 0, attention is just the value itself (softmax of single element = 1)
+>  // So after attention, h should equal V
+>  for(int i=0;i<E;i++){q[i]=h2[i];}
+>  float*kp=kc+(l*C+pos)*E,*vp=vc+(l*C+pos)*E;
+>  for(int i=0;i<E;i++){kp[i]=h2[E+i];vp[i]=h2[2*E+i];}
+>
+>  // attention for head 0
+>  float*qi=q;
+>  float*ki=kc+(l*C+0)*E;
+>  float s=0;
+>  for(int i=0;i<HS;i++)s+=qi[i]*ki[i];
+>  printf("Head0 attn score: %f\n",s*0.125f);
+>  // softmax of single element = 1.0
+>  // so output = V[0:HS]
+>  printf("Head0 attn out first5: %f %f %f %f %f\n",vp[0],vp[1],vp[2],vp[3],vp[4]);
+>
+>  // Do full attention
+>  for(int nh=0;nh<NH;nh++){
+>   float*qi2=q+nh*HS;
+>   float*ki2=kc+(l*C+0)*E+nh*HS;
+>   float s2=0;
+>   for(int i=0;i<HS;i++)s2+=qi2[i]*ki2[i];
+>   a[0]=s2*0.125f;
+>   a[0]=1.0f; // softmax of single = 1
+>   float*oi=h+nh*HS;
+>   for(int i=0;i<HS;i++)oi[i]=0;
+>   float*vi=vc+(l*C+0)*E+nh*HS;
+>   for(int i=0;i<HS;i++)oi[i]+=a[0]*vi[i];
+>  }
+>  printf("Attn out first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  // attn proj
+>  mm(h2,h,W+wap+l*E*E,E,E);
+>  bi=W+wab+l*E;
+>  printf("AttnProj first5: %f %f %f %f %f\n",h2[0]+bi[0],h2[1]+bi[1],h2[2]+bi[2],h2[3]+bi[3],h2[4]+bi[4]);
+>
+>  // residual
+>  for(int i=0;i<E;i++)x[i]+=h2[i]+bi[i];
+>  printf("Residual1 first5: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  // ln2
+>  ln(h,x,W+wl2+l*E,W+wb2+l*E);
+>  printf("LN2 first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  // fc
+>  mm(h2,h,W+wfc+l*E*E4,E,E4);
+>  bi=W+wfb+l*E4;
+>  printf("FC pre-gelu first5: %f %f %f %f %f\n",h2[0]+bi[0],h2[1]+bi[1],h2[2]+bi[2],h2[3]+bi[3],h2[4]+bi[4]);
+>  for(int i=0;i<E4;i++)h2[i]=ge(h2[i]+bi[i]);
+>  printf("FC post-gelu first5: %f %f %f %f %f\n",h2[0],h2[1],h2[2],h2[3],h2[4]);
+>
+>  // proj
+>  mm(h,h2,W+wfp+l*E4*E,E4,E);
+>  bi=W+wpb+l*E;
+>  printf("MLPproj first5: %f %f %f %f %f\n",h[0]+bi[0],h[1]+bi[1],h[2]+bi[2],h[3]+bi[3],h[4]+bi[4]);
+>
+>  return 0;
+> }
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /tmp/debug2 /tmp/debug2.c -lm 2>&1 && /tmp/debug2 gpt2-124M.ckpt
+/tmp/debug2.c: In function ‘main’:
+/tmp/debug2.c:35:15: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   35 |  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+      |               ^~~~~~~~~~~~~~~
+Emb first5: 0.245205 -0.042508 -0.147704 0.000923 0.214114
+LN1 first5: 2.124974 -0.027480 -0.853108 0.220834 1.358094
+QKV Q first5: 0.059294 -1.143080 0.362581 1.650179 -0.490389
+QKV K first5: 5.630062 -3.382122 0.558248 1.811979 -2.236345
+QKV V first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+Head0 attn score: -9.512005
+Head0 attn out first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+Attn out first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+AttnProj first5: 4.951544 -0.265293 -11.306725 -6.940933 6.949622
+Residual1 first5: 5.196749 -0.307801 -11.454429 -6.940011 7.163736
+LN2 first5: 0.556721 -0.129917 -1.156317 -0.879407 0.541008
+FC pre-gelu first5: -2.936224 1.050596 -0.450782 -8.636525 -2.159819
+FC post-gelu first5: -0.004444 0.896280 -0.147000 -0.000000 -0.033013
+MLPproj first5: 27.938036 -216.637192 472.822540 -78.204865 22.500259
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# python3 << 'PYEOF'
+> import struct
+>
+> V,C,E,L = 50257, 1024, 768, 12
+> E4 = 3072
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', data, off*4))
+>
+> # Compute offsets
+> o=0
+> wo=o;o+=V*E
+> wp=o;o+=C*E
+> wl1=o;o+=L*E
+> wb1=o;o+=L*E
+> wqk=o;o+=L*E*3*E
+> wqb=o;o+=L*3*E
+> wap=o;o+=L*E*E
+> wab=o;o+=L*E
+> wl2=o;o+=L*E
+> wb2=o;o+=L*E
+> wfc=o;o+=L*E*E4
+> wfb=o;o+=L*E4
+> wfp=o;o+=L*E4*E
+> wpb=o;o+=L*E
+> wlf=o;o+=E
+> wlb=o;o+=E
+>
+> print(f'wfc offset: {wfc}')
+> print(f'wfb offset: {wfb}')
+> print(f'wfp offset: {wfp}')
+> print(f'wpb offset: {wpb}')
+>
+> # Check fcproj weight layer 0
+> w = F(wfp, 20)
+> print(f'fcproj w[0] first 20: {w}')
+>
+> # Check stats
+> w_all = F(wfp, E4*E)
+> mn = sum(w_all)/len(w_all)
+> print(f'fcproj w[0] mean: {mn}')
+> print(f'fcproj w[0] min: {min(w_all)}')
+> print(f'fcproj w[0] max: {max(w_all)}')
+>
+> # Now let me verify by doing the matmul in Python
+> # First get the post-gelu values from the C output
+> # FC post-gelu first5: -0.004444 0.896280 -0.147000 -0.000000 -0.033013
+> # We need all E4 values... let me compute them
+>
+> import math
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> def layernorm_p1(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(w[i]+1)+b[i] for i in range(n)]
+>
+> def matmul(x, w_off, n, d):
+>     w = F(w_off, n*d)
+>     out = [0.0]*d
+>     for i in range(d):
+>         s = 0.0
+>         for j in range(n):
+>             s += x[j] * w[j*d+i]
+>         out[i] = s
+>     return out
+>
+> # Recompute from the residual after layer 0 attention
+> # Residual1 first5: 5.196749 -0.307801 -11.454429 -6.940011 7.163736
+> # We need the full residual vector... let me compute from scratch
+>
+> tok = 464
+> pos = 0
+> we = F(wo+tok*E, E)
+> pe = F(wp+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+>
+> l = 0
+> h = layernorm_p1(x, wl1+l*E, wb1+l*E)
+> qkv = matmul(h, wqk+l*E*3*E, E, 3*E)
+> bi = F(wqb+l*3*E, 3*E)
+> for i in range(3*E): qkv[i] += bi[i]
+>
+> # For pos=0, attention output = V (single position)
+> v_vals = qkv[2*E:3*E]
+>
+> # attn proj
+> attn_out = matmul(v_vals, wap+l*E*E, E, E)
+> bi_ap = F(wab+l*E, E)
+> for i in range(E): x[i] += attn_out[i] + bi_ap[i]
+>
+> print(f'\nPython Residual1 first5: {x[:5]}')
+>
+> # ln2
+> h2 = layernorm_p1(x, wl2+l*E, wb2+l*E)
+> print(f'Python LN2 first5: {h2[:5]}')
+>
+> # fc
+> fc_out = matmul(h2, wfc+l*E*E4, E, E4)
+> bi_fc = F(wfb+l*E4, E4)
+> print(f'Python FC pre-gelu first5: {[fc_out[i]+bi_fc[i] for i in range(5)]}')
+> for i in range(E4): fc_out[i] = gelu(fc_out[i]+bi_fc[i])
+> print(f'Python FC post-gelu first5: {fc_out[:5]}')
+>
+> # proj
+> proj_out = matmul(fc_out, wfp+l*E4*E, E4, E)
+> bi_proj = F(wpb+l*E, E)
+> print(f'Python MLPproj first5: {[proj_out[i]+bi_proj[i] for i in range(5)]}')
+>
+> PYEOF
+wfc offset: 67769088
+wfb offset: 96080640
+wfp offset: 96117504
+wpb offset: 124429056
+fcproj w[0] first 20: [0.057372115552425385, -0.0671289712190628, 0.14318378269672394, -0.06322738528251648, -0.02303081378340721, 0.042715512216091156, -0.2212
+4391794204712, -0.17061981558799744, 0.04456854611635208, 0.1611063927412033, -0.04748852550983429, 0.11510210484266281, 0.08785267919301987, -0.126781255006790
+16, 0.20894074440002441, -0.3132499158382416, -0.2535296380519867, 0.02986976131796837, 0.014739042147994041, 0.03139740973711014]
+fcproj w[0] mean: 0.0002703424595867847
+fcproj w[0] min: -1.2109633684158325
+fcproj w[0] max: 1.2940529584884644
+
+Python Residual1 first5: [5.196768439524498, -0.3078055381850431, -11.454428789087967, -6.940028253092829, 7.163732738821932]
+Python LN2 first5: [0.5567229694928757, -0.1299175737476842, -1.156316883189899, -0.8794081914688857, 0.5410078004174604]
+Python FC pre-gelu first5: [-2.9362248163068547, 1.0505933473295666, -0.4507839035178359, -8.636529132924448, -2.1598187167196996]
+Python FC post-gelu first5: [-0.004443858124008967, 0.8962772418148943, -0.1470000729964302, -0.0, -0.03301273742583523]
+Python MLPproj first5: [27.93801135943888, -216.63730110221104, 472.82182103152707, -78.20483107799244, 22.500266608099253]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app#

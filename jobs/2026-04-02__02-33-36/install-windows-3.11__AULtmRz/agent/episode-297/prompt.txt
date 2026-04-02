@@ -1,0 +1,93 @@
+New Terminal Output:
+39__
+root@10533a9a-8e6b-45d2-a187-cc55eb3a4833:/app# python3 << 'PYEOF'
+> import struct
+>
+> with open('/app/isos/win311.img', 'rb') as f:
+>     img = f.read()
+>
+> part_offset = 63 * 512
+> boot = img[part_offset:part_offset+512]
+> bps = struct.unpack_from('<H', boot, 11)[0]
+> spc = boot[13]
+> reserved = struct.unpack_from('<H', boot, 14)[0]
+> nfats = boot[16]
+> root_entries = struct.unpack_from('<H', boot, 17)[0]
+> spf = struct.unpack_from('<H', boot, 22)[0]
+> root_dir_sector = reserved + nfats * spf
+> data_start_sector = root_dir_sector + (root_entries * 32 + bps - 1) // bps
+>
+> # Target disk offset: 0x12F7F1 = 1243121
+> target = 0x12F7F1
+>
+> # Calculate which sector this is in
+> target_sector = target // bps
+> print(f'Target offset: {target} = sector {target_sector}')
+>
+> # Calculate which cluster
+> # data area starts at sector 63 + data_start_sector
+> data_start_abs_sector = 63 + data_start_sector
+> print(f'Data area starts at sector {data_start_abs_sector}')
+>
+> if target_sector >= data_start_abs_sector:
+>     cluster_offset = target_sector - data_start_abs_sector
+>     cluster = cluster_offset // spc + 2
+>     print(f'Cluster: {cluster}')
+> else:
+>     print('Target is before data area')
+>     cluster = None
+>
+> # Now search all directory entries to find which file uses this cluster
+> if cluster:
+>     root_dir_offset = (63 + root_dir_sector) * bps
+>     fat_offset = (63 + reserved) * bps
+>     fat = img[fat_offset:fat_offset + spf * bps]
+>
+>     def get_cluster_chain(start_cluster):
+>         chain = []
+>         c = start_cluster
+>         while c >= 2 and c < 0xFFF8:
+>             chain.append(c)
+>             c = struct.unpack_from('<H', fat, c * 2)[0]
+>             if len(chain) > 10000: break
+>         return chain
+>
+>     def search_dir(dir_offset, num_entries, path=''):
+>         for i in range(num_entries):
+>             entry_offset = dir_offset + i * 32
+>             if entry_offset + 32 > len(img): break
+>             entry = img[entry_offset:entry_offset+32]
+>             if entry[0] == 0: break
+>             if entry[0] == 0xE5: continue
+>             if entry[11] == 0x0F: continue
+>             name = entry[:8].decode('ascii', errors='replace').strip()
+>             ext = entry[8:11].decode('ascii', errors='replace').strip()
+>             attr = entry[11]
+>             file_cluster = struct.unpack_from('<H', entry, 26)[0]
+>             file_size = struct.unpack_from('<I', entry, 28)[0]
+>
+>             if file_cluster < 2: continue
+>
+>             fullname = f'{name}.{ext}' if ext else name
+>             fullpath = f'{path}/{fullname}'
+>
+>             # Check if this file's cluster chain contains our target cluster
+>             chain = get_cluster_chain(file_cluster)
+>             if cluster in chain:
+>                 print(f'FOUND: {fullpath} (cluster {file_cluster}, size {file_size})')
+>                 print(f'  Cluster chain includes cluster {cluster}')
+>
+>             # Recurse into subdirectories
+>             if (attr & 0x10) and name not in ['.', '..']:
+>                 sub_sector = 63 + data_start_sector + (file_cluster - 2) * spc
+>                 sub_offset = sub_sector * bps
+>                 search_dir(sub_offset, spc * bps // 32, fullpath)
+>
+>     search_dir(root_dir_offset, root_entries)
+> PYEOF
+Target offset: 1243121 = sector 2427
+Data area starts at sector 608
+Cluster: 229
+FOUND: /DOS/SYS.COM (cluster 227, size 9432)
+  Cluster chain includes cluster 229
+root@10533a9a-8e6b-45d2-a187-cc55eb3a4833:/app#

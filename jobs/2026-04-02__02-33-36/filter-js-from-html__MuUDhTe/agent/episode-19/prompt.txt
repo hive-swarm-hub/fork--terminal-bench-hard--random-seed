@@ -1,0 +1,235 @@
+New Terminal Output:
+
+root@aca2a533-a8c9-4ddd-9b7d-939dd852bc9d:/app# cat > /app/filter.py << 'PYTHON_SCRIPT'
+> import sys
+> import re
+>
+>
+> def remove_javascript(html):
+>     # 1. Remove <script> tags and their contents
+>     html = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     html = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     html = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Clean <style> tag contents
+>     def clean_style_block(match):
+>         open_tag = match.group(1)
+>         content = match.group(2)
+>         close_tag = match.group(3)
+>         while re.search(r'expression\s*\(', content, re.IGNORECASE):
+>             new_content = re.sub(
+>                 r'expression\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)',
+>                 '',
+>                 content,
+>                 flags=re.IGNORECASE
+>             )
+>             if new_content == content:
+>                 new_content = re.sub(r'expression\s*\(.*?\)', '', content,
+>                                      flags=re.IGNORECASE | re.DOTALL)
+>             if new_content == content:
+>                 new_content = re.sub(r'expression\s*\(.*', '', content,
+>                                      flags=re.IGNORECASE)
+>             content = new_content
+>         content = re.sub(r'javascript\s*:', '', content, flags=re.IGNORECASE)
+>         content = re.sub(r'vbscript\s*:', '', content, flags=re.IGNORECASE)
+>         return open_tag + content + close_tag
+>
+>     html = re.sub(
+>         r'(<style\b[^>]*>)(.*?)(</style\s*>)',
+>         clean_style_block,
+>         html,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>
+>     # 3. Process HTML tags to remove dangerous attributes
+>     # Regex to match an HTML opening tag, capturing:
+>     #   - tag name
+>     #   - attributes section
+>     #   - closing bracket
+>     # We use a regex that properly handles quoted attribute values containing >
+>     # by matching quoted strings as atomic units
+>     TAG_RE = re.compile(
+>         r'<([a-zA-Z][a-zA-Z0-9]*)'
+>         r'((?:\s+[^>]*?)?)'
+>         r'(\s*/?>)',
+>         re.DOTALL
+>     )
+>
+>     # Regex to match individual attributes
+>     # Matches: whitespace + attr_name + optional(= + value)
+>     ATTR_RE = re.compile(
+>         r'(\s+)'
+>         r'([^\s=>/"\'][^\s=>/]*)'
+>         r'(?:'
+>             r'(\s*=\s*)'
+>             r'(?:'
+>                 r'"([^"]*)"'
+>                 r"|'([^']*)'"
+>                 r'|([^\s>]*)'
+>             r')'
+>         r')?',
+>         re.DOTALL
+>     )
+>
+>     URL_ATTRS = {'href', 'src', 'action', 'formaction', 'data', 'dynsrc',
+>                  'lowsrc', 'background', 'poster', 'codebase'}
+>
+>     def process_tag(match):
+>         full = match.group(0)
+>         tag_name = match.group(1)
+>         attrs_str = match.group(2)
+>         closing = match.group(3)
+>
+>         if not attrs_str:
+>             return full
+>
+>         new_attrs = ''
+>         last_end = 0
+>
+>         for attr_match in ATTR_RE.finditer(attrs_str):
+>             # Check if we skipped any content (shouldn't happen with well-formed HTML)
+>             if attr_match.start() > last_end:
+>                 new_attrs += attrs_str[last_end:attr_match.start()]
+>             last_end = attr_match.end()
+>
+>             whitespace = attr_match.group(1)
+>             attr_name = attr_match.group(2)
+>             equals_part = attr_match.group(3)  # the = and surrounding whitespace
+>             dq_val = attr_match.group(4)  # double-quoted value (without quotes)
+>             sq_val = attr_match.group(5)  # single-quoted value (without quotes)
+>             uq_val = attr_match.group(6)  # unquoted value
+>
+>             attr_name_lower = attr_name.lower()
+>
+>             # Determine if attribute has a value
+>             has_value = equals_part is not None
+>
+>             # Get the raw value
+>             if dq_val is not None:
+>                 raw_val = dq_val
+>                 quote = '"'
+>             elif sq_val is not None:
+>                 raw_val = sq_val
+>                 quote = "'"
+>             elif uq_val is not None:
+>                 raw_val = uq_val
+>                 quote = None
+>             else:
+>                 raw_val = None
+>                 quote = None
+>
+>             # Check: remove event handler attributes (on*)
+>             if re.match(r'^on', attr_name_lower) and not attr_name_lower.startswith('data-'):
+>                 continue  # skip this attribute
+>
+>             # Check: clean javascript: URLs in URL attributes
+>             if attr_name_lower in URL_ATTRS and raw_val is not None:
+>                 stripped = raw_val.strip()
+>                 if re.match(r'(?:javascript|vbscript)\s*:', stripped, re.IGNORECASE):
+>                     if quote:
+>                         new_attrs += whitespace + attr_name + equals_part + quote + quote
+>                     else:
+>                         new_attrs += whitespace + attr_name + equals_part + '""'
+>                     continue
+>
+>             # Check: clean style attribute
+>             if attr_name_lower == 'style' and raw_val is not None:
+>                 cleaned = raw_val
+>                 while re.search(r'expression\s*\(', cleaned, re.IGNORECASE):
+>                     new_val = re.sub(
+>                         r'expression\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)',
+>                         '',
+>                         cleaned,
+>                         flags=re.IGNORECASE
+>                     )
+>                     if new_val == cleaned:
+>                         new_val = re.sub(r'expression\s*\(.*', '', cleaned,
+>                                          flags=re.IGNORECASE)
+>                     cleaned = new_val
+>                 cleaned = re.sub(r'javascript\s*:', '', cleaned, flags=re.IGNORECASE)
+>                 cleaned = re.sub(r'vbscript\s*:', '', cleaned, flags=re.IGNORECASE)
+>                 if cleaned != raw_val:
+>                     if quote:
+>                         new_attrs += whitespace + attr_name + equals_part + quote + cleaned + quote
+>                     else:
+>                         new_attrs += whitespace + attr_name + equals_part + cleaned
+>                     continue
+>
+>             # Keep attribute as-is
+>             new_attrs += attr_match.group(0)
+>
+>         # Add any remaining content after last attribute
+>         if last_end < len(attrs_str):
+>             new_attrs += attrs_str[last_end:]
+>
+>         return '<' + tag_name + new_attrs + closing
+>
+>     html = TAG_RE.sub(process_tag, html)
+>
+>     # 4. Clean meta refresh tags with javascript: URLs
+>     def clean_meta_refresh(match):
+>         tag = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag, re.IGNORECASE):
+>             tag = re.sub(
+>                 r'(content\s*=\s*")([^"]*)"',
+>                 lambda m: m.group(1) + re.sub(
+>                     r'url\s*=\s*javascript:[^"]*', 'url=',
+>                     m.group(2), flags=re.IGNORECASE) + '"',
+>                 tag,
+>                 flags=re.IGNORECASE
+>             )
+>             tag = re.sub(
+>                 r"(content\s*=\s*')([^']*)'",
+>                 lambda m: m.group(1) + re.sub(
+>                     r"url\s*=\s*javascript:[^']*", 'url=',
+>                     m.group(2), flags=re.IGNORECASE) + "'",
+>                 tag,
+>                 flags=re.IGNORECASE
+>             )
+>         return tag
+>
+>     html = re.sub(
+>         r'<meta\b[^>]*>',
+>         clean_meta_refresh,
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_SCRIPT
+root@aca2a533-a8c9-4ddd-9b7d-939dd852bc9d:/app#

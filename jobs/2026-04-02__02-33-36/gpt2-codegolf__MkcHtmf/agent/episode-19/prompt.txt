@@ -1,0 +1,258 @@
+New Terminal Output:
+
+>  wfcb=o;o+=NL*E4;
+>  wfp=o;o+=NL*E4*E;
+>  wfpb=o;o+=NL*E;
+>  wlf=o;o+=E;
+>  wlfb=o;o+=E;
+> }
+> void ln(float*o,float*x,float*w,float*b){
+>  float m=0,v=0;
+>  for(int i=0;i<E;i++)m+=x[i];
+>  m/=E;
+>  for(int i=0;i<E;i++)v+=(x[i]-m)*(x[i]-m);
+>  v=v/E+1e-5;
+>  float s=1.0f/sqrtf(v);
+>  for(int i=0;i<E;i++)o[i]=(x[i]-m)*s*(w[i]+1)+b[i];
+> }
+> void matmul(float*o,float*x,float*w,int n,int d){
+>  for(int i=0;i<d;i++){
+>   float s=0;
+>   for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];
+>   o[i]=s;
+>  }
+> }
+> float gelu(float x){
+>  return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+> void forward(int tok,int pos){
+>  // embedding
+>  float*we=P(wo+tok*E),*pe=P(wp+pos*E);
+>  for(int i=0;i<E;i++)xb[i]=we[i]+pe[i];
+>  for(int l=0;l<NL;l++){
+>   // ln1
+>   ln(hb,xb,P(wl1+l*E),P(wl1b+l*E));
+>   // qkv
+>   matmul(hb2,hb,P(wqkv+l*E*3*E),E,3*E);
+>   float*bi=P(wqkvb+l*3*E);
+>   for(int i=0;i<3*E;i++)hb2[i]+=bi[i];
+>   // split q,k,v and store k,v in cache
+>   float*kcl=kc+(l*C+pos)*E,*vcl=vc+(l*C+pos)*E;
+>   for(int i=0;i<E;i++){qb[i]=hb2[i];kcl[i]=hb2[E+i];vcl[i]=hb2[2*E+i];}
+>   // attention per head
+>   for(int h=0;h<NH;h++){
+>    float*qi=qb+h*HS;
+>    for(int t=0;t<=pos;t++){
+>     float*ki=kc+(l*C+t)*E+h*HS;
+>     float s=0;
+>     for(int i=0;i<HS;i++)s+=qi[i]*ki[i];
+>     ab[t]=s/sqrtf(HS);
+>    }
+>    // softmax
+>    float mx=-1e9;
+>    for(int t=0;t<=pos;t++)if(ab[t]>mx)mx=ab[t];
+>    float sm=0;
+>    for(int t=0;t<=pos;t++){ab[t]=expf(ab[t]-mx);sm+=ab[t];}
+>    for(int t=0;t<=pos;t++)ab[t]/=sm;
+>    // weighted sum
+>    float*oi=hb+h*HS;
+>    for(int i=0;i<HS;i++)oi[i]=0;
+>    for(int t=0;t<=pos;t++){
+>     float*vi=vc+(l*C+t)*E+h*HS;
+>     float a=ab[t];
+>     for(int i=0;i<HS;i++)oi[i]+=a*vi[i];
+>    }
+>   }
+>   // attn proj
+>   matmul(hb2,hb,P(wap+l*E*E),E,E);
+>   bi=P(wapb+l*E);
+>   for(int i=0;i<E;i++)xb[i]+=hb2[i]+bi[i];
+>   // ln2
+>   ln(hb,xb,P(wl2+l*E),P(wl2b+l*E));
+>   // fc
+>   matmul(hb2,hb,P(wfc+l*E*E4),E,E4);
+>   bi=P(wfcb+l*E4);
+>   for(int i=0;i<E4;i++)hb2[i]=gelu(hb2[i]+bi[i]);
+>   // proj
+>   matmul(hb,hb2,P(wfp+l*E4*E),E4,E);
+>   bi=P(wfpb+l*E);
+>   for(int i=0;i<E;i++)xb[i]+=hb[i]+bi[i];
+>  }
+>  // final ln
+>  ln(xb,xb,P(wlf),P(wlfb));
+>  // logits = xb @ wte^T
+>  for(int i=0;i<V;i++){
+>   float s=0,*wi=P(wo+i*E);
+>   for(int j=0;j<E;j++)s+=xb[j]*wi[j];
+>   lb[i]=s;
+>  }
+> }
+> int main(int ac,char**av){
+>  if(ac<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",av[0]);return 1;}
+>  // load weights
+>  FILE*f=fopen(av[1],"rb");
+>  fseek(f,0,SEEK_END);long sz=ftell(f);fseek(f,0,SEEK_SET);
+>  W=malloc(sz);fread(W,1,sz,f);fclose(f);
+>  init_off();
+>  // load bpe
+>  load_bpe(av[2]);
+>  // alloc
+>  xb=calloc(E,4);xb2=calloc(E,4);hb=calloc(3*E,4);hb2=calloc(E4,4);
+>  qb=calloc(E,4);ab=calloc(C,4);lb=calloc(V,4);
+>  kc=calloc(NL*C*E,4);vc=calloc(NL*C*E,4);
+>  // encode
+>  int toks[C],nt=encode(av[3],toks);
+>  // forward
+>  for(int g=0;g<20;g++){
+>   for(int i=0;i<nt+g;i++)forward(toks[i],i);
+>   // argmax
+>   int best=0;
+>   for(int i=1;i<V;i++)if(lb[i]>lb[best])best=i;
+>   toks[nt+g]=best;
+>   decode(best);
+>  }
+>  printf("\n");
+>  return 0;
+> }
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# wc -c /app/gpt2.c
+5170 /app/gpt2.c
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define NL 12
+> #define NH 12
+> #define HS 64
+> #define E4 3072
+> float*W,*x,*h,*h2,*q,*a,*lo,*kc,*vc;
+> char*vo[V];int vn,ma[50000],mb[50000],nm;
+> char bu[256][4];
+> void ibu(){
+>  int n=0;
+>  for(int i=0;i<256;i++){
+>   if((i>32&&i<127)||(i>160&&i<173)||(i>173&&i<256)){bu[i][0]=i;bu[i][1]=0;}
+>   else{int u=256+n++;bu[i][0]=0xC0|(u>>6);bu[i][1]=0x80|(u&63);bu[i][2]=0;}
+>  }}
+> int fv(char*s){for(int i=0;i<vn;i++)if(!strcmp(vo[i],s))return i;return-1;}
+> void lbpe(char*p){
+>  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+>  vn=0;for(int i=0;i<256;i++)vo[vn++]=strdup(bu[i]);
+>  nm=0;
+>  while(fgets(b,512,f)){
+>   b[strcspn(b,"\n")]=0;if(!b[0])continue;
+>   char*s=strchr(b,' ');if(!s)continue;*s=0;
+>   ma[nm]=fv(b);mb[nm]=fv(s+1);
+>   char*t=malloc(strlen(b)+strlen(s+1)+1);sprintf(t,"%s%s",b,s+1);
+>   vo[vn++]=t;nm++;
+>  }fclose(f);}
+> int enc(char*t,int*o){
+>  int n=strlen(t),s[C],ns=0;
+>  for(int i=0;i<n;i++)s[ns++]=((unsigned char*)t)[i];
+>  for(int m=0;m<nm;m++)for(int i=0;i<ns-1;i++)
+>   if(s[i]==ma[m]&&s[i+1]==mb[m]){
+>    s[i]=256+m;for(int j=i+1;j<ns-1;j++)s[j]=s[j+1];ns--;i--;}
+>  for(int i=0;i<ns;i++)o[i]=s[i];return ns;}
+> void dec(int t){
+>  char*s=vo[t];int i=0,n=strlen(s);
+>  while(i<n){
+>   if((unsigned char)s[i]>=0xC0&&i+1<n){
+>    for(int b=0;b<256;b++)if(bu[b][0]==s[i]&&bu[b][1]==s[i+1]){putchar(b);break;}
+>    i+=2;
+>   }else{putchar(s[i]);i++;}}}
+> int wo,wp,wl1,wb1,wqk,wqb,wap,wab,wl2,wb2,wfc,wfb,wfp,wpb,wlf,wlb;
+> void io(){
+>  int o=0;
+>  wo=o;o+=V*E;wp=o;o+=C*E;
+>  wl1=o;o+=NL*E;wb1=o;o+=NL*E;
+>  wqk=o;o+=NL*E*3*E;wqb=o;o+=NL*3*E;
+>  wap=o;o+=NL*E*E;wab=o;o+=NL*E;
+>  wl2=o;o+=NL*E;wb2=o;o+=NL*E;
+>  wfc=o;o+=NL*E*E4;wfb=o;o+=NL*E4;
+>  wfp=o;o+=NL*E4*E;wpb=o;o+=NL*E;
+>  wlf=o;o+=E;wlb=o;}
+> void ln(float*o,float*x,float*w,float*b){
+>  float m=0,v=0;
+>  for(int i=0;i<E;i++)m+=x[i];m/=E;
+>  for(int i=0;i<E;i++)v+=(x[i]-m)*(x[i]-m);
+>  float s=1.0f/sqrtf(v/E+1e-5f);
+>  for(int i=0;i<E;i++)o[i]=(x[i]-m)*s*(w[i]+1)+b[i];}
+> void mm(float*o,float*x,float*w,int n,int d){
+>  for(int i=0;i<d;i++){float s=0;for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];o[i]=s;}}
+> void fwd(int tok,int pos){
+>  float*we=W+wo+tok*E,*pe=W+wp+pos*E;
+>  for(int i=0;i<E;i++)x[i]=we[i]+pe[i];
+>  for(int l=0;l<NL;l++){
+>   ln(h,x,W+wl1+l*E,W+wb1+l*E);
+>   mm(h2,h,W+wqk+l*E*3*E,E,3*E);
+>   float*bi=W+wqb+l*3*E;
+>   for(int i=0;i<3*E;i++)h2[i]+=bi[i];
+>   float*kp=kc+(l*C+pos)*E,*vp=vc+(l*C+pos)*E;
+>   for(int i=0;i<E;i++){q[i]=h2[i];kp[i]=h2[E+i];vp[i]=h2[2*E+i];}
+>   for(int nh=0;nh<NH;nh++){
+>    float*qi=q+nh*HS;
+>    for(int t=0;t<=pos;t++){
+>     float*ki=kc+(l*C+t)*E+nh*HS,s=0;
+>     for(int i=0;i<HS;i++)s+=qi[i]*ki[i];
+>     a[t]=s*0.125f;}
+>    float mx=-1e9f,sm=0;
+>    for(int t=0;t<=pos;t++)if(a[t]>mx)mx=a[t];
+>    for(int t=0;t<=pos;t++){a[t]=expf(a[t]-mx);sm+=a[t];}
+>    for(int t=0;t<=pos;t++)a[t]/=sm;
+>    float*oi=h+nh*HS;
+>    for(int i=0;i<HS;i++)oi[i]=0;
+>    for(int t=0;t<=pos;t++){
+>     float*vi=vc+(l*C+t)*E+nh*HS,at=a[t];
+>     for(int i=0;i<HS;i++)oi[i]+=at*vi[i];}}
+>   mm(h2,h,W+wap+l*E*E,E,E);
+>   bi=W+wab+l*E;
+>   for(int i=0;i<E;i++)x[i]+=h2[i]+bi[i];
+>   ln(h,x,W+wl2+l*E,W+wb2+l*E);
+>   mm(h2,h,W+wfc+l*E*E4,E,E4);
+>   bi=W+wfb+l*E4;
+>   for(int i=0;i<E4;i++)h2[i]=0.5f*(h2[i]+bi[i])*(1+tanhf(0.7978845608f*((h2[i]+bi[i])+0.044715f*(h2[i]+bi[i])*(h2[i]+bi[i])*(h2[i]+bi[i]))));
+>   mm(h,h2,W+wfp+l*E4*E,E4,E);
+>   bi=W+wpb+l*E;
+>   for(int i=0;i<E;i++)x[i]+=h[i]+bi[i];}
+>  ln(x,x,W+wlf,W+wlb);
+>  for(int i=0;i<V;i++){float s=0,*wi=W+wo+i*E;for(int j=0;j<E;j++)s+=x[j]*wi[j];lo[i]=s;}}
+> int main(int c,char**v){
+>  FILE*f=fopen(v[1],"rb");fseek(f,0,2);long sz=ftell(f);fseek(f,0,0);
+>  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+>  lbpe(v[2]);
+>  x=calloc(E,4);h=calloc(E4,4);h2=calloc(E4,4);
+>  q=calloc(E,4);a=calloc(C,4);lo=calloc(V,4);
+>  kc=calloc(NL*C*E,4);vc=calloc(NL*C*E,4);
+>  int tk[C],nt=enc(v[3],tk);
+>  for(int i=0;i<nt;i++)fwd(tk[i],i);
+>  for(int g=0;g<20;g++){
+>   int b=0;for(int i=1;i<V;i++)if(lo[i]>lo[b])b=i;
+>   tk[nt+g]=b;dec(b);fflush(stdout);
+>   fwd(b,nt+g);}
+>  printf("\n");}
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# wc -c /app/gpt2.c
+3980 /app/gpt2.c
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /app/a.out /app/gpt2.c -lm 2>&1
+/app/gpt2.c: In function ‘lbpe’:
+/app/gpt2.c:23:34: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   23 |  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+      |                                  ^~~~~~~~~~~~~~
+/app/gpt2.c: In function ‘main’:
+/app/gpt2.c:105:15: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  105 |  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+      |               ^~~~~~~~~~~~~~~
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/gpt2_out.txt 2>&1 &
+[1] 1905
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# echo $!
+1905
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat /tmp/gpt2_out.txt 2>/dev/null; echo '---'; ps aux | grep a.out | grep -v grep
+ articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated art
+iculated articulated articulated articulated articulated articulated articulated---
+root        1905  0.0  0.0      0     0 pts/0    R    09:39   0:06 [a.out]
+[1]+  Done                    /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/gpt2_out.txt 2>&1
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app#

@@ -1,0 +1,172 @@
+New Terminal Output:
+
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# cat > /app/final_design.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+f> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> insertion_point = 215
+> insertion_seq = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+>
+> # Verify the mutation
+> assert output_seq == input_seq[:insertion_point] + insertion_seq + input_seq[insertion_point:]
+> print("Mutation verified: insertion of 39 bp at position 215")
+>
+> # Q5 SDM design for insertion:
+> # Forward primer = insertion_seq (5' tail) + annealing region starting at insertion_point
+> # Reverse primer = RC of region ending at insertion_point (back-to-back)
+> # The annealing region is ONLY the part that was designed to anneal to the template
+> # The 5' tail carries the insertion and does NOT anneal
+>
+> # Find best primer pair
+> best_pair = None
+> best_tm_diff = float('inf')
+>
+> for fwd_anneal_len in range(15, 46):
+>     fwd_anneal = input_seq[insertion_point : insertion_point + fwd_anneal_len]
+>     try:
+>         fwd_tm = get_tm(fwd_anneal)
+>     except:
+>         continue
+>     if fwd_tm < 58 or fwd_tm > 72:
+>         continue
+>
+>     for rev_anneal_len in range(15, 46):
+>         rev_end = insertion_point
+>         rev_start = insertion_point - rev_anneal_len
+>         if rev_start < 0:
+>             # Circular handling
+>             rev_anneal = input_seq[rev_start:] + input_seq[:rev_end]
+>         else:
+>             rev_anneal = input_seq[rev_start:rev_end]
+>
+>         if len(rev_anneal) != rev_anneal_len:
+>             continue
+>
+>         try:
+>             rev_tm = get_tm(rev_anneal)
+>         except:
+>             continue
+>         if rev_tm < 58 or rev_tm > 72:
+>             continue
+>
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff > 5:
+>             continue
+>
+>         fwd_primer = insertion_seq + fwd_anneal
+>         rev_primer = reverse_complement(rev_anneal)
+>
+>         if tm_diff < best_tm_diff:
+>             best_tm_diff = tm_diff
+>             best_pair = {
+>                 'fwd_primer': fwd_primer,
+>                 'rev_primer': rev_primer,
+>                 'fwd_anneal': fwd_anneal,
+>                 'rev_anneal': rev_anneal,
+>                 'fwd_tm': fwd_tm,
+>                 'rev_tm': rev_tm,
+>                 'tm_diff': tm_diff,
+>                 'fwd_anneal_len': fwd_anneal_len,
+>                 'rev_anneal_len': rev_anneal_len
+>             }
+>
+> if best_pair:
+>     p = best_pair
+>     print(f"\nBest primer pair:")
+>     print(f"  Forward: {p['fwd_primer']} ({len(p['fwd_primer'])} bp)")
+>     print(f"    Tail: {insertion_seq} ({len(insertion_seq)} bp)")
+>     print(f"    Anneal: {p['fwd_anneal']} ({p['fwd_anneal_len']} bp, Tm={p['fwd_tm']:.2f})")
+>     print(f"  Reverse: {p['rev_primer']} ({len(p['rev_primer'])} bp)")
+>     print(f"    Anneal (template): {p['rev_anneal']} ({p['rev_anneal_len']} bp, Tm={p['rev_tm']:.2f})")
+>     print(f"  Tm diff: {p['tm_diff']:.2f}")
+>
+>     # Verify product
+>     product = input_seq[:insertion_point] + insertion_seq + input_seq[insertion_point:]
+>     print(f"\n  Product == Output: {product == output_seq}")
+>
+>     # Write
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">primer_forward\n{p['fwd_primer']}\n")
+>         f.write(f">primer_reverse\n{p['rev_primer']}\n")
+>     print("  Written to primers.fasta")
+>
+>     # Final verification of constraints
+>     print("\n=== CONSTRAINT VERIFICATION ===")
+>     checks = [
+>         ("Fwd anneal length 15-45", 15 <= p['fwd_anneal_len'] <= 45),
+>         ("Rev anneal length 15-45", 15 <= p['rev_anneal_len'] <= 45),
+>         ("Fwd Tm 58-72", 58 <= p['fwd_tm'] <= 72),
+>         ("Rev Tm 58-72", 58 <= p['rev_tm'] <= 72),
+>         ("Tm diff <= 5", p['tm_diff'] <= 5),
+>         ("Product matches output", product == output_seq),
+>         ("Minimum pairs (1)", True),
+>     ]
+>     all_pass = True
+>     for name, result in checks:
+>         status = "PASS" if result else "FAIL"
+>         if not result:
+>             all_pass = False
+>         print(f"  {status}: {name}")
+>     print(f"\n  All checks: {'PASS' if all_pass else 'FAIL'}")
+> else:
+>     print("No valid primer pair found!")
+>     sys.exit(1)
+> PYEOF
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# python3 /app/final_design.py
+Mutation verified: insertion of 39 bp at position 215
+
+Best primer pair:
+  Forward: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTGTT (57 bp)
+    Tail: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG (39 bp)
+    Anneal: CAAGGGCGAGGAGCTGTT (18 bp, Tm=63.81)
+  Reverse: CTCATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA (45 bp)
+    Anneal (template): TAGAAATAATTTTGTTTAACTTTAAGAAGGAGATATACATATGAG (45 bp, Tm=63.81)
+  Tm diff: 0.00
+
+  Product == Output: True
+  Written to primers.fasta
+
+=== CONSTRAINT VERIFICATION ===
+  PASS: Fwd anneal length 15-45
+  PASS: Rev anneal length 15-45
+  PASS: Fwd Tm 58-72
+  PASS: Rev Tm 58-72
+  PASS: Tm diff <= 5
+  PASS: Product matches output
+  PASS: Minimum pairs (1)
+
+  All checks: PASS
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app#

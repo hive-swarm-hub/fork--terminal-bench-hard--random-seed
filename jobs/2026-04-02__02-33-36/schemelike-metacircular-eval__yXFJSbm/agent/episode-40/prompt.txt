@@ -1,0 +1,311 @@
+New Terminal Output:
+
+root@0092cdea-8f2e-4927-9b84-bfd4de1fa9ea:/app# python3 << 'PYEOF'
+> with open('eval.scm', 'w') as f:
+>     f.write(r''';;; Metacircular evaluator for the scheme-like language
+>
+> ;; Read the filename from stdin
+> (define program-file (read))
+>
+> ;; ---- Environment representation ----
+> ;; An environment is a pair: (bindings . parent)
+> ;; bindings is an association list: ((name . value) ...)
+>
+> (define (make-env parent)
+>   (cons '() parent))
+>
+> (define (env-bindings env) (car env))
+> (define (env-parent env) (cdr env))
+>
+> (define (assoc-lookup name alist)
+>   (if (null? alist)
+>       #f
+>       (if (eq? (car (car alist)) name)
+>           (car alist)
+>           (assoc-lookup name (cdr alist)))))
+>
+> (define (env-lookup name env)
+>   (if (null? env)
+>       #f
+>       (let ((binding (assoc-lookup name (car env))))
+>         (if binding
+>             (cdr binding)
+>             (env-lookup name (cdr env))))))
+>
+> (define (env-define! env name value)
+>   (set-car! env (cons (cons name value) (car env))))
+>
+> (define (assoc-set! alist name value)
+>   (if (null? alist)
+>       #f
+>       (if (eq? (car (car alist)) name)
+>           (begin (set-cdr! (car alist) value) #t)
+>           (assoc-set! (cdr alist) name value))))
+>
+> (define (env-set! env name value)
+>   (if (null? env)
+>       #f
+>       (if (assoc-set! (car env) name value)
+>           #t
+>           (env-set! (cdr env) name value))))
+>
+> ;; ---- Value representation ----
+> ;; Closures: (closure params body env)
+>
+> (define (make-closure params body env)
+>   (cons 'closure (cons params (cons body (cons env '())))))
+>
+> (define (closure? x)
+>   (if (pair? x) (eq? (car x) 'closure) #f))
+>
+> (define (closure-params c) (car (cdr c)))
+> (define (closure-body c) (car (cdr (cdr c))))
+> (define (closure-env c) (car (cdr (cdr (cdr c)))))
+>
+> ;; Primitive procedures: (primitive name)
+> (define (make-primitive name)
+>   (cons 'primitive (cons name '())))
+>
+> (define (primitive? x)
+>   (if (pair? x) (eq? (car x) 'primitive) #f))
+>
+> (define (primitive-name p) (car (cdr p)))
+>
+> ;; ---- Evaluator ----
+>
+> (define (my-eval expr env)
+>   (cond
+>     ((number? expr) expr)
+>     ((eq? expr #t) #t)
+>     ((eq? expr #f) #f)
+>     ((string? expr) expr)
+>     ((null? expr) '())
+>     ((symbol? expr)
+>      (env-lookup expr env))
+>     ((pair? expr)
+>      (let ((head (car expr)))
+>        (cond
+>          ((eq? head 'quote)
+>           (car (cdr expr)))
+>          ((eq? head 'if)
+>           (if (not (eq? (my-eval (car (cdr expr)) env) #f))
+>               (my-eval (car (cdr (cdr expr))) env)
+>               (if (null? (cdr (cdr (cdr expr))))
+>                   '()
+>                   (my-eval (car (cdr (cdr (cdr expr)))) env))))
+>          ((eq? head 'define)
+>           (let ((target (car (cdr expr))))
+>             (if (pair? target)
+>                 (begin
+>                   (env-define! env (car target)
+>                     (make-closure (cdr target) (cdr (cdr expr)) env))
+>                   '())
+>                 (begin
+>                   (env-define! env target (my-eval (car (cdr (cdr expr))) env))
+>                   '()))))
+>          ((eq? head 'set!)
+>           (begin
+>             (env-set! env (car (cdr expr)) (my-eval (car (cdr (cdr expr))) env))
+>             '()))
+>          ((eq? head 'lambda)
+>           (make-closure (car (cdr expr)) (cdr (cdr expr)) env))
+>          ((eq? head 'let)
+>           (let ((new-env (make-env env)))
+>             (let-bind (car (cdr expr)) new-env env)
+>             (eval-body (cdr (cdr expr)) new-env)))
+>          ((eq? head 'begin)
+>           (eval-body (cdr expr) env))
+>          ((eq? head 'progn)
+>           (eval-body (cdr expr) env))
+>          ((eq? head 'cond)
+>           (eval-cond (cdr expr) env))
+>          ((eq? head 'and)
+>           (eval-and (cdr expr) env))
+>          ((eq? head 'or)
+>           (eval-or (cdr expr) env))
+>          (else
+>           (my-apply (my-eval head env) (eval-args (cdr expr) env))))))
+>     (else expr)))
+>
+> (define (let-bind bindings new-env eval-env)
+>   (if (null? bindings)
+>       '()
+>       (begin
+>         (env-define! new-env
+>                      (car (car bindings))
+>                      (my-eval (car (cdr (car bindings))) eval-env))
+>         (let-bind (cdr bindings) new-env eval-env))))
+>
+> (define (eval-body body env)
+>   (if (null? body)
+>       '()
+>       (if (null? (cdr body))
+>           (my-eval (car body) env)
+>           (begin
+>             (my-eval (car body) env)
+>             (eval-body (cdr body) env)))))
+>
+> (define (eval-cond clauses env)
+>   (if (null? clauses)
+>       '()
+>       (if (eq? (car (car clauses)) 'else)
+>           (eval-body (cdr (car clauses)) env)
+>           (if (not (eq? (my-eval (car (car clauses)) env) #f))
+>               (eval-body (cdr (car clauses)) env)
+>               (eval-cond (cdr clauses) env)))))
+>
+> (define (eval-and args env)
+>   (if (null? args)
+>       #t
+>       (if (null? (cdr args))
+>           (my-eval (car args) env)
+>           (if (eq? (my-eval (car args) env) #f)
+>               #f
+>               (eval-and (cdr args) env)))))
+>
+> (define (eval-or args env)
+>   (if (null? args)
+>       #f
+>       (let ((val (my-eval (car args) env)))
+>         (if (not (eq? val #f))
+>             val
+>             (eval-or (cdr args) env)))))
+>
+> (define (eval-args args env)
+>   (if (null? args)
+>       '()
+>       (cons (my-eval (car args) env)
+>             (eval-args (cdr args) env))))
+>
+> ;; ---- Apply ----
+>
+> (define (my-apply proc args)
+>   (cond
+>     ((closure? proc)
+>      (let ((new-env (make-env (closure-env proc))))
+>        (bind-params (closure-params proc) args new-env)
+>        (eval-body (closure-body proc) new-env)))
+>     ((primitive? proc)
+>      (apply-primitive (primitive-name proc) args))
+>     (else '())))
+>
+> (define (bind-params params args env)
+>   (if (null? params)
+>       '()
+>       (begin
+>         (env-define! env (car params) (car args))
+>         (bind-params (cdr params) (cdr args) env))))
+>
+> ;; ---- Primitive application ----
+>
+> (define (sum-list lst)
+>   (if (null? lst) 0 (+ (car lst) (sum-list (cdr lst)))))
+>
+> (define (product-list lst)
+>   (if (null? lst) 1 (* (car lst) (product-list (cdr lst)))))
+>
+> (define (apply-primitive name args)
+>   (cond
+>     ((eq? name 'p-add) (sum-list args))
+>     ((eq? name 'p-sub)
+>      (if (null? (cdr args))
+>          (- 0 (car args))
+>          (- (car args) (car (cdr args)))))
+>     ((eq? name 'p-mul) (product-list args))
+>     ((eq? name 'p-div) (/ (car args) (car (cdr args))))
+>     ((eq? name 'p-eq) (= (car args) (car (cdr args))))
+>     ((eq? name 'p-lt) (< (car args) (car (cdr args))))
+>     ((eq? name 'p-gt) (> (car args) (car (cdr args))))
+>     ((eq? name 'p-le) (<= (car args) (car (cdr args))))
+>     ((eq? name 'p-ge) (>= (car args) (car (cdr args))))
+>     ((eq? name 'p-cons) (cons (car args) (car (cdr args))))
+>     ((eq? name 'p-car) (car (car args)))
+>     ((eq? name 'p-cdr) (cdr (car args)))
+>     ((eq? name 'p-null) (null? (car args)))
+>     ((eq? name 'p-pair) (pair? (car args)))
+>     ((eq? name 'p-eq?) (eq? (car args) (car (cdr args))))
+>     ((eq? name 'p-equal?) (equal? (car args) (car (cdr args))))
+>     ((eq? name 'p-not) (eq? (car args) #f))
+>     ((eq? name 'p-display) (display (car args)))
+>     ((eq? name 'p-newline) (newline))
+>     ((eq? name 'p-putchr) (putchr (car args)))
+>     ((eq? name 'p-getchr) (getchr))
+>     ((eq? name 'p-chr) (chr (car args)))
+>     ((eq? name 'p-read) (read))
+>     ((eq? name 'p-symbol) (symbol (car args)))
+>     ((eq? name 'p-symbol?) (symbol? (car args)))
+>     ((eq? name 'p-string?) (string? (car args)))
+>     ((eq? name 'p-number?) (number? (car args)))
+>     ((eq? name 'p-set-car!) (set-car! (car args) (car (cdr args))))
+>     ((eq? name 'p-set-cdr!) (set-cdr! (car args) (car (cdr args))))
+>     ((eq? name 'p-fopen) (fopen (car args) (car (cdr args))))
+>     ((eq? name 'p-fclose) (fclose (car args)))
+>     ((eq? name 'p-fgetchr) (fgetchr (car args)))
+>     ((eq? name 'p-fputchr) (fputchr (car args) (car (cdr args))))
+>     ((eq? name 'p-fdisplay) (fdisplay (car args) (car (cdr args))))
+>     ((eq? name 'p-fread) (fread (car args)))
+>     (else '())))
+>
+> ;; ---- Global environment setup ----
+>
+> (define (make-global-env)
+>   (let ((env (make-env '())))
+>     (env-define! env '+ (make-primitive 'p-add))
+>     (env-define! env '- (make-primitive 'p-sub))
+>     (env-define! env '* (make-primitive 'p-mul))
+>     (env-define! env '/ (make-primitive 'p-div))
+>     (env-define! env '= (make-primitive 'p-eq))
+>     (env-define! env '< (make-primitive 'p-lt))
+>     (env-define! env '> (make-primitive 'p-gt))
+>     (env-define! env '<= (make-primitive 'p-le))
+>     (env-define! env '>= (make-primitive 'p-ge))
+>     (env-define! env 'cons (make-primitive 'p-cons))
+>     (env-define! env 'car (make-primitive 'p-car))
+>     (env-define! env 'cdr (make-primitive 'p-cdr))
+>     (env-define! env 'null? (make-primitive 'p-null))
+>     (env-define! env 'pair? (make-primitive 'p-pair))
+>     (env-define! env 'eq? (make-primitive 'p-eq?))
+>     (env-define! env 'equal? (make-primitive 'p-equal?))
+>     (env-define! env 'not (make-primitive 'p-not))
+>     (env-define! env 'display (make-primitive 'p-display))
+>     (env-define! env 'newline (make-primitive 'p-newline))
+>     (env-define! env 'putchr (make-primitive 'p-putchr))
+>     (env-define! env 'getchr (make-primitive 'p-getchr))
+>     (env-define! env 'chr (make-primitive 'p-chr))
+>     (env-define! env 'read (make-primitive 'p-read))
+>     (env-define! env 'symbol (make-primitive 'p-symbol))
+>     (env-define! env 'symbol? (make-primitive 'p-symbol?))
+>     (env-define! env 'string? (make-primitive 'p-string?))
+>     (env-define! env 'number? (make-primitive 'p-number?))
+>     (env-define! env 'set-car! (make-primitive 'p-set-car!))
+>     (env-define! env 'set-cdr! (make-primitive 'p-set-cdr!))
+>     (env-define! env 'fopen (make-primitive 'p-fopen))
+>     (env-define! env 'fclose (make-primitive 'p-fclose))
+>     (env-define! env 'fgetchr (make-primitive 'p-fgetchr))
+>     (env-define! env 'fputchr (make-primitive 'p-fputchr))
+>     (env-define! env 'fdisplay (make-primitive 'p-fdisplay))
+>     (env-define! env 'fread (make-primitive 'p-fread))
+>     (env-define! env 'else #t)
+>     env))
+>
+> ;; ---- Main: read file and evaluate ----
+>
+> (define (run-file filename)
+>   (let ((f (fopen filename "r"))
+>         (env (make-global-env)))
+>     (define (loop)
+>       (let ((expr (fread f)))
+>         (if (null? expr)
+>             '()
+>             (begin
+>               (my-eval expr env)
+>               (loop)))))
+>     (loop)
+>     (fclose f)))
+>
+> (run-file program-file)
+> ''')
+> print("Done writing eval.scm")
+> PYEOF
+Done writing eval.scm
+root@0092cdea-8f2e-4927-9b84-bfd4de1fa9ea:/app#

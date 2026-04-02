@@ -1,0 +1,429 @@
+New Terminal Output:
+
+> # 'h' is byte 104, maps to itself
+> # 'e' is byte 101, maps to itself
+> # So "The" as BPE symbols would be ['T', 'h', 'e']
+> # After BPE merges, these should combine into "The" = token ?
+>
+> # Let me check what the first few merges in vocab.bpe look like
+> f2 = open('vocab.bpe','r')
+> f2.readline()  # skip header
+> for i in range(5):
+>     line = f2.readline().strip()
+>     print(f'Merge {i}: "{line}"')
+> f2.close()
+>
+> # Check: in GPT-2, token 464 is "The" with a leading space
+> # Actually, let me check what token IDs correspond to common words
+> # The input is "The meaning of life is"
+> # In GPT-2 tokenizer:
+> # "The" -> 464
+> # " meaning" -> 3616
+> # " of" -> 286
+> # " life" -> 1204
+> # " is" -> 318
+>
+> # Let me verify token 464 = "The" by checking the embedding
+> print(f'\nChecking embeddings...')
+> for tok in [464, 383, 84, 32]:
+>     emb = F(wte_off + tok*E, 3)
+>     print(f'Token {tok} first 3: {emb}')
+>
+> PYEOF
+Token 464 embedding first 5: [0.017748115584254265, -0.06994409114122391, 0.0071877180598676205, 0.10125312954187393, 0.0791923850774765]
+Merge 0: "Ġ t"
+Merge 1: "Ġ a"
+Merge 2: "h e"
+Merge 3: "i n"
+Merge 4: "r e"
+
+Checking embeddings...
+Token 464 first 3: [0.017748115584254265, -0.06994409114122391, 0.0071877180598676205]
+Token 383 first 3: [0.036705370992422104, -0.04057754948735237, -0.026090474799275398]
+Token 84 first 3: [-0.02105472981929779, 0.48394814133644104, 0.025637630373239517]
+Token 32 first 3: [0.02148020640015602, 0.02274146117269993, -0.03244352713227272]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat > /tmp/debug.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> char*vo[V];int vn,ma[50000],mb[50000],nm;
+> char bu[256][4];
+> void ibu(){
+>  int n=0;
+>  for(int i=0;i<256;i++){
+>   if((i>32&&i<127)||(i>160&&i<173)||(i>173&&i<256)){bu[i][0]=i;bu[i][1]=0;}
+>   else{int u=256+n++;bu[i][0]=0xC0|(u>>6);bu[i][1]=0x80|(u&63);bu[i][2]=0;}
+>  }}
+> int fv(char*s){for(int i=0;i<vn;i++)if(!strcmp(vo[i],s))return i;return-1;}
+> void lbpe(char*p){
+>  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+>  vn=0;for(int i=0;i<256;i++)vo[vn++]=strdup(bu[i]);
+>  nm=0;
+>  while(fgets(b,512,f)){
+>   b[strcspn(b,"\n")]=0;if(!b[0])continue;
+>   char*s=strchr(b,' ');if(!s)continue;*s=0;
+>   ma[nm]=fv(b);mb[nm]=fv(s+1);
+>   char*t=malloc(strlen(b)+strlen(s+1)+1);sprintf(t,"%s%s",b,s+1);
+>   vo[vn++]=t;nm++;
+>  }fclose(f);}
+> int enc(char*t,int*o){
+>  int n=strlen(t),s[C],ns=0;
+>  for(int i=0;i<n;i++)s[ns++]=((unsigned char*)t)[i];
+>  for(int m=0;m<nm;m++)for(int i=0;i<ns-1;i++)
+>   if(s[i]==ma[m]&&s[i+1]==mb[m]){
+>    s[i]=256+m;for(int j=i+1;j<ns-1;j++)s[j]=s[j+1];ns--;i--;}
+>  for(int i=0;i<ns;i++)o[i]=s[i];return ns;}
+> int main(int c,char**v){
+>  lbpe(v[1]);
+>  printf("Loaded %d vocab, %d merges\n",vn,nm);
+>  int tk[C],nt=enc(v[2],tk);
+>  printf("Encoded %d tokens:",nt);
+>  for(int i=0;i<nt;i++)printf(" %d",tk[i]);
+>  printf("\n");
+>  for(int i=0;i<nt;i++)printf("  token %d = \"%s\"\n",tk[i],vo[tk[i]]);
+> }
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /tmp/debug /tmp/debug.c -lm 2>&1
+/tmp/debug.c: In function ‘lbpe’:
+/tmp/debug.c:18:34: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   18 |  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+      |                                  ^~~~~~~~~~~~~~
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# /tmp/debug vocab.bpe "The meaning of life is"
+Loaded 50256 vocab, 50000 merges
+Encoded 5 tokens: 464 3616 286 1204 318
+  token 464 = "The"
+  token 3616 = "Ġmeaning"
+  token 286 = "Ġof"
+  token 1204 = "Ġlife"
+  token 318 = "Ġis"
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# python3 << 'PYEOF'
+> import struct, math
+>
+> V,C,E,L,H = 50257, 1024, 768, 12, 12
+> HS = E // H
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', data, off*4))
+>
+> # Offsets
+> o=0
+> wo=o;o+=V*E
+> wp=o;o+=C*E
+> wl1=o;o+=L*E
+> wb1=o;o+=L*E
+> wqk=o;o+=L*E*3*E
+> wqb=o;o+=L*3*E
+> wap=o;o+=L*E*E
+> wab=o;o+=L*E
+> wl2=o;o+=L*E
+> wb2=o;o+=L*E
+> wfc=o;o+=L*E*4*E
+> wfb=o;o+=L*4*E
+> wfp=o;o+=L*4*E*E
+> wpb=o;o+=L*E
+> wlf=o;o+=E
+> wlb=o;o+=E
+>
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*w[i]+b[i] for i in range(n)]
+>
+> def layernorm_p1(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(w[i]+1)+b[i] for i in range(n)]
+>
+> def matmul(x, w_off, n, d):
+>     w = F(w_off, n*d)
+>     out = [0.0]*d
+>     for i in range(d):
+>         s = 0.0
+>         for j in range(n):
+>             s += x[j] * w[j*d+i]
+>         out[i] = s
+>     return out
+>
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> # Forward pass for token 464 at position 0
+> tok = 464
+> pos = 0
+>
+> we = F(wo+tok*E, E)
+> pe = F(wp+pos*E, E)
+> x = [we[i]+pe[i] for i in range(E)]
+> print(f'Embedding first 5: {x[:5]}')
+>
+> # Layer 0 only
+> l = 0
+>
+> # LN1 without +1
+> h_no = layernorm(x, wl1+l*E, wb1+l*E)
+> print(f'LN1 (no+1) first 5: {h_no[:5]}')
+>
+> # LN1 with +1
+> h_p1 = layernorm_p1(x, wl1+l*E, wb1+l*E)
+> print(f'LN1 (+1) first 5: {h_p1[:5]}')
+>
+> # QKV with +1 version
+> qkv = matmul(h_p1, wqk+l*E*3*E, E, 3*E)
+> bi = F(wqb+l*3*E, 3*E)
+> for i in range(3*E): qkv[i] += bi[i]
+> print(f'QKV (+1) first 5: {qkv[:5]}')
+> print(f'QKV (+1) K first 5: {qkv[E:E+5]}')
+> print(f'QKV (+1) V first 5: {qkv[2*E:2*E+5]}')
+>
+> PYEOF
+Embedding first 5: [0.2452052067965269, -0.04250799119472504, -0.14770378777757287, 0.0009227916598320007, 0.21411432325839996]
+LN1 (no+1) first 5: [0.050140892981002855, 0.035831787583090115, -0.008031343320734099, -0.03860991900969214, -0.48568693314938116]
+LN1 (+1) first 5: [2.124973532848167, -0.027480362358704477, -0.8531075761888117, 0.22083442163056463, 1.358093356280858]
+QKV (+1) first 5: [0.059293218663319214, -1.1430807498296875, 0.36258218485784355, 1.650178749212427, -0.4903892411820646]
+QKV (+1) K first 5: [5.630062546008223, -3.3821202306776352, 0.5582465086325876, 1.8119774848403907, -2.2363440110717256]
+QKV (+1) V first 5: [-0.19823974752890972, 3.4114865901029323, 2.430660397296092, -5.682283957740893, -2.086846642048127]
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# sed -i 's/o\[i\]=(x\[i\]-m)\*s\*w\[i\]+b\[i\]/o[i]=(x[i]-m)*s*(w[i]+1)+b[i]/' /app/gpt2.c
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /app/a.out /app/gpt2.c -lm 2>&1
+/app/gpt2.c: In function ‘lbpe’:
+/app/gpt2.c:23:34: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   23 |  FILE*f=fopen(p,"r");char b[512];fgets(b,512,f);ibu();
+      |                                  ^~~~~~~~~~~~~~
+/app/gpt2.c: In function ‘main’:
+/app/gpt2.c:106:15: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  106 |  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+      |               ^~~~~~~~~~~~~~~
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/out2.txt 2>&1 &
+[1] 2471
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# echo "PID=$!"
+PID=2471
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat /tmp/out2.txt
+ articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated articulated art
+iculated articulated articulated articulated articulated articulated articulated
+[1]+  Done                    /app/a.out gpt2-124M.ckpt vocab.bpe "The meaning of life is" > /tmp/out2.txt 2>&1
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat > /tmp/debug2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define NL 12
+> #define NH 12
+> #define HS 64
+> #define E4 3072
+> float*W,*x,*h,*h2,*q,*a,*lo,*kc,*vc;
+> void ln(float*o,float*x,float*w,float*b){
+>  float m=0,v=0;
+>  for(int i=0;i<E;i++)m+=x[i];m/=E;
+>  for(int i=0;i<E;i++)v+=(x[i]-m)*(x[i]-m);
+>  float s=1.0f/sqrtf(v/E+1e-5f);
+>  for(int i=0;i<E;i++)o[i]=(x[i]-m)*s*(w[i]+1)+b[i];}
+> void mm(float*o,float*x,float*w,int n,int d){
+>  for(int i=0;i<d;i++){float s=0;for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];o[i]=s;}}
+> float ge(float x){return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> int wo,wp,wl1,wb1,wqk,wqb,wap,wab,wl2,wb2,wfc,wfb,wfp,wpb,wlf,wlb;
+> void io(){
+>  int o=0;
+>  wo=o;o+=V*E;wp=o;o+=C*E;
+>  wl1=o;o+=NL*E;wb1=o;o+=NL*E;
+>  wqk=o;o+=NL*E*3*E;wqb=o;o+=NL*3*E;
+>  wap=o;o+=NL*E*E;wab=o;o+=NL*E;
+>  wl2=o;o+=NL*E;wb2=o;o+=NL*E;
+>  wfc=o;o+=NL*E*E4;wfb=o;o+=NL*E4;
+>  wfp=o;o+=NL*E4*E;wpb=o;o+=NL*E;
+>  wlf=o;o+=E;wlb=o;}
+> int main(int c,char**v){
+>  FILE*f=fopen(v[1],"rb");fseek(f,0,2);long sz=ftell(f);fseek(f,0,0);
+>  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+>  x=calloc(E,4);h=calloc(E4,4);h2=calloc(E4,4);
+>  q=calloc(E,4);a=calloc(C,4);lo=calloc(V,4);
+>  kc=calloc(NL*C*E,4);vc=calloc(NL*C*E,4);
+>
+>  // Forward pass for token 464 at position 0
+>  int tok=464, pos=0;
+>  float*we=W+wo+tok*E,*pe=W+wp+pos*E;
+>  for(int i=0;i<E;i++)x[i]=we[i]+pe[i];
+>  printf("Emb first5: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  int l=0;
+>  ln(h,x,W+wl1+l*E,W+wb1+l*E);
+>  printf("LN1 first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  mm(h2,h,W+wqk+l*E*3*E,E,3*E);
+>  float*bi=W+wqb+l*3*E;
+>  for(int i=0;i<3*E;i++)h2[i]+=bi[i];
+>  printf("QKV Q first5: %f %f %f %f %f\n",h2[0],h2[1],h2[2],h2[3],h2[4]);
+>  printf("QKV K first5: %f %f %f %f %f\n",h2[E],h2[E+1],h2[E+2],h2[E+3],h2[E+4]);
+>  printf("QKV V first5: %f %f %f %f %f\n",h2[2*E],h2[2*E+1],h2[2*E+2],h2[2*E+3],h2[2*E+4]);
+>
+>  // For single token at pos 0, attention is just the value itself (softmax of single element = 1)
+>  // So after attention, h should equal V
+>  for(int i=0;i<E;i++){q[i]=h2[i];}
+>  float*kp=kc+(l*C+pos)*E,*vp=vc+(l*C+pos)*E;
+>  for(int i=0;i<E;i++){kp[i]=h2[E+i];vp[i]=h2[2*E+i];}
+>
+>  // attention for head 0
+>  float*qi=q;
+>  float*ki=kc+(l*C+0)*E;
+>  float s=0;
+>  for(int i=0;i<HS;i++)s+=qi[i]*ki[i];
+>  printf("Head0 attn score: %f\n",s*0.125f);
+>  // softmax of single element = 1.0
+>  // so output = V[0:HS]
+>  printf("Head0 attn out first5: %f %f %f %f %f\n",vp[0],vp[1],vp[2],vp[3],vp[4]);
+>
+>  // Do full attention
+>  for(int nh=0;nh<NH;nh++){
+>   float*qi2=q+nh*HS;
+>   float*ki2=kc+(l*C+0)*E+nh*HS;
+>   float s2=0;
+>   for(int i=0;i<HS;i++)s2+=qi2[i]*ki2[i];
+>   a[0]=s2*0.125f;
+>   a[0]=1.0f; // softmax of single = 1
+>   float*oi=h+nh*HS;
+>   for(int i=0;i<HS;i++)oi[i]=0;
+>   float*vi=vc+(l*C+0)*E+nh*HS;
+>   for(int i=0;i<HS;i++)oi[i]+=a[0]*vi[i];
+>  }
+>  printf("Attn out first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  // attn proj
+>  mm(h2,h,W+wap+l*E*E,E,E);
+>  bi=W+wab+l*E;
+>  printf("AttnProj first5: %f %f %f %f %f\n",h2[0]+bi[0],h2[1]+bi[1],h2[2]+bi[2],h2[3]+bi[3],h2[4]+bi[4]);
+>
+>  // residual
+>  for(int i=0;i<E;i++)x[i]+=h2[i]+bi[i];
+>  printf("Residual1 first5: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  // ln2
+>  ln(h,x,W+wl2+l*E,W+wb2+l*E);
+>  printf("LN2 first5: %f %f %f %f %f\n",h[0],h[1],h[2],h[3],h[4]);
+>
+>  // fc
+>  mm(h2,h,W+wfc+l*E*E4,E,E4);
+>  bi=W+wfb+l*E4;
+>  printf("FC pre-gelu first5: %f %f %f %f %f\n",h2[0]+bi[0],h2[1]+bi[1],h2[2]+bi[2],h2[3]+bi[3],h2[4]+bi[4]);
+>  for(int i=0;i<E4;i++)h2[i]=ge(h2[i]+bi[i]);
+>  printf("FC post-gelu first5: %f %f %f %f %f\n",h2[0],h2[1],h2[2],h2[3],h2[4]);
+>
+>  // proj
+>  mm(h,h2,W+wfp+l*E4*E,E4,E);
+>  bi=W+wpb+l*E;
+>  printf("MLPproj first5: %f %f %f %f %f\n",h[0]+bi[0],h[1]+bi[1],h[2]+bi[2],h[3]+bi[3],h[4]+bi[4]);
+>
+>  return 0;
+> }
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# gcc -O3 -o /tmp/debug2 /tmp/debug2.c -lm 2>&1 && /tmp/debug2 gpt2-124M.ckpt
+/tmp/debug2.c: In function ‘main’:
+/tmp/debug2.c:35:15: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   35 |  W=malloc(sz);fread(W,1,sz,f);fclose(f);io();
+      |               ^~~~~~~~~~~~~~~
+Emb first5: 0.245205 -0.042508 -0.147704 0.000923 0.214114
+LN1 first5: 2.124974 -0.027480 -0.853108 0.220834 1.358094
+QKV Q first5: 0.059294 -1.143080 0.362581 1.650179 -0.490389
+QKV K first5: 5.630062 -3.382122 0.558248 1.811979 -2.236345
+QKV V first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+Head0 attn score: -9.512005
+Head0 attn out first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+Attn out first5: -0.198241 3.411486 2.430659 -5.682286 -2.086847
+AttnProj first5: 4.951544 -0.265293 -11.306725 -6.940933 6.949622
+Residual1 first5: 5.196749 -0.307801 -11.454429 -6.940011 7.163736
+LN2 first5: 0.556721 -0.129917 -1.156317 -0.879407 0.541008
+FC pre-gelu first5: -2.936224 1.050596 -0.450782 -8.636525 -2.159819
+FC post-gelu first5: -0.004444 0.896280 -0.147000 -0.000000 -0.033013
+MLPproj first5: 27.938036 -216.637192 472.822540 -78.204865 22.500259
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# python3 << 'PYEOF'
+> import struct
+>
+> V,C,E,L = 50257, 1024, 768, 12
+> E4 = 3072
+>
+> f = open('gpt2-124M.ckpt','rb')
+> data = f.read()
+> f.close()
+>
+> def F(off, n):
+>     return list(struct.unpack_from(f'{n}f', data, off*4))
+>
+> # Compute offsets
+> o=0
+> wo=o;o+=V*E
+> wp=o;o+=C*E
+> wl1=o;o+=L*E
+> wb1=o;o+=L*E
+> wqk=o;o+=L*E*3*E
+> wqb=o;o+=L*3*E
+> wap=o;o+=L*E*E
+> wab=o;o+=L*E
+> wl2=o;o+=L*E
+> wb2=o;o+=L*E
+> wfc=o;o+=L*E*E4
+> wfb=o;o+=L*E4
+> wfp=o;o+=L*E4*E
+> wpb=o;o+=L*E
+> wlf=o;o+=E
+> wlb=o;o+=E
+>
+> print(f'wfc offset: {wfc}')
+> print(f'wfb offset: {wfb}')
+> print(f'wfp offset: {wfp}')
+> print(f'wpb offset: {wpb}')
+>
+> # Check fcproj weight layer 0
+> w = F(wfp, 20)
+> print(f'fcproj w[0] first 20: {w}')
+>
+> # Check stats
+> w_all = F(wfp, E4*E)
+> mn = sum(w_all)/len(w_all)
+> print(f'fcproj w[0] mean: {mn}')
+> print(f'fcproj w[0] min: {min(w_all)}')
+> print(f'fcproj w[0] max: {max(w_all)}')
+>
+> # Now let me verify by doing the matmul in Python
+> # First get the post-gelu values from the C output
+> # FC post-gelu first5: -0.004444 0.896280 -0.147000 -0.000000 -0.033013
+> # We need all E4 values... let me compute them
+>
+> import math
+> def gelu(x):
+>     return 0.5*x*(1+math.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+>
+> def layernorm_p1(x, w_off, b_off):
+>     n = len(x)
+>     m = sum(x)/n
+>     v = sum((xi-m)**2 for xi in x)/n
+>     s = 1.0/math.sqrt(v + 1e-5)
+>     w = F(w_off, n)
+>     b = F(b_off, n)
+>     return [(x[i]-m)*s*(w[i]+1)+b[i] for i in range(n)]
+>
+> def matmul(x, w_off, n, d):
+>     w = F(w_off, n*d)
+>     out = [0.0]*d
+>     for i in range(d):
+>         s = 0.0
+>         for j in range(n):
+>             s += x[j] * w[j*d+i]
+>         out[i] = s
+>     return out
+>

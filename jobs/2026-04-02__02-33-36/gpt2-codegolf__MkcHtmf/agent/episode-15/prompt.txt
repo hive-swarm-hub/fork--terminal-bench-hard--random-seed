@@ -1,0 +1,224 @@
+New Terminal Output:
+
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define NL 12
+> #define NH 12
+> #define HS 64
+> #define E4 3072
+> float*W,*xb,*xb2,*hb,*hb2,*qb,*kb,*vb,*ab,*lb;
+> float*kc,*vc; // kv cache [NL][C][E]
+> char*voc[V];int vn;
+> int ma[50000],mb[50000];int nm;
+> // byte to unicode lookup: for bytes that map to 2-byte UTF8
+> char bu[256][4];
+> void init_bu(){
+>  int n=0;
+>  for(int i=0;i<256;i++){
+>   if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255)){
+>    bu[i][0]=i;bu[i][1]=0;
+>   }else{
+>    int u=256+n; n++;
+>    bu[i][0]=0xC0|(u>>6);bu[i][1]=0x80|(u&63);bu[i][2]=0;
+>   }
+>  }
+> }
+> int find_v(char*s){
+>  for(int i=0;i<vn;i++)if(!strcmp(voc[i],s))return i;
+>  return -1;
+> }
+> void load_bpe(char*p){
+>  FILE*f=fopen(p,"r");char buf[512];
+>  fgets(buf,512,f);
+>  init_bu();
+>  vn=0;
+>  for(int i=0;i<256;i++){voc[vn]=strdup(bu[i]);vn++;}
+>  nm=0;
+>  while(fgets(buf,512,f)){
+>   buf[strcspn(buf,"\n")]=0;
+>   if(!buf[0])continue;
+>   char*sp=strchr(buf,' ');
+>   if(!sp)continue;
+>   *sp=0;
+>   int a=find_v(buf),b=find_v(sp+1);
+>   ma[nm]=a;mb[nm]=b;
+>   char*s=malloc(strlen(buf)+strlen(sp+1)+1);
+>   sprintf(s,"%s%s",buf,sp+1);
+>   voc[vn++]=s;
+>   nm++;
+>  }
+>  fclose(f);
+> }
+> int encode(char*text,int*out){
+>  int n=strlen(text);
+>  int sym[C],ns=0;
+>  for(int i=0;i<n;i++)sym[ns++]=((unsigned char*)text)[i];
+>  for(int m=0;m<nm;m++){
+>   for(int i=0;i<ns-1;i++){
+>    if(sym[i]==ma[m]&&sym[i+1]==mb[m]){
+>     sym[i]=256+m;
+>     for(int j=i+1;j<ns-1;j++)sym[j]=sym[j+1];
+>     ns--;i--;
+>    }
+>   }
+>  }
+>  for(int i=0;i<ns;i++)out[i]=sym[i];
+>  return ns;
+> }
+> // decode token to stdout
+> void decode(int t){
+>  char*s=voc[t];
+>  int i=0,n=strlen(s);
+>  while(i<n){
+>   if((unsigned char)s[i]>=0xC0&&i+1<n){
+>    int u=((s[i]&0x1F)<<6)|(s[i+1]&0x3F);
+>    // reverse map unicode to byte
+>    int found=0;
+>    for(int b=0;b<256&&!found;b++){
+>     if(bu[b][0]==s[i]&&bu[b][1]==s[i+1]){putchar(b);found=1;}
+>    }
+>    if(!found)putchar('?');
+>    i+=2;
+>   }else{putchar(s[i]);i++;}
+>  }
+> }
+> // model
+> float*P(int i){return W+i;} // pointer into weights
+> int wo,wp,wl1,wl1b,wqkv,wqkvb,wap,wapb,wl2,wl2b,wfc,wfcb,wfp,wfpb,wlf,wlfb;
+> void init_off(){
+>  int o=0;
+>  wo=o;o+=V*E;
+>  wp=o;o+=C*E;
+>  wl1=o;o+=NL*E;
+>  wl1b=o;o+=NL*E;
+>  wqkv=o;o+=NL*E*3*E;
+>  wqkvb=o;o+=NL*3*E;
+>  wap=o;o+=NL*E*E;
+>  wapb=o;o+=NL*E;
+>  wl2=o;o+=NL*E;
+>  wl2b=o;o+=NL*E;
+>  wfc=o;o+=NL*E*E4;
+>  wfcb=o;o+=NL*E4;
+>  wfp=o;o+=NL*E4*E;
+>  wfpb=o;o+=NL*E;
+>  wlf=o;o+=E;
+>  wlfb=o;o+=E;
+> }
+> void ln(float*o,float*x,float*w,float*b){
+>  float m=0,v=0;
+>  for(int i=0;i<E;i++)m+=x[i];
+>  m/=E;
+>  for(int i=0;i<E;i++)v+=(x[i]-m)*(x[i]-m);
+>  v=v/E+1e-5;
+>  float s=1.0f/sqrtf(v);
+>  for(int i=0;i<E;i++)o[i]=(x[i]-m)*s*(w[i]+1)+b[i];
+> }
+> void matmul(float*o,float*x,float*w,int n,int d){
+>  for(int i=0;i<d;i++){
+>   float s=0;
+>   for(int j=0;j<n;j++)s+=x[j]*w[j*d+i];
+>   o[i]=s;
+>  }
+> }
+> float gelu(float x){
+>  return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+> void forward(int tok,int pos){
+>  // embedding
+>  float*we=P(wo+tok*E),*pe=P(wp+pos*E);
+>  for(int i=0;i<E;i++)xb[i]=we[i]+pe[i];
+>  for(int l=0;l<NL;l++){
+>   // ln1
+>   ln(hb,xb,P(wl1+l*E),P(wl1b+l*E));
+>   // qkv
+>   matmul(hb2,hb,P(wqkv+l*E*3*E),E,3*E);
+>   float*bi=P(wqkvb+l*3*E);
+>   for(int i=0;i<3*E;i++)hb2[i]+=bi[i];
+>   // split q,k,v and store k,v in cache
+>   float*kcl=kc+(l*C+pos)*E,*vcl=vc+(l*C+pos)*E;
+>   for(int i=0;i<E;i++){qb[i]=hb2[i];kcl[i]=hb2[E+i];vcl[i]=hb2[2*E+i];}
+>   // attention per head
+>   for(int h=0;h<NH;h++){
+>    float*qi=qb+h*HS;
+>    for(int t=0;t<=pos;t++){
+>     float*ki=kc+(l*C+t)*E+h*HS;
+>     float s=0;
+>     for(int i=0;i<HS;i++)s+=qi[i]*ki[i];
+>     ab[t]=s/sqrtf(HS);
+>    }
+>    // softmax
+>    float mx=-1e9;
+>    for(int t=0;t<=pos;t++)if(ab[t]>mx)mx=ab[t];
+>    float sm=0;
+>    for(int t=0;t<=pos;t++){ab[t]=expf(ab[t]-mx);sm+=ab[t];}
+>    for(int t=0;t<=pos;t++)ab[t]/=sm;
+>    // weighted sum
+>    float*oi=hb+h*HS;
+>    for(int i=0;i<HS;i++)oi[i]=0;
+>    for(int t=0;t<=pos;t++){
+>     float*vi=vc+(l*C+t)*E+h*HS;
+>     float a=ab[t];
+>     for(int i=0;i<HS;i++)oi[i]+=a*vi[i];
+>    }
+>   }
+>   // attn proj
+>   matmul(hb2,hb,P(wap+l*E*E),E,E);
+>   bi=P(wapb+l*E);
+>   for(int i=0;i<E;i++)xb[i]+=hb2[i]+bi[i];
+>   // ln2
+>   ln(hb,xb,P(wl2+l*E),P(wl2b+l*E));
+>   // fc
+>   matmul(hb2,hb,P(wfc+l*E*E4),E,E4);
+>   bi=P(wfcb+l*E4);
+>   for(int i=0;i<E4;i++)hb2[i]=gelu(hb2[i]+bi[i]);
+>   // proj
+>   matmul(hb,hb2,P(wfp+l*E4*E),E4,E);
+>   bi=P(wfpb+l*E);
+>   for(int i=0;i<E;i++)xb[i]+=hb[i]+bi[i];
+>  }
+>  // final ln
+>  ln(xb,xb,P(wlf),P(wlfb));
+>  // logits = xb @ wte^T
+>  for(int i=0;i<V;i++){
+>   float s=0,*wi=P(wo+i*E);
+>   for(int j=0;j<E;j++)s+=xb[j]*wi[j];
+>   lb[i]=s;
+>  }
+> }
+> int main(int ac,char**av){
+>  if(ac<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",av[0]);return 1;}
+>  // load weights
+>  FILE*f=fopen(av[1],"rb");
+>  fseek(f,0,SEEK_END);long sz=ftell(f);fseek(f,0,SEEK_SET);
+>  W=malloc(sz);fread(W,1,sz,f);fclose(f);
+>  init_off();
+>  // load bpe
+>  load_bpe(av[2]);
+>  // alloc
+>  xb=calloc(E,4);xb2=calloc(E,4);hb=calloc(3*E,4);hb2=calloc(E4,4);
+>  qb=calloc(E,4);ab=calloc(C,4);lb=calloc(V,4);
+>  kc=calloc(NL*C*E,4);vc=calloc(NL*C*E,4);
+>  // encode
+>  int toks[C],nt=encode(av[3],toks);
+>  // forward
+>  for(int g=0;g<20;g++){
+>   for(int i=0;i<nt+g;i++)forward(toks[i],i);
+>   // argmax
+>   int best=0;
+>   for(int i=1;i<V;i++)if(lb[i]>lb[best])best=i;
+>   toks[nt+g]=best;
+>   decode(best);
+>  }
+>  printf("\n");
+>  return 0;
+> }
+> CEOF
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app# wc -c /app/gpt2.c
+5170 /app/gpt2.c
+root@aeb63e35-d726-442f-9eff-7132421d33c9:/app#

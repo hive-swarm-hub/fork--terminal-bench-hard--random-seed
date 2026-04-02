@@ -1,0 +1,168 @@
+New Terminal Output:
+
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# cat > /app/check_overlap.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     sequences = {}
+>     current_name = None
+>     current_seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if current_name:
+>                     sequences[current_name] = ''.join(current_seq)
+>                 current_name = line[1:]
+>                 current_seq = []
+>             else:
+>                 current_seq.append(line)
+>     if current_name:
+>         sequences[current_name] = ''.join(current_seq)
+>     return sequences
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # The output = input[:215] + TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG + input[215:]
+> # But we can view the insertion point differently by shifting bases between the insertion and the template.
+>
+> # Original insertion point: 215
+> # input[:215] = ...ATGAG
+> # insertion = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+> # input[215:] = CAAGGGCGAGGAG...
+>
+> # The output region around the insertion:
+> # output[210:260] = ATGAGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGG
+>
+> # We can slide the insertion point. For each possible split:
+> # output = input[:p] + inserted_bases + input[p:]
+> # where p ranges and inserted_bases changes accordingly
+>
+> # The inserted region in the output is output[215:254] = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+> # But we could also say the insertion starts earlier or later if bases match.
+>
+> # Let's find all valid split points:
+> # output[:215] == input[:215] (confirmed)
+> # output[254:] == input[215:] (confirmed, since 254-215=39)
+>
+> # If we shift left by k:
+> #   output[:215-k] must equal input[:215-k] (always true since they're identical up to 215)
+> #   output[254+j:] must equal input[215+j:] (always true since they're identical from 215 onward)
+> #   BUT we also need: output[215-k:254+j] is the "insertion" and k+j=0 (total shift)
+> #   Actually, we can shift left: insertion_point = 215-k, insertion = output[215-k:254]
+> #   We need: input[215-k:] == output[254:] ... no wait.
+> #   output = input[:215-k] + output[215-k:254] + input[215:]
+> #   For this to work: output[254:] must equal input[215:] (yes) and output[:215-k] must equal input[:215-k] (yes)
+> #   But also: output[215-k:254] is the new insertion at position 215-k
+> #   The new insertion = output[215-k:254] = input[215-k:215] + original_insertion
+> #   Wait, output[215-k:215] = input[215-k:215] (since output[:215] == input[:215])
+> #   So new_insertion = input[215-k:215] + TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+>
+> # Similarly shift right by j:
+> #   insertion_point = 215+j
+> #   new_insertion = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG + input[215:215+j]
+> #   output = input[:215+j] ... wait, output[:215] == input[:215] but output[215:215+j] is part of the insertion
+> #   This doesn't work simply.
+>
+> # Actually, the correct way to think about it:
+> # The output has an extra 39 bases compared to input.
+> # We can place the "cut" at any position where input and output agree.
+> # Before the insertion: input[:p] == output[:p]
+> # After the insertion: input[p:] == output[p+39:]
+> # The insertion is output[p:p+39]
+>
+> print("Finding all valid insertion points...")
+> for p in range(max(0, 215-5), min(len(input_seq), 215+5)):
+>     if input_seq[:p] == output_seq[:p] and input_seq[p:] == output_seq[p+39:]:
+>         ins = output_seq[p:p+39]
+>         # Check overlap at 5' end of insertion with template before p
+>         left_overlap = 0
+>         for i in range(1, min(len(ins), p) + 1):
+>             if ins[-i:] == input_seq[p-i:p]:
+>                 left_overlap = i
+>             else:
+>                 break
+>         # Check overlap at 3' end of insertion with template after p
+>         right_overlap = 0
+>         for i in range(1, min(len(ins), len(input_seq)-p) + 1):
+>             if ins[:i] == input_seq[p:p+i]:
+>                 right_overlap = i
+>             else:
+>                 break
+>         print(f"  p={p}: insertion='{ins}', left_overlap={left_overlap}, right_overlap={right_overlap}")
+>
+> # Now let's also check if we can shift the insertion boundaries
+> # by moving bases from the insertion to the template side
+> print("\nChecking shifted insertion points...")
+> base_insertion = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG"
+> base_point = 215
+>
+> # Shift left: move bases from start of template-after-insertion to end of insertion
+> for shift in range(-5, 6):
+>     p = base_point + shift
+>     if p < 0 or p > len(input_seq):
+>         continue
+>     # The insertion at point p should produce the same output
+>     # output = input[:p] + X + input[p:]
+>     # We need: input[:p] + X + input[p:] == output
+>     # X = output[p:p+39]
+>     # Check: output[:p] == input[:p]?
+>     if output_seq[:p] != input_seq[:p]:
+>         # Find where they differ
+>         for i in range(p):
+>             if output_seq[i] != input_seq[i]:
+>                 print(f"  shift={shift}, p={p}: mismatch at pos {i}")
+>                 break
+>         continue
+>     if output_seq[p+39:] != input_seq[p:]:
+>         print(f"  shift={shift}, p={p}: suffix mismatch")
+>         continue
+>     ins = output_seq[p:p+39]
+>
+>     # Check overlaps
+>     left_overlap = 0
+>     for i in range(1, min(len(ins)+1, p+1)):
+>         if ins[-i:] == input_seq[p-i:p]:
+>             left_overlap = i
+>         else:
+>             break
+>     right_overlap = 0
+>     for i in range(1, min(len(ins)+1, len(input_seq)-p+1)):
+>         if ins[:i] == input_seq[p:p+i]:
+>             right_overlap = i
+>         else:
+>             break
+>     print(f"  shift={shift}, p={p}: ins='{ins[:10]}...{ins[-10:]}', left_ovlp={left_overlap}, right_ovlp={right_overlap}")
+> PYEOF
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app# python3 /app/check_overlap.py
+Finding all valid insertion points...
+  p=213: insertion='AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA', left_overlap=0, right_overlap=2
+  p=214: insertion='GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAA', left_overlap=1, right_overlap=1
+  p=215: insertion='TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG', left_overlap=2, right_overlap=0
+
+Checking shifted insertion points...
+  shift=-5, p=210: suffix mismatch
+  shift=-4, p=211: suffix mismatch
+  shift=-3, p=212: suffix mismatch
+  shift=-2, p=213: ins='AGTAGATTAG...ATTAACAGAA', left_ovlp=0, right_ovlp=2
+  shift=-1, p=214: ins='GTAGATTAGA...TTAACAGAAA', left_ovlp=1, right_ovlp=1
+  shift=0, p=215: ins='TAGATTAGAA...TAACAGAAAG', left_ovlp=2, right_ovlp=0
+  shift=1, p=216: mismatch at pos 215
+  shift=2, p=217: mismatch at pos 215
+  shift=3, p=218: mismatch at pos 215
+  shift=4, p=219: mismatch at pos 215
+  shift=5, p=220: mismatch at pos 215
+root@744c8d38-3c12-48b9-acfc-25e5969c9c2b:/app#
