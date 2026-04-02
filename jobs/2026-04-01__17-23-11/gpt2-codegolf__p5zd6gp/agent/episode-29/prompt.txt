@@ -1,0 +1,79 @@
+New Terminal Output:
+
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# python3 << 'PYEOF'
+> import struct, array, mmap, math
+>
+> V, T, C, L = 50257, 1024, 768, 12
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+> W = array.array('f')
+> W.frombytes(mm[:])
+>
+> # Parameter offsets (llm.c order)
+> sizes = [V*C, T*C, L*C, L*C, L*3*C*C, L*3*C, L*C*C, L*C, L*C, L*C, L*4*C*C, L*4*C, L*4*C*C, L*C, C, C]
+> off = []
+> p = 0
+> for s in sizes:
+>     off.append(p)
+>     p += s
+>
+> # Get wte for token 15496 ("Hello") + wpe for position 0
+> tok = 15496
+> x = [W[off[0]+tok*C+i] + W[off[1]+i] for i in range(C)]
+> print(f"Input x mean: {sum(x)/C:.4f}, std: {(sum((xi-sum(x)/C)**2 for xi in x)/C)**0.5:.4f}")
+>
+> # LayerNorm (layer 0) - try without +1
+> m = sum(x)/C
+> v = sum((xi-m)**2 for xi in x)/C + 1e-5
+> std = v**0.5
+> ln_x = [(W[off[2]+i])*(x[i]-m)/std + W[off[3]+i] for i in range(C)]
+> print(f"LN output mean: {sum(ln_x)/C:.4f}")
+>
+> # Try QKV matmul both ways
+> # Convention 1: W is [3C, C] row-major, output = W @ x
+> qkv1 = [0.0]*10
+> for i in range(10):
+>     s = 0
+>     for j in range(C):
+>         s += W[off[4]+i*C+j] * ln_x[j]
+>     qkv1[i] = s + W[off[5]+i]
+> print(f"QKV conv1 (W@x) first 10: {[f'{v:.4f}' for v in qkv1]}")
+>
+> # Convention 2: W is [C, 3C] row-major (TF style), output = x @ W
+> qkv2 = [0.0]*10
+> for i in range(10):
+>     s = 0
+>     for j in range(C):
+>         s += ln_x[j] * W[off[4]+j*3*C+i]
+>     qkv2[i] = s + W[off[5]+i]
+> print(f"QKV conv2 (x@W) first 10: {[f'{v:.4f}' for v in qkv2]}")
+>
+> # Also try with +1 in layernorm
+> ln_x2 = [(W[off[2]+i]+1)*(x[i]-m)/std + W[off[3]+i] for i in range(C)]
+> qkv3 = [0.0]*10
+> for i in range(10):
+>     s = 0
+>     for j in range(C):
+>         s += W[off[4]+i*C+j] * ln_x2[j]
+>     qkv3[i] = s + W[off[5]+i]
+> print(f"QKV +1 conv1 first 10: {[f'{v:.4f}' for v in qkv3]}")
+>
+> qkv4 = [0.0]*10
+> for i in range(10):
+>     s = 0
+>     for j in range(C):
+>         s += ln_x2[j] * W[off[4]+j*3*C+i]
+>     qkv4[i] = s + W[off[5]+i]
+> print(f"QKV +1 conv2 first 10: {[f'{v:.4f}' for v in qkv4]}")
+>
+> mm.close()
+> f.close()
+> PYEOF
+Input x mean: -0.0181, std: 0.1489
+LN output mean: -0.0238
+QKV conv1 (W@x) first 10: ['1.2882', '0.4773', '-0.2875', '-0.5863', '-0.3718', '-1.3108', '0.1255', '0.9986', '-0.8788', '-0.0546']
+QKV conv2 (x@W) first 10: ['0.5665', '0.6250', '0.7975', '-1.0395', '0.0196', '-0.0919', '0.8217', '-0.8463', '1.0276', '-0.0900']
+QKV +1 conv1 first 10: ['7.6534', '-2.3050', '1.4586', '-4.6271', '2.8850', '0.2403', '-0.4067', '-2.7081', '-0.1705', '-3.9750']
+QKV +1 conv2 first 10: ['0.6539', '-0.4974', '-1.1939', '3.0149', '-1.8143', '-0.6698', '2.5903', '0.2886', '5.1792', '-0.4882']
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app#

@@ -1,0 +1,160 @@
+New Terminal Output:
+
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# python3 -c "
+> import os
+> code = r'''
+m> #include <stdio.h>
+(buf,x[t],off[2]+l*> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <fcntl.h>
+> #include <sys/stat.h>
+> #define V 50257
+> #define T 1024
+> #define C 768
+> #define L 12
+> #define H 12
+> #define D 64
+> #define C4 3072
+> float *W;
+> int off[16];
+> char *vocab[V]; int vlen[V];
+> char merge_a[50001][80], merge_b[50001][80];
+> int n_merges;
+> void init_off(){
+>     int s[]={V*C,T*C,L*C,L*C,L*3*C*C,L*3*C,L*C*C,L*C,L*C,L*C,L*4*C*C,L*4*C,L*4*C*C,L*C,C,C};
+>     int p=0; for(int i=0;i<16;i++){off[i]=p;p+=s[i];}
+> }
+> void layernorm(float*o,float*x,int wo,int bo){
+>     float m=0,v=0;
+>     for(int i=0;i<C;i++) m+=x[i];
+>     m/=C;
+>     for(int i=0;i<C;i++) v+=(x[i]-m)*(x[i]-m);
+>     v=v/C+1e-5f;
+>     float s=1.0f/sqrtf(v);
+>     for(int i=0;i<C;i++) o[i]=(W[wo+i]+1.0f)*(x[i]-m)*s+W[bo+i];
+> }
+> void matmul(float*o,float*x,int wo,int r,int c){
+>     for(int i=0;i<r;i++){
+>         float s=0;
+>         for(int j=0;j<c;j++) s+=W[wo+i*c+j]*x[j];
+>         o[i]=s;
+>     }
+> }
+> float geluf(float x){
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+> // byte to unicode
+> int b2u[256];
+> void init_b2u(){
+>     int n=0;
+>     for(int i=0;i<256;i++){
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255)) b2u[i]=i;
+>         else {b2u[i]=256+n;n++;}
+>     }
+> }
+> // encode a unicode codepoint to utf8 in buf, return length
+> int u2utf8(int cp,char*buf){
+>     if(cp<0x80){buf[0]=cp;return 1;}
+>     if(cp<0x800){buf[0]=0xC0|(cp>>6);buf[1]=0x80|(cp&0x3F);return 2;}
+>     buf[0]=0xE0|(cp>>12);buf[1]=0x80|((cp>>6)&0x3F);buf[2]=0x80|(cp&0x3F);return 3;
+> }
+> void build_vocab(){
+>     // first 256 tokens are byte-level
+>     for(int i=0;i<256;i++){
+>         vocab[i]=malloc(4);
+>         vlen[i]=u2utf8(b2u[i],vocab[i]);
+>         vocab[i][vlen[i]]=0;
+>     }
+>     // merges create tokens 256..256+n_merges-1
+>     for(int i=0;i<n_merges;i++){
+>         // find token ids for merge_a[i] and merge_b[i]
+>         // new token text = merge_a + merge_b
+>         int id=256+i;
+>         int la=strlen(merge_a[i]),lb=strlen(merge_b[i]);
+>         vocab[id]=malloc(la+lb+1);
+>         memcpy(vocab[id],merge_a[i],la);
+>         memcpy(vocab[id]+la,merge_b[i],lb);
+>         vocab[id][la+lb]=0;
+>         vlen[id]=la+lb;
+>     }
+> }
+> int find_token(char*s,int len){
+>     for(int i=V-1;i>=0;i--){
+>         if(vlen[i]==len && memcmp(vocab[i],s,len)==0) return i;
+>     }
+>     return -1;
+> }
+> int tokenize(char*text,int*tokens){
+>     init_b2u();
+>     // convert text bytes to unicode token strings
+>     int nt=0;
+>     // split into characters, each becoming a base token
+>     int tids[1024]; int n=0;
+>     for(int i=0;text[i];i++){
+>         unsigned char c=text[i];
+>         char buf[4]; int l=u2utf8(b2u[c],buf); buf[l]=0;
+>         int tid=-1;
+>         for(int j=0;j<256;j++) if(vlen[j]==l && memcmp(vocab[j],buf,l)==0){tid=j;break;}
+>         if(tid>=0) tids[n++]=tid;
+>     }
+>     // apply BPE merges
+>     for(int m=0;m<n_merges;m++){
+>         int aid=find_token(merge_a[m],strlen(merge_a[m]));
+>         int bid=find_token(merge_b[m],strlen(merge_b[m]));
+>         if(aid<0||bid<0) continue;
+>         int mid=256+m;
+>         for(int i=0;i<n-1;i++){
+>             if(tids[i]==aid && tids[i+1]==bid){
+>                 tids[i]=mid;
+>                 for(int j=i+1;j<n-1;j++) tids[j]=tids[j+1];
+>                 n--; i--;
+>             }
+>         }
+>     }
+>     memcpy(tokens,tids,n*sizeof(int));
+>     return n;
+> }
+> // decode token to text (convert unicode back to bytes)
+> void decode_token(int id){
+>     char*s=vocab[id]; int l=vlen[id];
+>     // parse utf8 codepoints and convert back to bytes
+>     for(int i=0;i<l;){
+>         int cp; unsigned char c=s[i];
+>         if(c<0x80){cp=c;i++;}
+>         else if(c<0xE0){cp=((c&0x1F)<<6)|(s[i+1]&0x3F);i+=2;}
+>         else{cp=((c&0x0F)<<12)|((s[i+1]&0x3F)<<6)|(s[i+2]&0x3F);i+=3;}
+>         // reverse b2u
+>         for(int b=0;b<256;b++) if(b2u[b]==cp){putchar(b);break;}
+>     }
+> }
+> float x[T][C], buf[C], qkv[3*C], att[T];
+> float fc_buf[C4];
+> void forward(int*tokens,int seq_len){
+>     for(int t=0;t<seq_len;t++)
+>         for(int i=0;i<C;i++)
+>             x[t][i]=W[off[0]+tokens[t]*C+i]+W[off[1]+t*C+i];
+>     for(int l=0;l<L;l++){
+>         for(int t=0;t<seq_len;t++){
+>             layernorm(buf,x[t],off[2]+l*C,off[3]+l*C);
+>             matmul(qkv,buf,off[4]+l*3*C*C,3*C,C);
+>             for(int i=0;i<3*C;i++) qkv[i]+=W[off[5]+l*3*C+i];
+>             // multi-head attention
+>             float attn_out[C];
+>             memset(attn_out,0,sizeof(attn_out));
+>             for(int h=0;h<H;h++){
+>                 float*q=qkv+h*D;
+>                 for(int t2=0;t2<=t;t2++){
+>                     // need k,v for t2 - but we only have current qkv
+>                     // We need to cache or recompute. Let me cache.
+>                 }
+>             }
+>         }
+>     }
+> }
+> '''
+> print(len(code))
+> "
+4655
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app#

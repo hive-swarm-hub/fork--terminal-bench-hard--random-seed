@@ -1,0 +1,106 @@
+New Terminal Output:
+
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# cat > /tmp/debug2.c << 'EOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+> #include<sys/stat.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define C4 3072
+> float*W;
+> int main(){
+>  int fd=open("gpt2-124M.ckpt",0);struct stat st;fstat(fd,&st);
+>  W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>
+>  // TF alphabetical order per layer:
+>  // c_attn/b[2304], c_attn/w[768*2304], c_proj/b[768], c_proj/w[768*768],
+>  // ln_1/b[768], ln_1/g[768], ln_2/b[768], ln_2/g[768],
+>  // mlp/c_fc/b[3072], mlp/c_fc/w[768*3072], mlp/c_proj/b[768], mlp/c_proj/w[3072*768]
+>  // Then: ln_f/b[768], ln_f/g[768], wpe[1024*768], wte[50257*768]
+>
+>  int PL = 3*C + C*3*C + C + C*C + C + C + C + C + 4*C + C*4*C + C + 4*C*C; // per layer
+>  int layer0 = 0;
+>  // offsets within layer
+>  int qkvb_o = 0;
+>  int qkvw_o = 3*C;
+>  int apb_o = qkvw_o + C*3*C;
+>  int apw_o = apb_o + C;
+>  int ln1b_o = apw_o + C*C;
+>  int ln1g_o = ln1b_o + C;
+>  int ln2b_o = ln1g_o + C;
+>  int ln2g_o = ln2b_o + C;
+>  int fcb_o = ln2g_o + C;
+>  int fcw_o = fcb_o + 4*C;
+>  int fpb_o = fcw_o + C*4*C;
+>  int fpw_o = fpb_o + C;
+>
+>  int lnfb_o = PL*L;
+>  int lnfg_o = lnfb_o + C;
+>  int wpe_o = lnfg_o + C;
+>  int wte_o = wpe_o + 1024*C;
+>
+>  // Token 15496 (Hello) at position 0
+>  float x[C];
+>  for(int i=0;i<C;i++) x[i]=W[wte_o+15496*C+i]+W[wpe_o+i];
+>  printf("x[0..4]: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  // LayerNorm 1, layer 0
+>  float ln1[C];
+>  float m=0,v=0;
+>  for(int i=0;i<C;i++) m+=x[i]; m/=C;
+>  for(int i=0;i<C;i++) v+=(x[i]-m)*(x[i]-m); v=1.f/sqrtf(v/C+1e-5f);
+>  for(int i=0;i<C;i++) ln1[i]=W[layer0+ln1g_o+i]*(x[i]-m)*v+W[layer0+ln1b_o+i];
+>  printf("ln1 [0..4]: %f %f %f %f %f\n",ln1[0],ln1[1],ln1[2],ln1[3],ln1[4]);
+>  printf("ln1 mean: %f\n", ({float s=0;for(int i=0;i<C;i++)s+=ln1[i];s/C;}));
+>
+>  // QKV: x @ W convention, W is [C, 3C]
+>  float qkv[2304];
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=ln1[j]*W[layer0+qkvw_o+j*2304+i];qkv[i]=s+W[layer0+qkvb_o+i];}
+>  printf("qkv x@W [0..4]: %f %f %f %f %f\n",qkv[0],qkv[1],qkv[2],qkv[3],qkv[4]);
+>
+>  // For single token, attn output = V values
+>  float*val=qkv+2*C;
+>
+>  // Attention projection: x @ W, W is [C, C]
+>  float proj[C];
+>  for(int i=0;i<C;i++){float s=0;for(int j=0;j<C;j++)s+=val[j]*W[layer0+apw_o+j*C+i];proj[i]=s+W[layer0+apb_o+i];}
+>  float x2[C];
+>  for(int i=0;i<C;i++) x2[i]=x[i]+proj[i];
+>  printf("after attn [0..4]: %f %f %f %f %f\n",x2[0],x2[1],x2[2],x2[3],x2[4]);
+>
+>  // LN2
+>  float ln2[C];
+>  m=0;v=0;
+>  for(int i=0;i<C;i++) m+=x2[i]; m/=C;
+>  for(int i=0;i<C;i++) v+=(x2[i]-m)*(x2[i]-m); v=1.f/sqrtf(v/C+1e-5f);
+>  for(int i=0;i<C;i++) ln2[i]=W[layer0+ln2g_o+i]*(x2[i]-m)*v+W[layer0+ln2b_o+i];
+>
+>  // MLP fc: x @ W, W is [C, 4C]
+>  float fc[C4];
+>  for(int i=0;i<C4;i++){float s=0;for(int j=0;j<C;j++)s+=ln2[j]*W[layer0+fcw_o+j*C4+i];fc[i]=s+W[layer0+fcb_o+i];}
+>  for(int i=0;i<C4;i++){float xi=fc[i];fc[i]=.5f*xi*(1+tanhf(.7978845608f*(xi+.044715f*xi*xi*xi)));}
+>  printf("fc gelu [0..4]: %f %f %f %f %f\n",fc[0],fc[1],fc[2],fc[3],fc[4]);
+>
+>  // MLP proj: x @ W, W is [4C, C]
+>  float mlp[C];
+>  for(int i=0;i<C;i++){float s=0;for(int j=0;j<C4;j++)s+=fc[j]*W[layer0+fpw_o+j*C+i];mlp[i]=s+W[layer0+fpb_o+i];}
+>  for(int i=0;i<C;i++) x2[i]+=mlp[i];
+>  printf("after mlp [0..4]: %f %f %f %f %f\n",x2[0],x2[1],x2[2],x2[3],x2[4]);
+>  printf("mean: %f\n", ({float s=0;for(int i=0;i<C;i++)s+=x2[i];s/C;}));
+> }
+> EOF
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# gcc -O3 -o /tmp/debug2 /tmp/debug2.c -lm 2>&1 && /tmp/debug2
+x[0..4]: -0.087471 -0.330112 0.015230 -0.135311 -0.120346
+ln1 [0..4]: -0.052242 -0.128742 -0.055896 -0.070832 -0.077598
+ln1 mean: -0.004790
+qkv x@W [0..4]: 0.470091 -0.077501 0.553071 -0.701201 -0.252557
+after attn [0..4]: 0.161527 -0.730192 -0.223796 -0.172355 -0.059756
+fc gelu [0..4]: -0.048207 -0.100894 -0.164217 0.125034 -0.154711
+after mlp [0..4]: 0.678362 -1.459638 0.834005 -1.555961 0.333615
+mean: 0.070535
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app#

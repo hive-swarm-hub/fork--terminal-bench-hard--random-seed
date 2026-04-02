@@ -1,0 +1,151 @@
+New Terminal Output:
+
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# python3 << 'PYEOF'
+> import struct, array, mmap, math
+>
+> V, T, C, L, NH = 50257, 1024, 768, 12, 12
+> HS = C // NH  # 64
+>
+> f = open('gpt2-124M.ckpt', 'rb')
+> mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+> W = array.array('f')
+> W.frombytes(mm[:])
+>
+> # Parse parameter offsets
+> sizes = [V*C, T*C, L*C, L*C, L*3*C*C, L*3*C, L*C*C, L*C, L*C, L*C, L*4*C*C, L*4*C, L*4*C*C, L*C, C, C]
+> names = ['wte','wpe','ln1w','ln1b','qkvw','qkvb','attprojw','attprojb','ln2w','ln2b','fcw','fcb','fcprojw','fcprojb','lnfw','lnfb']
+> off = {}
+> pos = 0
+> for n, s in zip(names, sizes):
+>     off[n] = pos
+>     pos += s
+>
+> def get(name, idx=0):
+>     return off[name] + idx
+>
+> def layernorm(x, w_off, b_off, add_one=False):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     std = math.sqrt(var + 1e-5)
+>     out = []
+>     for i in range(n):
+>         g = W[w_off + i]
+>         if add_one:
+>             g = g + 1.0
+>         out.append(g * (x[i] - mean) / std + W[b_off + i])
+>     return out
+>
+> def matmul(x, w_off, rows, cols):
+>     # x is [cols], w is [rows, cols] stored row-major, output is [rows]
+>     out = [0.0] * rows
+>     for i in range(rows):
+>         s = 0.0
+>         for j in range(cols):
+>             s += W[w_off + i * cols + j] * x[j]
+>         out[i] = s
+>     return out
+>
+> def add_bias(x, b_off):
+>     return [x[i] + W[b_off + i] for i in range(len(x))]
+>
+> def gelu(x):
+>     return [0.5 * xi * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (xi + 0.044715 * xi**3))) for xi in x]
+>
+> def softmax(x):
+>     mx = max(x)
+>     e = [math.exp(xi - mx) for xi in x]
+>     s = sum(e)
+>     return [ei / s for ei in e]
+>
+> # Simple tokenization - just use byte encoding for now to test
+> # Token for "Hello" - let me use a known token
+> # Actually let me just use token 15496 which is "Hello" in GPT-2
+> tokens = [15496]  # "Hello"
+>
+> def forward(tokens, add_one=False):
+>     seq_len = len(tokens)
+>     # Build hidden states for each position
+>     # x[t] = wte[token] + wpe[t]
+>     xs = []
+>     for t in range(seq_len):
+>         tok = tokens[t]
+>         x = [W[get('wte') + tok*C + i] + W[get('wpe') + t*C + i] for i in range(C)]
+>         xs.append(x)
+>
+>     for layer in range(L):
+>         new_xs = []
+>         for t in range(seq_len):
+>             # Layer norm 1
+>             ln1 = layernorm(xs[t], get('ln1w', layer*C), get('ln1b', layer*C), add_one)
+>
+>             # QKV projection
+>             qkv = matmul(ln1, get('qkvw', layer*3*C*C), 3*C, C)
+>             qkv = add_bias(qkv, get('qkvb', layer*3*C))
+>
+>             # Split into Q, K, V and do attention
+>             q = qkv[:C]
+>             k_all = []
+>             v_all = []
+>             # For causal attention, we need all positions up to t
+>             # This is getting complex... let me just check the last token's logits
+>             # Actually for a single token, attention is just softmax(q*k/sqrt(d))*v
+>             # With single token, attention output = v (since softmax of single element = 1)
+>
+>             # For single token, attn_out = v
+>             attn_out = qkv[2*C:3*C]
+>
+>             # Project
+>             proj = matmul(attn_out, get('attprojw', layer*C*C), C, C)
+>             proj = add_bias(proj, get('attprojb', layer*C))
+>
+>             # Residual
+>             x = [xs[t][i] + proj[i] for i in range(C)]
+>
+>             # Layer norm 2
+>             ln2 = layernorm(x, get('ln2w', layer*C), get('ln2b', layer*C), add_one)
+>
+>             # MLP
+>             fc = matmul(ln2, get('fcw', layer*4*C*C), 4*C, C)
+>             fc = add_bias(fc, get('fcb', layer*4*C))
+>             fc = gelu(fc)
+>
+>             fc_proj = matmul(fc, get('fcprojw', layer*C*4*C), C, 4*C)
+>             fc_proj = add_bias(fc_proj, get('fcprojb', layer*C))
+>
+>             # Residual
+>             x = [x[i] + fc_proj[i] for i in range(C)]
+>             new_xs.append(x)
+>         xs = new_xs
+>
+>     # Final layer norm
+>     x = layernorm(xs[-1], get('lnfw'), get('lnfb'), add_one)
+>
+>     # Logits = x @ wte.T (weight tying)
+>     # Find top 5 tokens
+>     best = []
+>     for v in range(V):
+>         s = sum(x[i] * W[get('wte') + v*C + i] for i in range(C))
+>         if len(best) < 5 or s > best[0][0]:
+>             best.append((s, v))
+>             best.sort()
+>             if len(best) > 5:
+>                 best.pop(0)
+>
+>     return best
+>
+> print("Testing with add_one=False...")
+> best = forward(tokens, add_one=False)
+> for score, tok_id in reversed(best):
+>     print(f"  token {tok_id}: score {score:.4f}")
+>
+> print("Testing with add_one=True...")
+> best = forward(tokens, add_one=True)
+> for score, tok_id in reversed(best):
+>     print(f"  token {tok_id}: score {score:.4f}")
+>
+> mm.close()
+> f.close()
+> PYEOF
+Testing with add_one=False...
+

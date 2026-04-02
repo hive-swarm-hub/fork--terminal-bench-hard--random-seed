@@ -1,0 +1,109 @@
+New Terminal Output:
+
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# cat > /tmp/debug.c << 'EOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+> #include<sys/stat.h>
+> #define V 50257
+> #define C 768
+> #define L 12
+> #define C4 3072
+> float*W;
+> int main(){
+>  int fd=open("gpt2-124M.ckpt",0);struct stat st;fstat(fd,&st);
+>  W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>  int sizes[]={V*C,1024*C,L*C,L*C,L*3*C*C,L*3*C,L*C*C,L*C,L*C,L*C,L*4*C*C,L*4*C,L*4*C*C,L*C,C,C};
+>  int P[16],p=0;
+>  for(int i=0;i<16;i++){P[i]=p;p+=sizes[i];}
+>
+>  // Token 15496 (Hello) at position 0
+>  float x[C];
+>  for(int i=0;i<C;i++) x[i]=W[P[0]+15496*C+i]+W[P[1]+i];
+>  printf("x[0..4]: %f %f %f %f %f\n",x[0],x[1],x[2],x[3],x[4]);
+>
+>  // LayerNorm 1, layer 0 - try both conventions
+>  float ln1[C];
+>  float m=0,v=0;
+>  for(int i=0;i<C;i++) m+=x[i]; m/=C;
+>  for(int i=0;i<C;i++) v+=(x[i]-m)*(x[i]-m); v=1.f/sqrtf(v/C+1e-5f);
+>
+>  // Without +1
+>  for(int i=0;i<C;i++) ln1[i]=W[P[2]+i]*(x[i]-m)*v+W[P[3]+i];
+>  printf("ln1 no+1 [0..4]: %f %f %f %f %f\n",ln1[0],ln1[1],ln1[2],ln1[3],ln1[4]);
+>
+>  // With +1
+>  for(int i=0;i<C;i++) ln1[i]=(1+W[P[2]+i])*(x[i]-m)*v+W[P[3]+i];
+>  printf("ln1 +1   [0..4]: %f %f %f %f %f\n",ln1[0],ln1[1],ln1[2],ln1[3],ln1[4]);
+>
+>  // QKV matmul - try W@x convention (W is [3C, C])
+>  float qkv[2304];
+>  // Without +1 layernorm first
+>  for(int i=0;i<C;i++) ln1[i]=W[P[2]+i]*(x[i]-m)*v+W[P[3]+i];
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=W[P[4]+i*C+j]*ln1[j];qkv[i]=s+W[P[5]+i];}
+>  printf("qkv W@x no+1 [0..4]: %f %f %f %f %f\n",qkv[0],qkv[1],qkv[2],qkv[3],qkv[4]);
+>
+>  // x@W convention (W is [C, 3C])
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=ln1[j]*W[P[4]+j*2304+i];qkv[i]=s+W[P[5]+i];}
+>  printf("qkv x@W no+1 [0..4]: %f %f %f %f %f\n",qkv[0],qkv[1],qkv[2],qkv[3],qkv[4]);
+>
+>  // With +1 layernorm
+>  for(int i=0;i<C;i++) ln1[i]=(1+W[P[2]+i])*(x[i]-m)*v+W[P[3]+i];
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=W[P[4]+i*C+j]*ln1[j];qkv[i]=s+W[P[5]+i];}
+>  printf("qkv W@x +1   [0..4]: %f %f %f %f %f\n",qkv[0],qkv[1],qkv[2],qkv[3],qkv[4]);
+>
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=ln1[j]*W[P[4]+j*2304+i];qkv[i]=s+W[P[5]+i];}
+>  printf("qkv x@W +1   [0..4]: %f %f %f %f %f\n",qkv[0],qkv[1],qkv[2],qkv[3],qkv[4]);
+>
+>  // For single token, attention output = V (since softmax of single score = 1)
+>  // So attn_out = qkv[2*C : 3*C]
+>  // Then project through attprojw
+>
+>  // Let's do full layer 0 with W@x and no+1, then check residual
+>  for(int i=0;i<C;i++) ln1[i]=W[P[2]+i]*(x[i]-m)*v+W[P[3]+i];
+>  for(int i=0;i<2304;i++){float s=0;for(int j=0;j<C;j++)s+=W[P[4]+i*C+j]*ln1[j];qkv[i]=s+W[P[5]+i];}
+>  float*val=qkv+2*C; // V for single token
+>  float proj[C];
+>  for(int i=0;i<C;i++){float s=0;for(int j=0;j<C;j++)s+=W[P[6]+i*C+j]*val[j];proj[i]=s+W[P[7]+i];}
+>  float x2[C];
+>  for(int i=0;i<C;i++) x2[i]=x[i]+proj[i];
+>  printf("after attn residual [0..4]: %f %f %f %f %f\n",x2[0],x2[1],x2[2],x2[3],x2[4]);
+>
+>  // LN2
+>  float ln2[C];
+>  m=0;v=0;
+>  for(int i=0;i<C;i++) m+=x2[i]; m/=C;
+>  for(int i=0;i<C;i++) v+=(x2[i]-m)*(x2[i]-m); v=1.f/sqrtf(v/C+1e-5f);
+>  for(int i=0;i<C;i++) ln2[i]=W[P[8]+i]*(x2[i]-m)*v+W[P[9]+i];
+>
+>  // MLP fc
+>  float fc[C4];
+>  for(int i=0;i<C4;i++){float s=0;for(int j=0;j<C;j++)s+=W[P[10]+i*C+j]*ln2[j];fc[i]=s+W[P[11]+i];}
+>  for(int i=0;i<C4;i++){float xi=fc[i];fc[i]=.5f*xi*(1+tanhf(.7978845608f*(xi+.044715f*xi*xi*xi)));}
+>  printf("fc gelu [0..4]: %f %f %f %f %f\n",fc[0],fc[1],fc[2],fc[3],fc[4]);
+>
+>  // MLP proj
+>  float mlp[C];
+>  for(int i=0;i<C;i++){float s=0;for(int j=0;j<C4;j++)s+=W[P[12]+i*C4+j]*fc[j];mlp[i]=s+W[P[13]+i];}
+>  for(int i=0;i<C;i++) x2[i]+=mlp[i];
+>  printf("after mlp residual [0..4]: %f %f %f %f %f\n",x2[0],x2[1],x2[2],x2[3],x2[4]);
+>
+>  printf("mean x2: %f\n", ({float s=0;for(int i=0;i<C;i++)s+=x2[i];s/C;}));
+> }
+> EOF
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app# gcc -O3 -o /tmp/debug /tmp/debug.c -lm 2>&1 && /tmp/debug
+x[0..4]: 0.144391 -0.016070 -0.129048 -0.044786 0.098071
+ln1 no+1 [0..4]: 0.037725 0.044364 -0.009928 -0.003629 -0.278725
+ln1 +1   [0..4]: 1.128249 0.057739 -0.754961 -0.183022 0.500859
+qkv W@x no+1 [0..4]: 1.288170 0.477330 -0.287505 -0.586279 -0.371754
+qkv x@W no+1 [0..4]: 0.566459 0.625014 0.797547 -1.039486 0.019626
+qkv W@x +1   [0..4]: 7.653437 -2.304950 1.458614 -4.627057 2.885038
+qkv x@W +1   [0..4]: 0.653857 -0.497390 -1.193893 3.014899 -1.814335
+after attn residual [0..4]: 3.309439 3.434905 -6.439219 8.439177 4.410937
+fc gelu [0..4]: -0.141270 -0.141895 0.123077 -0.150343 -0.073789
+after mlp residual [0..4]: 12.816449 8.350233 0.003649 13.053901 9.076132
+mean x2: 7.460228
+root@31ebfc7a-209d-4246-9aee-38ea851c63ff:/app#

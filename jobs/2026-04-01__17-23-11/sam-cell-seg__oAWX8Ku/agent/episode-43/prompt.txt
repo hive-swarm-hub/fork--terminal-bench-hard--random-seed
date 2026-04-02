@@ -1,0 +1,197 @@
+New Terminal Output:
+
+root@b58ee21e-c5a0-4ebb-ac1e-104c51bd8e75:/app# rm /app/output_test.csv
+root@b58ee21e-c5a0-4ebb-ac1e-104c51bd8e75:/app# cat /app/convert_masks.py
+import argparse
+import os
+import numpy as np
+import pandas as pd
+import cv2
+import torch
+from PIL import Image
+from mobile_sam import sam_model_registry, SamPredictor
+from tqdm import tqdm
+import warnings
+warnings.filterwarnings('ignore')
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Convert rectangular masks to polylines using MobileSAM')
+    parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+    parser.add_argument('output_path', type=str, help='Path to output CSV file')
+    parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+    parser.add_argument('csv_path', type=str, help='Path to input metadata CSV')
+    return parser.parse_args()
+
+
+def load_model(weights_path):
+    model_type = 'vit_t'
+    device = 'cpu'
+    sam = sam_model_registry[model_type](checkpoint=weights_path)
+    sam.to(device=device)
+    sam.eval()
+    predictor = SamPredictor(sam)
+    return predictor
+
+
+def mask_to_polyline(mask):
+    """Convert a binary mask to a polyline (contour coordinates)."""
+    mask_uint8 = (mask.astype(np.uint8)) * 255
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return None, None, None, None, None, None
+    # Pick the largest contour
+    largest = max(contours, key=cv2.contourArea)
+    if len(largest) < 3:
+        return None, None, None, None, None, None
+    # Flatten contour points
+    points = largest.squeeze()  # shape (N, 2)
+    if points.ndim == 1:
+        return None, None, None, None, None, None
+    xs = points[:, 0]
+    ys = points[:, 1]
+    # Close the polyline
+    if xs[0] != xs[-1] or ys[0] != ys[-1]:
+        xs = np.append(xs, xs[0])
+        ys = np.append(ys, ys[0])
+    xmin = int(xs.min())
+    xmax = int(xs.max())
+    ymin = int(ys.min())
+    ymax = int(ys.max())
+    coords_x = ','.join(str(int(x)) for x in xs)
+    coords_y = ','.join(str(int(y)) for y in ys)
+    return xmin, xmax, ymin, ymax, coords_x, coords_y
+
+
+def largest_connected_component(mask):
+    """Keep only the largest connected component in a binary mask."""
+    mask_uint8 = mask.astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+    if num_labels <= 1:
+        return mask
+    # Find largest component (excluding background label 0)
+    largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+    return (labels == largest_label).astype(np.uint8)
+
+
+def main():
+    args = parse_args()
+
+    # Load model
+    print('Loading MobileSAM model...')
+    predictor = load_model(args.weights_path)
+
+    # Load image
+    image = np.array(Image.open(args.rgb_path).convert('RGB'))
+    h, w = image.shape[:2]
+
+    # Set image for predictor
+    print('Setting image...')
+    predictor.set_image(image)
+
+    # Load CSV
+    df = pd.read_csv(args.csv_path)
+
+    n = len(df)
+    print(f'Processing {n} masks...')
+
+    # Store all masks and scores
+    all_masks = np.zeros((n, h, w), dtype=np.uint8)
+    all_scores = np.zeros((n, h, w), dtype=np.float32)
+
+    for idx in tqdm(range(n), desc='Running SAM'):
+        row = df.iloc[idx]
+        xmin = int(row['xmin'])
+        ymin = int(row['ymin'])
+        xmax = int(row['xmax'])
+        ymax = int(row['ymax'])
+
+        # Use bounding box as prompt
+        input_box = np.array([xmin, ymin, xmax, ymax])
+
+        masks, scores, logits = predictor.predict(
+            point_coords=None,
+            point_labels=None,
+            box=input_box[None, :],
+            multimask_output=True,
+        )
+
+        # Pick the mask with the highest score
+        best_idx = np.argmax(scores)
+        best_mask = masks[best_idx]
+        best_score = scores[best_idx]
+
+        all_masks[idx] = best_mask.astype(np.uint8)
+        all_scores[idx] = best_mask.astype(np.float32) * best_score
+
+    # Resolve overlaps: assign each pixel to the mask with highest score
+    print('Resolving overlaps...')
+    # For each pixel, find which mask has the highest score
+    # Stack scores and find argmax
+    score_stack = all_scores  # (n, h, w)
+    # Find pixels where any mask is active
+    any_mask = np.any(all_masks > 0, axis=0)  # (h, w)
+
+    # For overlapping pixels, assign to highest scoring mask
+    best_mask_per_pixel = np.argmax(score_stack, axis=0)  # (h, w)
+
+    # Create resolved masks
+    resolved_masks = np.zeros((n, h, w), dtype=np.uint8)
+    for idx in range(n):
+        # Pixel belongs to this mask if it was originally in this mask AND
+        # it is the highest scoring mask at that pixel
+        resolved_masks[idx] = ((all_masks[idx] > 0) & (best_mask_per_pixel == idx)).astype(np.uint8)
+        # Keep only largest connected component
+        resolved_masks[idx] = largest_connected_component(resolved_masks[idx])
+
+    # Update DataFrame
+    print('Extracting polylines...')
+    new_xmin = []
+    new_xmax = []
+    new_ymin = []
+    new_ymax = []
+    new_coords_x = []
+    new_coords_y = []
+
+    for idx in range(n):
+        mask = resolved_masks[idx]
+        result = mask_to_polyline(mask)
+        xmin_new, xmax_new, ymin_new, ymax_new, cx, cy = result
+
+        if xmin_new is None:
+            # Fallback: use original bounding box coords but run SAM again with point prompt
+            row = df.iloc[idx]
+            xmin_new = int(row['xmin'])
+            xmax_new = int(row['xmax'])
+            ymin_new = int(row['ymin'])
+            ymax_new = int(row['ymax'])
+            cx = row['coords_x']
+            cy = row['coords_y']
+
+        new_xmin.append(xmin_new)
+        new_xmax.append(xmax_new)
+        new_ymin.append(ymin_new)
+        new_ymax.append(ymax_new)
+        new_coords_x.append(cx)
+        new_coords_y.append(cy)
+
+    df['xmin'] = new_xmin
+    df['xmax'] = new_xmax
+    df['ymin'] = new_ymin
+    df['ymax'] = new_ymax
+    df['coords_x'] = new_coords_x
+    df['coords_y'] = new_coords_y
+
+    # Change type to polyline for all
+    df['type'] = 'polyline'
+
+    # Save
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True) if os.path.dirname(args.output_path) else None
+    df.to_csv(args.output_path, index=False)
+    print(f'Saved output to {args.output_path}')
+    print('Done!')
+
+
+if __name__ == '__main__':
+    main()
+root@b58ee21e-c5a0-4ebb-ac1e-104c51bd8e75:/app#

@@ -1,0 +1,137 @@
+New Terminal Output:
+
+root@3aaa1166-7be1-41e4-88d0-45dbc2097852:/app# cat > /app/fit_peaks.py << 'ENDOFSCRIPT'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> with open('graphene.dat', 'r') as fh:
+>     lines = fh.readlines()
+>
+> x_data = []
+> y_data = []
+> for line in lines:
+>     line = line.strip()
+>     if not line:
+>         continue
+>     parts = line.split()
+>     x_val = float(parts[0].replace(',', '.'))
+>     y_val = float(parts[1].replace(',', '.'))
+>     x_data.append(x_val)
+>     y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # ========================================
+> # Interpretation: x is absolute wavenumber (cm^-1)
+> # Laser at ~19237 cm^-1 (center of flat-top)
+> # Background is approximately linear
+> # ========================================
+>
+> # Fit background from regions away from peaks and laser
+> bg_mask = ((x_data > 12000) & (x_data < 15500)) | ((x_data > 16800) & (x_data < 17100))
+> bg_x = x_data[bg_mask]
+> bg_y = y_data[bg_mask]
+> bg_coeffs = np.polyfit(bg_x, bg_y, 1)
+> print(f"Background: y = {bg_coeffs[0]:.6f}*x + {bg_coeffs[1]:.2f}")
+>
+> # ===== 2D Peak =====
+> # Clear peak at x~16178-16246 in absolute wavenumber
+> # Use region 15800-16700
+> m2d = (x_data > 15800) & (x_data < 16700)
+> x2d = x_data[m2d]
+> y2d = y_data[m2d] - np.polyval(bg_coeffs, x_data[m2d])  # background subtracted
+>
+> print(f"\n2D peak region: {len(x2d)} points")
+> print(f"  Max bg-subtracted: x={x2d[np.argmax(y2d)]:.1f}, y={y2d.max():.1f}")
+>
+> # Fit Lorentzian to background-subtracted data
+> d2_popt, d2_pcov = curve_fit(lorentzian, x2d, y2d,
+>     p0=[16200, 100, 2000, 0],
+>     maxfev=100000)
+> print(f"  Fit (abs wn): x0={d2_popt[0]:.2f}, gamma={d2_popt[1]:.2f}, amp={d2_popt[2]:.2f}, offset={d2_popt[3]:.2f}")
+> print(f"  Residual std: {np.std(y2d - lorentzian(x2d, *d2_popt)):.2f}")
+>
+> # ===== G Peak =====
+> # The G peak is hidden in the laser wing
+> # Try fitting with Lorentzian + linear background in region 17000-17900
+> mg = (x_data > 17000) & (x_data < 17900)
+> xg = x_data[mg]
+>
+> # For the G peak, we need to subtract the laser wing
+> # The laser wing + background creates a steep rise
+> # Let's try: Lorentzian peak + quadratic background
+> def lorentzian_plus_bg(x, x0, gamma, amplitude, a, b, c):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + a*x**2 + b*x + c
+>
+> yg = y_data[mg]
+> print(f"\nG peak region: {len(xg)} points")
+>
+> try:
+>     # Try fitting with background
+>     g_popt, g_pcov = curve_fit(lorentzian_plus_bg, xg, yg,
+>         p0=[17570, 50, 1000, 0, 1.0, -10000],
+>         maxfev=100000)
+>     print(f"  Fit (abs wn): x0={g_popt[0]:.2f}, gamma={g_popt[1]:.2f}, amp={g_popt[2]:.2f}")
+>     print(f"  Background: {g_popt[3]:.6f}*x^2 + {g_popt[4]:.4f}*x + {g_popt[5]:.2f}")
+>     print(f"  Residual std: {np.std(yg - lorentzian_plus_bg(xg, *g_popt)):.2f}")
+>     g_x0 = g_popt[0]
+>     g_gamma = g_popt[1]
+>     g_amp = g_popt[2]
+>     g_offset = g_popt[3]*g_popt[0]**2 + g_popt[4]*g_popt[0] + g_popt[5]  # bg at peak center
+> except Exception as e:
+>     print(f"  G peak fit with background failed: {e}")
+>     # Fallback: just use background-subtracted
+>     yg_sub = yg - np.polyval(bg_coeffs, xg)
+>     g_popt2, g_pcov2 = curve_fit(lorentzian, xg, yg_sub,
+>         p0=[17570, 50, 3000, 0],
+>         maxfev=100000)
+>     print(f"  Fit bg-sub (abs wn): x0={g_popt2[0]:.2f}, gamma={g_popt2[1]:.2f}, amp={g_popt2[2]:.2f}, offset={g_popt2[3]:.2f}")
+>     g_x0 = g_popt2[0]
+>     g_gamma = g_popt2[1]
+>     g_amp = g_popt2[2]
+>     g_offset = g_popt2[3]
+>
+> # Convert to Raman shift for output
+> # Laser center: use the center of the saturated region
+> laser_center = 19237.0  # approximate
+> print(f"\nLaser center estimate: {laser_center:.1f} cm^-1")
+>
+> # Raman shifts
+> g_shift = laser_center - g_x0
+> d2_shift = laser_center - d2_popt[0]
+> print(f"G peak Raman shift: {g_shift:.1f} cm^-1")
+> print(f"2D peak Raman shift: {d2_shift:.1f} cm^-1")
+>
+> # Output in raw x units (absolute wavenumber)
+> results = {
+>     "G": {
+>         "x0": float(g_x0),
+>         "gamma": float(abs(g_gamma)),
+>         "amplitude": float(g_amp),
+>         "offset": float(g_offset)
+>     },
+>     "2D": {
+>         "x0": float(d2_popt[0]),
+>         "gamma": float(abs(d2_popt[1])),
+>         "amplitude": float(d2_popt[2]),
+>         "offset": float(d2_popt[3])
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as fh:
+>     json.dump(results, fh, indent=2)
+>
+> print("\nResults written to /app/results.json")
+> print(json.dumps(results, indent=2))
+> ENDOFSCRIPT
+root@3aaa1166-7be1-41e4-88d0-45dbc2097852:/app#

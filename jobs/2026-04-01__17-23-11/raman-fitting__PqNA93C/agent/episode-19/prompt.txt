@@ -1,0 +1,128 @@
+New Terminal Output:
+
+root@3aaa1166-7be1-41e4-88d0-45dbc2097852:/app# cat > /app/fit_peaks.py << 'ENDOFSCRIPT'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> with open('graphene.dat', 'r') as fh:
+>     lines = fh.readlines()
+>
+> x_data = []
+> y_data = []
+> for line in lines:
+>     line = line.strip()
+>     if not line:
+>         continue
+>     parts = line.split()
+>     x_val = float(parts[0].replace(',', '.'))
+>     y_val = float(parts[1].replace(',', '.'))
+>     x_data.append(x_val)
+>     y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> print(f"Data range: x=[{x_data[0]:.2f}, {x_data[-1]:.2f}], {len(x_data)} points")
+>
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Strategy: The data appears to be fluorescence background + Raman peaks
+> # First, let's estimate and subtract the background
+> # Use regions away from peaks to estimate background
+>
+> # For G peak: use region 1648-1750, fit Lorentzian
+> # The peak seems to be near the edge of the data
+> g_mask = (x_data >= 1648) & (x_data <= 1750)
+> g_x = x_data[g_mask]
+> g_y = y_data[g_mask]
+>
+> print(f"\nG peak region: {len(g_x)} points, x=[{g_x[0]:.1f}, {g_x[-1]:.1f}]")
+> print(f"  y range: [{g_y.min():.1f}, {g_y.max():.1f}]")
+>
+> # Try different initial guesses for G peak
+> best_g = None
+> best_g_residual = 1e18
+> for x0_try in [1575, 1580, 1585, 1590, 1595, 1600, 1610, 1620, 1630, 1640, 1650, 1660]:
+>     for gamma_try in [5, 8, 10, 15, 20, 30, 50]:
+>         for amp_try in [1000, 5000, 10000, 50000, 100000]:
+>             for off_try in [0, 500, 1000, 2000, 4000]:
+>                 try:
+>                     popt, pcov = curve_fit(lorentzian, g_x, g_y,
+>                         p0=[x0_try, gamma_try, amp_try, off_try],
+>                         maxfev=10000,
+>                         bounds=([1500, 1, 100, -5000], [1680, 100, 1e8, 10000]))
+>                     residual = np.sum((g_y - lorentzian(g_x, *popt))**2)
+>                     if residual < best_g_residual:
+>                         best_g_residual = residual
+>                         best_g = popt.copy()
+>                 except:
+>                     pass
+>
+> if best_g is not None:
+>     print(f"  Best G fit: x0={best_g[0]:.4f}, gamma={best_g[1]:.4f}, amp={best_g[2]:.4f}, offset={best_g[3]:.4f}")
+>     print(f"  Residual: {best_g_residual:.2f}, std: {np.sqrt(best_g_residual/len(g_x)):.2f}")
+> else:
+>     print("  G peak fit failed!")
+>
+> # For 2D peak: use region 2550-2850
+> d2_mask = (x_data >= 2550) & (x_data <= 2850)
+> d2_x = x_data[d2_mask]
+> d2_y = y_data[d2_mask]
+>
+> print(f"\n2D peak region: {len(d2_x)} points, x=[{d2_x[0]:.1f}, {d2_x[-1]:.1f}]")
+> print(f"  y range: [{d2_y.min():.1f}, {d2_y.max():.1f}]")
+> print(f"  y mean: {d2_y.mean():.1f}, y std: {d2_y.std():.1f}")
+>
+> best_d2 = None
+> best_d2_residual = 1e18
+> for x0_try in [2650, 2680, 2700, 2720, 2750]:
+>     for gamma_try in [10, 20, 30, 50, 80]:
+>         for amp_try in [100, 200, 500, 1000, 5000]:
+>             for off_try in [100, 200, 300, 400]:
+>                 try:
+>                     popt, pcov = curve_fit(lorentzian, d2_x, d2_y,
+>                         p0=[x0_try, gamma_try, amp_try, off_try],
+>                         maxfev=10000,
+>                         bounds=([2550, 1, 10, -1000], [2850, 200, 1e6, 2000]))
+>                     residual = np.sum((d2_y - lorentzian(d2_x, *popt))**2)
+>                     if residual < best_d2_residual:
+>                         best_d2_residual = residual
+>                         best_d2 = popt.copy()
+>                 except:
+>                     pass
+>
+> if best_d2 is not None:
+>     print(f"  Best 2D fit: x0={best_d2[0]:.4f}, gamma={best_d2[1]:.4f}, amp={best_d2[2]:.4f}, offset={best_d2[3]:.4f}")
+>     print(f"  Residual: {best_d2_residual:.2f}, std: {np.sqrt(best_d2_residual/len(d2_x)):.2f}")
+> else:
+>     print("  2D peak fit failed!")
+>
+> # Write results
+> if best_g is not None and best_d2 is not None:
+>     results = {
+>         "G": {
+>             "x0": float(best_g[0]),
+>             "gamma": float(best_g[1]),
+>             "amplitude": float(best_g[2]),
+>             "offset": float(best_g[3])
+>         },
+>         "2D": {
+>             "x0": float(best_d2[0]),
+>             "gamma": float(best_d2[1]),
+>             "amplitude": float(best_d2[2]),
+>             "offset": float(best_d2[3])
+>         }
+>     }
+>     with open('/app/results.json', 'w') as fh:
+>         json.dump(results, fh, indent=2)
+>     print("\nResults written to /app/results.json")
+>     print(json.dumps(results, indent=2))
+> ENDOFSCRIPT
+root@3aaa1166-7be1-41e4-88d0-45dbc2097852:/app#
