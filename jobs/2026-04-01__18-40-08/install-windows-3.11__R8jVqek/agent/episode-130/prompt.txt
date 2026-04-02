@@ -1,0 +1,89 @@
+New Terminal Output:
+
+root@ed6edfb8-3479-4d79-a7ba-28ba42c52cb2:/app# python3 << 'PYEOF'
+> import struct
+>
+> def read_fat16_file(img_path, filename_to_find, subdir_cluster=None):
+>     with open(img_path, 'rb') as f:
+>         part_offset = 63 * 512
+>         f.seek(part_offset)
+>         boot = f.read(512)
+>
+>         bps = struct.unpack('<H', boot[11:13])[0]
+>         spc = boot[13]
+>         reserved = struct.unpack('<H', boot[14:16])[0]
+>         num_fats = boot[16]
+>         root_entries = struct.unpack('<H', boot[17:19])[0]
+>         fat_size = struct.unpack('<H', boot[22:24])[0]
+>
+>         fat_offset = part_offset + reserved * bps
+>         root_dir_offset = part_offset + (reserved + num_fats * fat_size) * bps
+>         root_dir_size = root_entries * 32
+>         data_offset = root_dir_offset + root_dir_size
+>
+>         def cluster_to_offset(cluster):
+>             return data_offset + (cluster - 2) * spc * bps
+>
+>         def read_fat(cluster):
+>             f.seek(fat_offset + cluster * 2)
+>             return struct.unpack('<H', f.read(2))[0]
+>
+>         def read_cluster_chain(start_cluster, max_size=65536):
+>             data = b''
+>             cluster = start_cluster
+>             while cluster < 0xFFF8 and len(data) < max_size:
+>                 f.seek(cluster_to_offset(cluster))
+>                 data += f.read(spc * bps)
+>                 cluster = read_fat(cluster)
+>             return data[:max_size]
+>
+>         # Read directory entries
+>         if subdir_cluster is None:
+>             f.seek(root_dir_offset)
+>             dir_data = f.read(root_dir_size)
+>         else:
+>             dir_data = read_cluster_chain(subdir_cluster)
+>
+>         for i in range(0, len(dir_data), 32):
+>             entry = dir_data[i:i+32]
+>             if len(entry) < 32 or entry[0] == 0x00:
+>                 break
+>             if entry[0] == 0xE5 or entry[11] == 0x0F:
+>                 continue
+>
+>             name = entry[0:8].decode('ascii', errors='replace').strip()
+>             ext = entry[8:11].decode('ascii', errors='replace').strip()
+>             cluster = struct.unpack('<H', entry[26:28])[0]
+>             size = struct.unpack('<I', entry[28:32])[0]
+>             full_name = f'{name}.{ext}' if ext else name
+>
+>             if full_name.upper() == filename_to_find.upper():
+>                 if entry[11] & 0x10:  # Directory
+>                     return ('DIR', cluster)
+>                 content = read_cluster_chain(cluster, size)
+>                 return ('FILE', content[:size])
+>
+>         return None
+>
+> # Find WINDOWS directory
+> result = read_fat16_file('/app/isos/win311.img', 'WINDOWS.')
+> if result and result[0] == 'DIR':
+>     win_cluster = result[1]
+>     print(f'WINDOWS dir at cluster {win_cluster}')
+>
+>     # Find SYSTEM.INI
+>     result2 = read_fat16_file('/app/isos/win311.img', 'SYSTEM.INI', win_cluster)
+>     if result2 and result2[0] == 'FILE':
+>         content = result2[1].decode('ascii', errors='replace')
+>         # Print display-related sections
+>         for line in content.split('\n'):
+>             line = line.strip()
+>             if line:
+>                 print(line)
+>     else:
+>         print('SYSTEM.INI not found')
+> else:
+>     print('WINDOWS dir not found')
+> PYEOF
+WINDOWS dir not found
+root@ed6edfb8-3479-4d79-a7ba-28ba42c52cb2:/app#

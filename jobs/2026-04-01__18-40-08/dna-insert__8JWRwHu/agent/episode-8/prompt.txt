@@ -1,0 +1,186 @@
+New Terminal Output:
+
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# cat > design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def oligotm(seq):
+>     """Compute Tm using primer3's oligotm with specified parameters."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # Find the insertion point
+> prefix_end = 0
+> while prefix_end < len(inp) and prefix_end < len(out) and inp[prefix_end] == out[prefix_end]:
+>     prefix_end += 1
+>
+> suffix_start_inp = len(inp)
+> suffix_start_out = len(out)
+> while suffix_start_inp > prefix_end and suffix_start_out > prefix_end:
+>     if inp[suffix_start_inp-1] == out[suffix_start_out-1]:
+>         suffix_start_inp -= 1
+>         suffix_start_out -= 1
+>     else:
+>         break
+>
+> insertion = out[prefix_end:suffix_start_out]
+> deleted = inp[prefix_end:suffix_start_inp]
+>
+> print(f"Insertion point: {prefix_end}")
+> print(f"Deleted from input: '{deleted}' (length {len(deleted)})")
+> print(f"Inserted in output: '{insertion}' (length {len(insertion)})")
+>
+> # For Q5 SDM insertion:
+> # Forward primer: 5' tail (insertion) + annealing to template starting at position prefix_end
+> # Reverse primer: reverse complement of template ending at position prefix_end-1
+> # The reverse primer anneals going leftward from the insertion point
+>
+> # Compute Tm for various forward annealing lengths
+> print("\n--- Forward primer annealing candidates ---")
+> fwd_candidates = []
+> for length in range(15, min(37, 46)):  # oligotm max 36 bases
+>     anneal_seq = inp[prefix_end:prefix_end+length]
+>     if len(anneal_seq) < length:
+>         break
+>     tm = oligotm(anneal_seq)
+>     print(f"  Length {length}: {anneal_seq} -> Tm={tm:.2f}")
+>     if 58 <= tm <= 72:
+>         fwd_candidates.append((length, anneal_seq, tm))
+>
+> print("\n--- Reverse primer annealing candidates ---")
+> rev_candidates = []
+> for length in range(15, min(37, 46)):  # oligotm max 36 bases
+>     anneal_seq = inp[prefix_end-length:prefix_end]
+>     rc_anneal = reverse_complement(anneal_seq)
+>     tm = oligotm(rc_anneal)
+>     print(f"  Length {length}: {rc_anneal} (anneals to {anneal_seq}) -> Tm={tm:.2f}")
+>     if 58 <= tm <= 72:
+>         rev_candidates.append((length, rc_anneal, tm))
+>
+> print(f"\nForward candidates: {len(fwd_candidates)}")
+> print(f"Reverse candidates: {len(rev_candidates)}")
+>
+> # Find best pair with Tm within 5°C
+> best_pair = None
+> best_diff = float('inf')
+> for fl, fseq, ftm in fwd_candidates:
+>     for rl, rseq, rtm in rev_candidates:
+>         diff = abs(ftm - rtm)
+>         if diff <= 5.0:
+>             if diff < best_diff:
+>                 best_diff = diff
+>                 best_pair = (fl, fseq, ftm, rl, rseq, rtm)
+>
+> if best_pair:
+>     fl, fseq, ftm, rl, rseq, rtm = best_pair
+>     fwd_primer = insertion + fseq  # 5' tail + annealing
+>     rev_primer = rseq
+>
+>     print(f"\n=== Best Primer Pair ===")
+>     print(f"Forward primer: {fwd_primer}")
+>     print(f"  Tail (insertion): {insertion}")
+>     print(f"  Annealing part: {fseq} (length={fl}, Tm={ftm:.2f})")
+>     print(f"Reverse primer: {rev_primer}")
+>     print(f"  Annealing part: {rseq} (length={rl}, Tm={rtm:.2f})")
+>     print(f"  Tm difference: {abs(ftm-rtm):.2f}")
+>
+>     # Write to primers.fasta
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("\nPrimers written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+> PYEOF
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# python3 design_primers.py
+Insertion point: 215
+Deleted from input: '' (length 0)
+Inserted in output: 'tagattagaagaagaattaagaagaagattaacagaaag' (length 39)
+
+--- Forward primer annealing candidates ---
+  Length 15: caagggcgaggagct -> Tm=59.54
+  Length 16: caagggcgaggagctg -> Tm=61.24
+  Length 17: caagggcgaggagctgt -> Tm=63.28
+  Length 18: caagggcgaggagctgtt -> Tm=63.81
+  Length 19: caagggcgaggagctgttc -> Tm=64.67
+  Length 20: caagggcgaggagctgttca -> Tm=66.29
+  Length 21: caagggcgaggagctgttcac -> Tm=67.18
+  Length 22: caagggcgaggagctgttcacc -> Tm=69.15
+  Length 23: caagggcgaggagctgttcaccg -> Tm=71.14
+  Length 24: caagggcgaggagctgttcaccgg -> Tm=72.79
+  Length 25: caagggcgaggagctgttcaccggg -> Tm=74.34
+  Length 26: caagggcgaggagctgttcaccgggg -> Tm=75.77
+  Length 27: caagggcgaggagctgttcaccggggt -> Tm=76.70
+  Length 28: caagggcgaggagctgttcaccggggtg -> Tm=76.89
+  Length 29: caagggcgaggagctgttcaccggggtgg -> Tm=78.10
+  Length 30: caagggcgaggagctgttcaccggggtggt -> Tm=78.88
+  Length 31: caagggcgaggagctgttcaccggggtggtg -> Tm=78.97
+  Length 32: caagggcgaggagctgttcaccggggtggtgc -> Tm=80.30
+  Length 33: caagggcgaggagctgttcaccggggtggtgcc -> Tm=81.27
+  Length 34: caagggcgaggagctgttcaccggggtggtgccc -> Tm=82.20
+  Length 35: caagggcgaggagctgttcaccggggtggtgccca -> Tm=82.78
+  Length 36: caagggcgaggagctgttcaccggggtggtgcccat -> Tm=82.43
+
+--- Reverse primer annealing candidates ---
+  Length 15: ctcatatgtatatct (anneals to agatatacatatgag) -> Tm=37.97
+  Length 16: ctcatatgtatatctc (anneals to gagatatacatatgag) -> Tm=41.09
+  Length 17: ctcatatgtatatctcc (anneals to ggagatatacatatgag) -> Tm=45.08
+  Length 18: ctcatatgtatatctcct (anneals to aggagatatacatatgag) -> Tm=47.34
+  Length 19: ctcatatgtatatctcctt (anneals to aaggagatatacatatgag) -> Tm=48.71
+  Length 20: ctcatatgtatatctccttc (anneals to gaaggagatatacatatgag) -> Tm=50.53
+  Length 21: ctcatatgtatatctccttct (anneals to agaaggagatatacatatgag) -> Tm=52.30
+  Length 22: ctcatatgtatatctccttctt (anneals to aagaaggagatatacatatgag) -> Tm=53.25
+  Length 23: ctcatatgtatatctccttctta (anneals to taagaaggagatatacatatgag) -> Tm=53.33
+  Length 24: ctcatatgtatatctccttcttaa (anneals to ttaagaaggagatatacatatgag) -> Tm=54.16
+  Length 25: ctcatatgtatatctccttcttaaa (anneals to tttaagaaggagatatacatatgag) -> Tm=54.92
+  Length 26: ctcatatgtatatctccttcttaaag (anneals to ctttaagaaggagatatacatatgag) -> Tm=56.01
+  Length 27: ctcatatgtatatctccttcttaaagt (anneals to actttaagaaggagatatacatatgag) -> Tm=57.48
+  Length 28: ctcatatgtatatctccttcttaaagtt (anneals to aactttaagaaggagatatacatatgag) -> Tm=58.04
+  Length 29: ctcatatgtatatctccttcttaaagtta (anneals to taactttaagaaggagatatacatatgag) -> Tm=57.95
+  Length 30: ctcatatgtatatctccttcttaaagttaa (anneals to ttaactttaagaaggagatatacatatgag) -> Tm=58.45
+  Length 31: ctcatatgtatatctccttcttaaagttaaa (anneals to tttaactttaagaaggagatatacatatgag) -> Tm=58.93
+  Length 32: ctcatatgtatatctccttcttaaagttaaac (anneals to gtttaactttaagaaggagatatacatatgag) -> Tm=59.84
+  Length 33: ctcatatgtatatctccttcttaaagttaaaca (anneals to tgtttaactttaagaaggagatatacatatgag) -> Tm=60.95
+  Length 34: ctcatatgtatatctccttcttaaagttaaacaa (anneals to ttgtttaactttaagaaggagatatacatatgag) -> Tm=61.31
+  Length 35: ctcatatgtatatctccttcttaaagttaaacaaa (anneals to tttgtttaactttaagaaggagatatacatatgag) -> Tm=61.65
+  Length 36: ctcatatgtatatctccttcttaaagttaaacaaaa (anneals to ttttgtttaactttaagaaggagatatacatatgag) -> Tm=61.96
+
+Forward candidates: 9
+Reverse candidates: 8
+
+=== Best Primer Pair ===
+Forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+  Tail (insertion): tagattagaagaagaattaagaagaagattaacagaaag
+  Annealing part: caagggcgaggagctg (length=16, Tm=61.24)
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+  Annealing part: ctcatatgtatatctccttcttaaagttaaacaa (length=34, Tm=61.31)
+  Tm difference: 0.07
+
+Primers written to primers.fasta
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app#

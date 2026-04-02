@@ -1,0 +1,119 @@
+New Terminal Output:
+
+root@5b0797f4-1d5f-44d5-be7c-07b246682558:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> frames_gray = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     frames_gray.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
+> cap.release()
+>
+> bg = frames_gray[0]
+>
+> # New approach: For each frame, compute frame[i] - bg
+> # Then find the athlete by looking for the darkest/brightest region
+> # that is NOT present in the background
+>
+> # Actually, let me try to directly detect the athlete by looking at
+> # the actual pixel values. The athlete wears dark clothing.
+> # In the background, the track is light colored.
+> # So the athlete should appear as a dark blob on the light track.
+>
+> # Let me look at specific rows to find the ground level
+> # The track surface should be around y=350-400 based on the data
+>
+> # Let me check what the ground level is by looking at where
+> # the athlete's feet are when they're clearly running
+> # From visual inspection of frame 50 (running on right side)
+>
+> print("=== Direct frame analysis - looking for dark pixels on track ===")
+>
+> # For each frame, look at the diff from background
+> # Focus on a narrow horizontal band at ground level
+> # The ground level varies with x due to perspective
+>
+> # Let me try a simpler approach:
+> # 1. For each frame where athlete is visible, compute bg diff
+> # 2. Find all pixels where diff > threshold
+> # 3. Among those, find the LOWEST one (highest y) - this is the feet
+> # 4. But restrict to the athlete's x-neighborhood
+>
+> # To find athlete x: use the peak of the horizontal projection of diff
+>
+> print("Frame | ath_x | feet_y_raw | feet_y_filtered")
+> for i in range(48, 74):
+>     diff = np.abs(frames_gray[i] - bg)
+>
+>     # Find athlete x using horizontal projection
+>     # Only look at y > 100 to avoid sky
+>     diff_lower = diff.copy()
+>     diff_lower[:100, :] = 0
+>
+>     horiz = np.sum(diff_lower > 25, axis=0)
+>     # Smooth
+>     horiz_smooth = np.convolve(horiz, np.ones(21)/21, mode='same')
+>     ath_x = np.argmax(horiz_smooth)
+>
+>     # Now look at vertical column at athlete x (+/- 20 pixels)
+>     x_lo = max(0, ath_x - 25)
+>     x_hi = min(960, ath_x + 25)
+>
+>     col_diff = diff[:, x_lo:x_hi]
+>     col_mask = (col_diff > 30).astype(np.uint8)
+>
+>     # Find the bottom of the athlete in this column
+>     row_sums = np.sum(col_mask, axis=1)
+>     active_rows = np.where(row_sums > 2)[0]  # at least 2 pixels in the row
+>
+>     if len(active_rows) > 0:
+>         feet_y = np.max(active_rows)
+>         head_y = np.min(active_rows)
+>
+>         # Also try: percentile-based (more robust)
+>         all_ys = []
+>         for r in active_rows:
+>             count = row_sums[r]
+>             all_ys.extend([r] * count)
+>         all_ys = np.array(all_ys)
+>         feet_y_p95 = np.percentile(all_ys, 95)
+>         feet_y_p90 = np.percentile(all_ys, 90)
+>
+>         print(f"  {i:3d}  | {ath_x:4d}  | {feet_y:4d}       | p95={feet_y_p95:5.1f} p90={feet_y_p90:5.1f} head={head_y:3d}")
+>     else:
+>         print(f"  {i:3d}  | {ath_x:4d}  | NO ACTIVITY")
+>
+> PYEOF
+=== Direct frame analysis - looking for dark pixels on track ===
+Frame | ath_x | feet_y_raw | feet_y_filtered
+   48  |  110  |  396       | p95=291.0 p90=233.0 head= 50
+   49  |  949  |  291       | p95=266.0 p90=248.0 head=  8
+   50  |  893  |  359       | p95=284.0 p90=274.0 head= 48
+   51  |  847  |  363       | p95=353.0 p90=328.5 head= 53
+   52  |  823  |  365       | p95=326.0 p90=303.0 head= 57
+   53  |  789  |  300       | p95=275.0 p90=258.0 head= 54
+   54  |  747  |  267       | p95=251.0 p90=230.0 head=  7
+   55  |  724  |  263       | p95=253.0 p90=246.0 head=  7
+   56  |  638  |  234       | p95=203.1 p90=187.0 head=  7
+   57  |  611  |  235       | p95=215.6 p90=201.0 head=  2
+   58  |  110  |  399       | p95=315.0 p90=273.0 head= 49
+   59  |  509  |  354       | p95=219.0 p90=199.0 head= 24
+   60  |  493  |  354       | p95=219.0 p90=198.0 head=  9
+   61  |  385  |  361       | p95=326.1 p90=308.0 head= 45
+   62  |  370  |  375       | p95=352.0 p90=328.0 head= 46
+   63  |  350  |  375       | p95=350.0 p90=320.0 head= 11
+   64  |  317  |  403       | p95=298.0 p90=267.0 head= 12
+   65  |  337  |  403       | p95=341.0 p90=326.0 head=  7
+   66  |  185  |  400       | p95=249.0 p90=232.0 head=  0
+   67  |  161  |  400       | p95=285.0 p90=264.0 head= 32
+   68  |  114  |  489       | p95=350.0 p90=311.0 head= 46
+   69  |   89  |  487       | p95=349.0 p90=303.0 head= 38
+   70  |   59  |  487       | p95=311.0 p90=288.0 head= 29
+   71  |   10  |  395       | p95=291.0 p90=279.0 head=  0
+   72  |   74  |  393       | p95=333.0 p90=322.0 head= 38
+   73  |   44  |  395       | p95=308.0 p90=300.0 head=  6
+root@5b0797f4-1d5f-44d5-be7c-07b246682558:/app#

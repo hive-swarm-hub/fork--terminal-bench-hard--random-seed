@@ -1,0 +1,242 @@
+New Terminal Output:
+
+root@b2dea9d3-1c74-4894-a02b-bc02d0c9d9d1:/app# cat > /app/filter.py << 'PYTHON_EOF'
+> import sys
+> import re
+> from html.parser import HTMLParser
+>
+>
+> class JSRemover(HTMLParser):
+>     """Parse HTML and track regions to remove (script tags, event handlers, javascript: urls)."""
+>
+>     def __init__(self):
+>         super().__init__(convert_charrefs=False)
+>         self.removals = []  # list of (start, end) byte offsets to remove
+>         self.script_start = None  # track start of <script> tag
+>         self.raw = ""
+>
+>     def get_offset(self, line, col):
+>         """Convert (line, col) to offset in self.raw."""
+>         lines = self.raw.split('\n')
+>         offset = 0
+>         for i in range(line - 1):
+>             offset += len(lines[i]) + 1  # +1 for newline
+>         offset += col
+>         return offset
+>
+>     def handle_starttag(self, tag, attrs):
+>         if tag.lower() == 'script':
+>             line, col = self.getpos()
+>             self.script_start = self.get_offset(line, col)
+>
+>     def handle_endtag(self, tag):
+>         if tag.lower() == 'script' and self.script_start is not None:
+>             line, col = self.getpos()
+>             end_offset = self.get_offset(line, col)
+>             # Find the end of </script>
+>             end_pos = self.raw.find('>', end_offset)
+>             if end_pos != -1:
+>                 self.removals.append((self.script_start, end_pos + 1))
+>             self.script_start = None
+>
+>     def handle_startendtag(self, tag, attrs):
+>         if tag.lower() == 'script':
+>             line, col = self.getpos()
+>             start = self.get_offset(line, col)
+>             end = self.raw.find('>', start)
+>             if end != -1:
+>                 self.removals.append((start, end + 1))
+>
+>
+> def remove_js(html_content):
+>     """Remove all JavaScript from HTML content."""
+>     result = html_content
+>
+>     # 1. Remove <script>...</script> tags and their contents (case-insensitive)
+>     # Use regex to handle script tags precisely to preserve formatting
+>     result = re.sub(
+>         r'<script\b[^>]*>.*?</script\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Also remove self-closing script tags
+>     result = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE | re.DOTALL
+>     )
+>     # Remove unclosed script tags (no closing tag)
+>     result = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Remove event handler attributes (on*="...")
+>     # Match on* attributes with double quotes, single quotes, or unquoted values
+>     # We need to be careful to only match within tags
+>     def remove_event_handlers(match):
+>         tag_content = match.group(0)
+>         # Remove on* event handler attributes
+>         # Handle double-quoted values
+>         tag_content = re.sub(
+>             r'\s+on\w+\s*=\s*"[^"]*"',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle single-quoted values
+>         tag_content = re.sub(
+>             r'\s+on\w+\s*=\s*\'[^\']*\'',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle unquoted values
+>         tag_content = re.sub(
+>             r'\s+on\w+\s*=\s*[^\s>]+',
+>             '',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle on* attributes without values (rare but possible)
+>         # Don't remove these as they're likely not event handlers without =
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_event_handlers,
+>         result
+>     )
+>
+>     # 3. Remove javascript: URLs in href, src, action, formaction, data, etc.
+>     def remove_js_urls(match):
+>         tag_content = match.group(0)
+>         # Replace javascript: URLs in common attributes
+>         # Handle double-quoted
+>         tag_content = re.sub(
+>             r'(\s+(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href)\s*=\s*)"\s*javascript:[^"]*"',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle single-quoted
+>         tag_content = re.sub(
+>             r"(\s+(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href)\s*=\s*)'\s*javascript:[^']*'",
+>             r"\1''",
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         # Handle unquoted
+>         tag_content = re.sub(
+>             r'(\s+(?:href|src|action|formaction|data|poster|background|dynsrc|lowsrc|xlink:href)\s*=\s*)javascript:[^\s>]*',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_js_urls,
+>         result
+>     )
+>
+>     # 4. Remove <noscript> content? No - noscript is legitimate HTML shown when JS is disabled.
+>     # Keep noscript tags.
+>
+>     # 5. Handle SVG/XML event handlers and javascript: in xlink:href (already covered above)
+>
+>     # 6. Remove data: URIs that contain script (e.g., data:text/html with script)
+>     # This is a common XSS vector
+>     def remove_data_script_urls(match):
+>         tag_content = match.group(0)
+>         # Remove data: URIs containing javascript or script in src/href
+>         tag_content = re.sub(
+>             r'(\s+(?:href|src|action)\s*=\s*)"data:[^"]*(?:script|javascript)[^"]*"',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         tag_content = re.sub(
+>             r"(\s+(?:href|src|action)\s*=\s*)'data:[^']*(?:script|javascript)[^']*'",
+>             r"\1''",
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_data_script_urls,
+>         result
+>     )
+>
+>     # 7. Remove <embed>, <object>, <applet> tags that could execute scripts?
+>     # These are legitimate HTML elements, so only remove if they reference JS.
+>     # Keep them for now.
+>
+>     # 8. Handle meta refresh with javascript
+>     def remove_meta_js(match):
+>         tag_content = match.group(0)
+>         if re.search(r'http-equiv\s*=\s*["\']?refresh', tag_content, re.IGNORECASE):
+>             if re.search(r'javascript:', tag_content, re.IGNORECASE):
+>                 return ''
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<meta\b[^>]*>',
+>         remove_meta_js,
+>         result,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 9. Handle vbscript: protocol (similar to javascript:)
+>     def remove_vbscript_urls(match):
+>         tag_content = match.group(0)
+>         tag_content = re.sub(
+>             r'(\s+(?:href|src|action|formaction)\s*=\s*)"\s*vbscript:[^"]*"',
+>             r'\1""',
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         tag_content = re.sub(
+>             r"(\s+(?:href|src|action|formaction)\s*=\s*)'\s*vbscript:[^']*'",
+>             r"\1''",
+>             tag_content,
+>             flags=re.IGNORECASE
+>         )
+>         return tag_content
+>
+>     result = re.sub(
+>         r'<[a-zA-Z][^>]*>',
+>         remove_vbscript_urls,
+>         result
+>     )
+>
+>     return result
+>
+>
+> def main():
+>     if len(sys.argv) != 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_js(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@b2dea9d3-1c74-4894-a02b-bc02d0c9d9d1:/app#

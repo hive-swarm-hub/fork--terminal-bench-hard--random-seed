@@ -1,0 +1,59 @@
+New Terminal Output:
+
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# cat > /tmp/test_small.py << 'PYEOF'
+> import struct, mmap, math
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(off, n):
+>     return struct.unpack_from(f'{n}f', m, off*4)
+>
+> # Just check: compute logits for token 464 using only embeddings + final layernorm
+> # (skip all transformer layers) to see if wte*x gives reasonable distribution
+> token = 464
+> pos = 0
+>
+> # Get embedding
+> x = [0.0]*768
+> for i in range(768):
+>     x[i] = rf(token*768+i, 1)[0] + rf(V*768+pos*768+i, 1)[0]
+>
+> print(f'Embedding first 5: {x[:5]}')
+>
+> # Apply final layernorm
+> off_lnfw = V*E + C*E + L*E + L*E + L*E*3*E + L*3*E + L*E*E + L*E + L*E + L*E + L*E*4*E + L*4*E + L*4*E*E + L*E
+> off_lnfb = off_lnfw + E
+>
+> lnfw = rf(off_lnfw, E)
+> lnfb = rf(off_lnfb, E)
+>
+> mean = sum(x) / E
+> var = sum((xi - mean)**2 for xi in x) / E
+> inv = 1.0 / math.sqrt(var + 1e-5)
+> x_ln = [lnfw[i] * (x[i] - mean) * inv + lnfb[i] for i in range(E)]
+>
+> print(f'After LN first 5: {x_ln[:5]}')
+>
+> # Compute logits = x_ln @ wte.T (just top 10)
+> # logits[j] = sum(x_ln[i] * wte[j*E+i] for i in range(E))
+> best_logit = -1e30
+> best_token = -1
+> for j in range(V):
+>     s = 0.0
+>     wte_j = rf(j*E, E)
+>     for i in range(E):
+>         s += x_ln[i] * wte_j[i]
+>     if s > best_logit:
+>         best_logit = s
+>         best_token = j
+>         print(f'New best: token {j}, logit {s:.4f}')
+>
+> print(f'Best token: {best_token}, logit: {best_logit:.4f}')
+> f.close()
+> PYEOF
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# echo 'script written'
+script written
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app#

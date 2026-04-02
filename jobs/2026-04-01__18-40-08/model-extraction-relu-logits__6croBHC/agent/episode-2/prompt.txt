@@ -1,0 +1,199 @@
+New Terminal Output:
+
+root@97c0ee69-7aac-43e9-b010-0574e5f1ef04:/app# cat > /app/steal.py << 'PYEOF'
+> import numpy as np
+> import sys
+> sys.path.insert(0, '/app')
+> from forward import forward
+>
+> # Strategy: Recover A1 by analyzing the piecewise linear structure of the ReLU network.
+> #
+> # The network computes f(x) = A2 * ReLU(A1*x + b1) + b2
+> # The gradient of f w.r.t. x is: grad f(x) = A2 * diag(sign(A1*x + b1 > 0)) * A1
+> # where the sign pattern depends on which neurons are active.
+> #
+> # When we move from one linear region to another, exactly one neuron changes state,
+> # and the gradient changes by a rank-1 update: delta_grad = a2_j * a1_j^T
+> # where a1_j is row j of A1 and a2_j is the corresponding column of A2.
+> #
+> # So the difference in gradients gives us a1_j (up to scaling by a2_j).
+>
+> def compute_gradient(x, eps=1e-6):
+>     """Compute gradient of f at x using finite differences."""
+>     grad = np.zeros(10)
+>     f0 = forward(x)
+>     for i in range(10):
+>         x_plus = x.copy()
+>         x_plus[i] += eps
+>         grad[i] = (forward(x_plus) - f0) / eps
+>     return grad
+>
+> def find_boundary_along_line(x, direction, t_min, t_max, grad_at_min, eps=1e-7, depth=50):
+>     """Binary search for a boundary crossing along x + t*direction between t_min and t_max."""
+>     for _ in range(depth):
+>         t_mid = (t_min + t_max) / 2
+>         grad_mid = compute_gradient(x + t_mid * direction)
+>         # Check if grad_mid is same as grad_at_min
+>         diff = np.linalg.norm(grad_mid - grad_at_min)
+>         if diff > 1e-8:
+>             t_max = t_mid
+>         else:
+>             t_min = t_mid
+>     return t_max, compute_gradient(x + t_max * direction)
+>
+> # Step 1: Collect gradient differences by sampling many random points
+> # and detecting when the gradient changes along random lines.
+>
+> np.random.seed(42)
+>
+> recovered_rows = []  # Will store rows of A1 (up to scaling)
+>
+> # Sample many random points and compute gradients
+> # When gradients differ, their difference is a rank-1 vector (row of A1 scaled by a2 element)
+>
+> print("Collecting gradient samples...")
+>
+> all_grads = []
+> for i in range(500):
+>     x = np.random.randn(10) * 2.0
+>     g = compute_gradient(x)
+>     all_grads.append(g)
+>
+> # Compute all pairwise gradient differences
+> print(f"Collected {len(all_grads)} gradients. Finding unique gradient differences...")
+>
+> # The gradient in each linear region is: sum over active neurons j of a2_j * a1_j
+> # When we cross a boundary, exactly one neuron flips, so the difference is +/- a2_j * a1_j
+> # This gives us rows of A1 up to scaling.
+>
+> # Collect unique gradient differences
+> diffs = []
+> for i in range(len(all_grads)):
+>     for j in range(i+1, len(all_grads)):
+>         d = all_grads[i] - all_grads[j]
+>         if np.linalg.norm(d) > 1e-8:
+>             diffs.append(d)
+>
+> print(f"Found {len(diffs)} non-zero gradient differences")
+>
+> # Now cluster these differences. Each difference should be a linear combination of rows of A1.
+> # But single-neuron flips give us individual rows (scaled).
+> # Multi-neuron flips give sums. We want the "atomic" differences.
+>
+> # Better approach: walk along random lines and find individual boundary crossings
+> print("\nWalking along random lines to find individual boundary crossings...")
+>
+> recovered_directions = []
+>
+> for trial in range(200):
+>     x0 = np.random.randn(10) * 2.0
+>     direction = np.random.randn(10)
+>     direction /= np.linalg.norm(direction)
+>
+>     # Sample gradients along the line at many points
+>     ts = np.linspace(-5, 5, 100)
+>     prev_grad = compute_gradient(x0 + ts[0] * direction)
+>
+>     for k in range(1, len(ts)):
+>         curr_grad = compute_gradient(x0 + ts[k] * direction)
+>         diff = curr_grad - prev_grad
+>         diff_norm = np.linalg.norm(diff)
+>
+>         if diff_norm > 1e-8:
+>             # Found a boundary crossing - refine it
+>             # The diff should be proportional to a row of A1
+>             # Normalize
+>             d = diff / diff_norm
+>
+>             # Check if this is a single neuron flip (should be rank-1 in the gradient diff)
+>             # For a single neuron flip, the diff is a2_j * a1_j, which is a single vector
+>             # So all diffs from single flips should be parallel or anti-parallel to some row of A1
+>
+>             # Check if already found
+>             is_new = True
+>             for existing in recovered_directions:
+>                 cos_sim = abs(np.dot(d, existing / np.linalg.norm(existing)))
+>                 if cos_sim > 0.999:
+>                     is_new = False
+>                     break
+>
+>             if is_new:
+>                 recovered_directions.append(diff.copy())
+>                 print(f"  Found direction #{len(recovered_directions)}: norm={diff_norm:.6f}")
+>
+>                 if len(recovered_directions) >= 20:
+>                     break
+>
+>         prev_grad = curr_grad
+>
+>     if len(recovered_directions) >= 20:
+>         break
+>
+> print(f"\nRecovered {len(recovered_directions)} directions")
+>
+> # Now, these directions are a2_j * a1_j for various j.
+> # We want a1_j up to scaling, so we just normalize each direction.
+> # The recovered matrix is A1 up to row permutation and scaling.
+>
+> # But wait - the gradient diff from a single neuron flip is exactly a2_j * (row j of A1)
+> # So the direction IS row j of A1 (up to scalar a2_j).
+> # We want A1 up to permuting neurons and scaling, so this is exactly what we need.
+>
+> # Build the matrix
+> if len(recovered_directions) < 20:
+>     print(f"WARNING: Only found {len(recovered_directions)} out of 20 expected directions")
+>     print("Trying more aggressive search...")
+>
+>     for trial in range(500):
+>         x0 = np.random.randn(10) * 5.0
+>         direction = np.random.randn(10)
+>         direction /= np.linalg.norm(direction)
+>
+>         ts = np.linspace(-10, 10, 200)
+>         prev_grad = compute_gradient(x0 + ts[0] * direction)
+>
+>         for k in range(1, len(ts)):
+>             curr_grad = compute_gradient(x0 + ts[k] * direction)
+>             diff = curr_grad - prev_grad
+>             diff_norm = np.linalg.norm(diff)
+>
+>             if diff_norm > 1e-8:
+>                 d = diff / diff_norm
+>                 is_new = True
+>                 for existing in recovered_directions:
+>                     cos_sim = abs(np.dot(d, existing / np.linalg.norm(existing)))
+>                     if cos_sim > 0.999:
+>                         is_new = False
+>                         break
+>
+>                 if is_new:
+>                     recovered_directions.append(diff.copy())
+>                     print(f"  Found direction #{len(recovered_directions)}: norm={diff_norm:.6f}")
+>
+>                     if len(recovered_directions) >= 20:
+>                         break
+>
+>             prev_grad = curr_grad
+>
+>         if len(recovered_directions) >= 20:
+>             break
+>
+> # Build recovered A1 matrix
+> # Each recovered direction is a2_j * a1_j^T, so to get a1_j we divide by a2_j
+> # But since we want A1 up to scaling per row, we can just use the directions as-is
+> # (each row is scaled by a2_j which is the "scaling" freedom)
+>
+> recovered_A1 = np.array(recovered_directions)  # Shape should be (num_found, 10)
+> print(f"\nRecovered A1 shape: {recovered_A1.shape}")
+>
+> # Save
+> np.save('/app/stolen_A1.npy', recovered_A1)
+> print("Saved to /app/stolen_A1.npy")
+>
+> # Verify: check that each row of recovered_A1 is parallel to some row of the true A1
+> # (We can't import A1 directly in the final version, but for debugging...)
+> print("\nVerification:")
+> print("Recovered A1:")
+> print(recovered_A1)
+> PYEOF
+root@97c0ee69-7aac-43e9-b010-0574e5f1ef04:/app#

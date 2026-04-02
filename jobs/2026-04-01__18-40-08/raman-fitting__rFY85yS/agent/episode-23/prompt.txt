@@ -1,0 +1,153 @@
+New Terminal Output:
+
+}root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app# cat > /app/final_fit.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+> import json
+>
+> # Parse data
+> x_raw = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line: continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_raw.append(x_val)
+>         y_data.append(y_val)
+>
+> x_raw = np.array(x_raw)
+> y_data = np.array(y_data)
+> sort_idx = np.argsort(x_raw)
+> x_raw = x_raw[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Find the two main Raman peaks (G and 2D) in raw data
+> peaks, props = find_peaks(y_data, prominence=5000, distance=50)
+> peak_positions = x_raw[peaks]
+> peak_heights = y_data[peaks]
+>
+> # Sort by position
+> peak_sort = np.argsort(peak_positions)
+> peak_positions = peak_positions[peak_sort]
+> peak_heights = peak_heights[peak_sort]
+>
+> # The two lowest-x prominent peaks should be G and 2D
+> # (excluding the laser line which is much higher)
+> # Filter out the laser line (highest intensity peak)
+> non_laser = peak_heights < peak_heights.max() * 0.5
+> raman_peaks_x = peak_positions[non_laser]
+> raman_peaks_y = peak_heights[non_laser]
+>
+> print(f"Raman peak candidates (raw x): {raman_peaks_x}")
+> print(f"Raman peak intensities: {raman_peaks_y}")
+>
+> # Take the two most prominent (highest) non-laser peaks
+> top2_idx = np.argsort(raman_peaks_y)[-2:]
+> top2_x = np.sort(raman_peaks_x[top2_idx])  # sort by position
+> print(f"Top 2 peaks at raw x: {top2_x}")
+>
+> # These correspond to G (~1580 cm-1) and 2D (~2700 cm-1)
+> # Calibrate: x = a * raman_shift + b
+> # Using known positions:
+> g_raw = top2_x[0]  # lower x = G peak
+> td_raw = top2_x[1]  # higher x = 2D peak
+>
+> # Standard Raman shift values for graphene
+> # We use these as reference points for calibration
+> a = (td_raw - g_raw) / (2700.0 - 1580.0)
+> b = g_raw - a * 1580.0
+>
+> print(f"Calibration: x_raw = {a:.6f} * raman_shift + {b:.6f}")
+>
+> # Convert entire x-axis to Raman shift
+> raman_shift = (x_raw - b) / a
+>
+> # Lorentzian function
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Fit G peak in cm-1 space
+> g_mask = (raman_shift > 1480) & (raman_shift < 1680)
+> rs_g = raman_shift[g_mask]
+> y_g = y_data[g_mask]
+> g_idx = np.argmax(y_g)
+> g_offset_est = np.median(np.concatenate([y_g[:5], y_g[-5:]]))
+>
+> popt_g, _ = curve_fit(lorentzian, rs_g, y_g,
+>                       p0=[rs_g[g_idx], 11, y_g.max()-g_offset_est, g_offset_est],
+>                       maxfev=50000)
+> print(f"\nG peak: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amp={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+>
+> # Fit 2D peak in cm-1 space
+> td_mask = (raman_shift > 2550) & (raman_shift < 2850)
+> rs_td = raman_shift[td_mask]
+> y_td = y_data[td_mask]
+> td_idx = np.argmax(y_td)
+> td_offset_est = np.median(np.concatenate([y_td[:5], y_td[-5:]]))
+>
+> popt_td, _ = curve_fit(lorentzian, rs_td, y_td,
+>                        p0=[rs_td[td_idx], 15, y_td.max()-td_offset_est, td_offset_est],
+>                        maxfev=50000)
+> print(f"2D peak: x0={popt_td[0]:.4f}, gamma={popt_td[1]:.4f}, amp={popt_td[2]:.4f}, offset={popt_td[3]:.4f}")
+>
+> # R-squared
+> for name, rs, y, popt in [("G", rs_g, y_g, popt_g), ("2D", rs_td, y_td, popt_td)]:
+>     y_fit = lorentzian(rs, *popt)
+>     ss_res = np.sum((y - y_fit)**2)
+>     ss_tot = np.sum((y - np.mean(y))**2)
+>     r2 = 1 - ss_res / ss_tot
+>     print(f"{name} R-squared = {r2:.6f}")
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(popt_g[0]), 6),
+>         "gamma": round(float(abs(popt_g[1])), 6),
+>         "amplitude": round(float(popt_g[2]), 6),
+>         "offset": round(float(popt_g[3]), 6)
+>     },
+>     "2D": {
+>         "x0": round(float(popt_td[0]), 6),
+>         "gamma": round(float(abs(popt_td[1])), 6),
+>         "amplitude": round(float(popt_td[2]), 6),
+>         "offset": round(float(popt_td[3]), 6)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print(f"\nResults written to /app/results.json")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app# python3 /app/final_fit.py
+Raman peak candidates (raw x): [ 3745.052664  6329.372427 10289.940052]
+Raman peak intensities: [12920.880624 13777.736503 18805.235384]
+Top 2 peaks at raw x: [ 6329.372427 10289.940052]
+Calibration: x_raw = 3.536221 * raman_shift + 742.143099
+
+G peak: x0=1579.6167, gamma=9.7876, amp=8345.1533, offset=5685.9148
+2D peak: x0=2736.6890, gamma=161.7848, amp=17248.9189, offset=2138.9500
+G R-squared = 0.967753
+2D R-squared = 0.952787
+
+Results written to /app/results.json
+{
+  "G": {
+    "x0": 1579.616692,
+    "gamma": 9.787599,
+    "amplitude": 8345.153332,
+    "offset": 5685.914813
+  },
+  "2D": {
+    "x0": 2736.688958,
+    "gamma": 161.784778,
+    "amplitude": 17248.918933,
+    "offset": 2138.949985
+  }
+}
+root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app#

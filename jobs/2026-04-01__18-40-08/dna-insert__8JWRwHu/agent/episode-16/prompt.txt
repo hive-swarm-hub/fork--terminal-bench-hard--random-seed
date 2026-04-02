@@ -1,0 +1,217 @@
+New Terminal Output:
+
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# python3 << 'PYEOF'
+> import subprocess
+>
+b> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq.lower()))
+>
+> def oligotm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # The insertion is 39 bases at position 215
+> # Input:  ...pos213='a', pos214='g', pos215='c', pos216='a'...
+> # Output: ...pos213='a', pos214='g', [39 new bases], pos254='c', pos255='a'...
+> # The 39 new bases: tagattagaagaagaattaagaagaagattaacagaaag
+>
+> # The issue: the insertion ends with 'ag' which matches template at 213-214
+> # We can equivalently describe this as:
+> # Insertion point at 213: insert 'tagattagaagaagaattaagaagaagattaacagaa' (37 bases)
+> # Then template continues: 'agcaagggcgagg...'
+> # This way the tail 'tagattagaagaagaattaagaagaagattaacagaa' does NOT end with
+> # bases matching the downstream template 'agcaagggcgagg...'
+>
+> # But wait, does the tail start with bases matching the upstream template?
+> # Template before pos 213: ...gaaggagatatacatatg (ending at pos 212)
+> # Tail starts with 't' - template at 212 is 'g'. No overlap.
+>
+> # So let's use insertion point at 213:
+> # Forward primer = tail + annealing starting at pos 213
+> # Reverse primer = RC of template ending at pos 212
+>
+> insert_point = 213
+> tail = 'tagattagaagaagaattaagaagaagattaacagaa'  # 37 bases
+>
+> # Verify this produces the correct output
+> result = inp[:insert_point] + tail + inp[insert_point:]
+> print(f"Does shifted insertion match output? {result == out}")
+> print(f"Result length: {len(result)}, Output length: {len(out)}")
+> print()
+>
+> # Now design primers with this insertion point
+> print("=== Forward primer candidates (annealing at pos 213+) ===")
+> fwd_candidates = []
+> for length in range(15, 37):  # max 36 for oligotm
+>     anneal = inp[insert_point:insert_point+length]
+>     tm = oligotm(anneal)
+>     # Check: does the tail end match the beginning of anneal?
+>     # tail = 'tagattagaagaagaattaagaagaagattaacagaa'
+>     # anneal starts with 'ag...' at pos 213
+>     # tail ends with 'aa', anneal starts with 'ag' - no match! Good.
+>     print(f"  len={length}: {anneal} Tm={tm:.2f}")
+>     if 58 <= tm <= 72:
+>         fwd_candidates.append((length, anneal, tm))
+>
+> print()
+> print("=== Reverse primer candidates (annealing ending at pos 212) ===")
+> rev_candidates = []
+> for length in range(15, 37):
+>     anneal_region = inp[insert_point-length:insert_point]
+>     rc = reverse_complement(anneal_region)
+>     tm = oligotm(rc)
+>     print(f"  len={length}: {rc} Tm={tm:.2f}")
+>     if 58 <= tm <= 72:
+>         rev_candidates.append((length, rc, tm))
+>
+> print(f"\nFwd candidates: {len(fwd_candidates)}, Rev candidates: {len(rev_candidates)}")
+>
+> # Now check: for forward primer, does the tail end overlap with the annealing start?
+> # tail = 'tagattagaagaagaattaagaagaagattaacagaa'
+> # First anneal candidate starts at pos 213: 'agcaagggcgaggag' (15 nt)
+> # tail[-2:] = 'aa', anneal[:2] = 'ag' -> NO match.
+> # So the annealing part is exactly the designed part.
+>
+> # But let me be thorough: check the maximum 3' contiguous match for each fwd candidate
+> print("\n=== Verifying no tail-template overlap ===")
+> for length, anneal, tm in fwd_candidates[:3]:
+>     full_fwd = tail + anneal
+>     # Find longest suffix of full_fwd that matches template
+>     for k in range(len(full_fwd), 0, -1):
+>         suffix = full_fwd[-k:]
+>         if suffix in inp:
+>             print(f"  Anneal len={length}: longest 3' match to template = {k} nt")
+>             if k != length:
+>                 print(f"    WARNING: mismatch! designed={length}, actual={k}")
+>             break
+>
+> print()
+> # Find best pair
+> best_pair = None
+> best_diff = float('inf')
+> for fl, fseq, ftm in fwd_candidates:
+>     for rl, rseq, rtm in rev_candidates:
+>         diff = abs(ftm - rtm)
+>         if diff <= 5.0 and diff < best_diff:
+>             best_diff = diff
+>             best_pair = (fl, fseq, ftm, rl, rseq, rtm)
+>
+> if best_pair:
+>     fl, fseq, ftm, rl, rseq, rtm = best_pair
+>     fwd_primer = tail + fseq
+>     rev_primer = rseq
+>     print(f"=== Best Primer Pair ===")
+>     print(f"Forward: {fwd_primer} (total={len(fwd_primer)})")
+>     print(f"  Tail: {tail} ({len(tail)} nt)")
+>     print(f"  Anneal: {fseq} ({fl} nt, Tm={ftm:.2f})")
+>     print(f"Reverse: {rev_primer} ({rl} nt, Tm={rtm:.2f})")
+>     print(f"Tm diff: {abs(ftm-rtm):.2f}")
+>
+>     # Final verification
+>     # Check the 3' match is exactly the annealing part
+>     for k in range(len(fwd_primer), 0, -1):
+>         suffix = fwd_primer[-k:]
+>         if suffix in inp:
+>             print(f"\nForward primer: longest 3' template match = {k} nt (designed annealing = {fl} nt)")
+>             if k == fl:
+>                 print("CLEAN: no tail-template overlap!")
+>             else:
+>                 print(f"WARNING: actual annealing is {k} nt, not {fl} nt!")
+>             break
+>
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("\nWritten to primers.fasta")
+> PYEOF
+Does shifted insertion match output? False
+Result length: 3628, Output length: 3630
+
+=== Forward primer candidates (annealing at pos 213+) ===
+  len=15: agcaagggcgaggag Tm=59.54
+  len=16: agcaagggcgaggagc Tm=63.48
+  len=17: agcaagggcgaggagct Tm=65.14
+  len=18: agcaagggcgaggagctg Tm=66.27
+  len=19: agcaagggcgaggagctgt Tm=67.95
+  len=20: agcaagggcgaggagctgtt Tm=68.19
+  len=21: agcaagggcgaggagctgttc Tm=68.71
+  len=22: agcaagggcgaggagctgttca Tm=70.07
+  len=23: agcaagggcgaggagctgttcac Tm=70.69
+  len=24: agcaagggcgaggagctgttcacc Tm=72.39
+  len=25: agcaagggcgaggagctgttcaccg Tm=74.08
+  len=26: agcaagggcgaggagctgttcaccgg Tm=75.53
+  len=27: agcaagggcgaggagctgttcaccggg Tm=76.88
+  len=28: agcaagggcgaggagctgttcaccgggg Tm=78.15
+  len=29: agcaagggcgaggagctgttcaccggggt Tm=78.96
+  len=30: agcaagggcgaggagctgttcaccggggtg Tm=79.04
+  len=31: agcaagggcgaggagctgttcaccggggtgg Tm=80.13
+  len=32: agcaagggcgaggagctgttcaccggggtggt Tm=80.82
+  len=33: agcaagggcgaggagctgttcaccggggtggtg Tm=80.82
+  len=34: agcaagggcgaggagctgttcaccggggtggtgc Tm=82.02
+  len=35: agcaagggcgaggagctgttcaccggggtggtgcc Tm=82.91
+  len=36: agcaagggcgaggagctgttcaccggggtggtgccc Tm=83.75
+
+=== Reverse primer candidates (annealing ending at pos 212) ===
+  len=15: catatgtatatctcc Tm=39.70
+  len=16: catatgtatatctcct Tm=42.46
+  len=17: catatgtatatctcctt Tm=44.28
+  len=18: catatgtatatctccttc Tm=46.62
+  len=19: catatgtatatctccttct Tm=48.71
+  len=20: catatgtatatctccttctt Tm=49.94
+  len=21: catatgtatatctccttctta Tm=50.18
+  len=22: catatgtatatctccttcttaa Tm=51.23
+  len=23: catatgtatatctccttcttaaa Tm=52.19
+  len=24: catatgtatatctccttcttaaag Tm=53.51
+  len=25: catatgtatatctccttcttaaagt Tm=55.16
+  len=26: catatgtatatctccttcttaaagtt Tm=55.86
+  len=27: catatgtatatctccttcttaaagtta Tm=55.83
+  len=28: catatgtatatctccttcttaaagttaa Tm=56.45
+  len=29: catatgtatatctccttcttaaagttaaa Tm=57.03
+  len=30: catatgtatatctccttcttaaagttaaac Tm=58.08
+  len=31: catatgtatatctccttcttaaagttaaaca Tm=59.31
+  len=32: catatgtatatctccttcttaaagttaaacaa Tm=59.74
+  len=33: catatgtatatctccttcttaaagttaaacaaa Tm=60.15
+  len=34: catatgtatatctccttcttaaagttaaacaaaa Tm=60.53
+  len=35: catatgtatatctccttcttaaagttaaacaaaat Tm=60.76
+  len=36: catatgtatatctccttcttaaagttaaacaaaatt Tm=61.10
+
+Fwd candidates: 9, Rev candidates: 7
+
+=== Verifying no tail-template overlap ===
+  Anneal len=15: longest 3' match to template = 15 nt
+  Anneal len=16: longest 3' match to template = 16 nt
+  Anneal len=17: longest 3' match to template = 17 nt
+
+=== Best Primer Pair ===
+Forward: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag (total=52)
+  Tail: tagattagaagaagaattaagaagaagattaacagaa (37 nt)
+  Anneal: agcaagggcgaggag (15 nt, Tm=59.54)
+Reverse: catatgtatatctccttcttaaagttaaacaa (32 nt, Tm=59.74)
+Tm diff: 0.21
+
+Forward primer: longest 3' template match = 15 nt (designed annealing = 15 nt)
+CLEAN: no tail-template overlap!
+
+Written to primers.fasta
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app#

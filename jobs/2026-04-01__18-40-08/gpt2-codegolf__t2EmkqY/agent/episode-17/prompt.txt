@@ -1,0 +1,152 @@
+New Terminal Output:
+
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<sys/stat.h>
+> #include<fcntl.h>
+> #define V 50257
+> #define MX 1024
+> #define E 768
+> #define L 12
+> #define NH 12
+> #define HS 64
+> #define E4 3072
+> float*W,x[E],xb[E],xb2[E],hb[E*3],hb2[E],qv[HS],at[MX],lg[V];
+> float kc[L*MX*E],vc[L*MX*E];
+> char vocab[V][256];
+> int ma[50000],mb[50000],nm;
+> int b2u[256]; // byte to unicode base token
+> int u2b[256]; // unicode base token to byte
+> void init_byte_map(){
+>     int n=0;
+>     for(int i=33;i<=126;i++){b2u[i]=n;u2b[n]=i;n++;}
+>     for(int i=161;i<=172;i++){b2u[i]=n;u2b[n]=i;n++;}
+>     for(int i=174;i<=255;i++){b2u[i]=n;u2b[n]=i;n++;}
+>     for(int i=0;i<256;i++)if(b2u[i]==0&&i!=33){b2u[i]=n;u2b[n]=i;n++;}
+>     b2u[33]=0;// '!' is 0
+> }
+> void load_bpe(char*path){
+>     FILE*f=fopen(path,"r");
+>     char line[512];fgets(line,512,f);// skip header
+>     // Build base vocab
+>     for(int i=0;i<256;i++){vocab[i][0]=i;vocab[i][1]=0;}
+>     nm=0;
+>     while(fgets(line,512,f)){
+>         char a[256]={},b[256]={};
+>         int r=sscanf(line,"%s %s",a,b);
+>         if(r!=2)continue;
+>         // Find token ids for a and b
+>         int ia=-1,ib=-1;
+>         for(int i=0;i<256+nm;i++){
+>             if(!strcmp(vocab[i],a))ia=i;
+>             if(!strcmp(vocab[i],b))ib=i;
+>         }
+>         if(ia>=0&&ib>=0){
+>             ma[nm]=ia;mb[nm]=ib;
+>             int t=256+nm;
+>             snprintf(vocab[t],255,"%s%s",a,b);
+>             nm++;
+>         }
+>     }
+>     fclose(f);
+> }
+> void ln(float*o,float*i,float*w,float*b){
+>     float m=0,v=0;
+>     for(int j=0;j<E;j++)m+=i[j];
+>     m/=E;
+>     for(int j=0;j<E;j++)v+=(i[j]-m)*(i[j]-m);
+>     v=1.f/sqrtf(v/E+1e-5f);
+>     for(int j=0;j<E;j++)o[j]=w[j]*(i[j]-m)*v+b[j];
+> }
+> void mm(float*o,float*i,float*w,int n,int d){
+>     for(int j=0;j<d;j++){float s=0;for(int k=0;k<n;k++)s+=i[k]*w[k*d+j];o[j]=s;}
+> }
+> float gl(float x){return .5f*x*(1.f+tanhf(.7978845608f*(x+.044715f*x*x*x)));}
+> void fwd(int*tok,int T){
+>     long wte=0,wpe=(long)V*E,o=wpe+(long)MX*E;
+>     long ln1w=o,ln1b=o+L*E;o+=2*L*E;
+>     long qw=o,qb=o+(long)L*E*E*3;o+=(long)L*E*E*3+L*E*3;
+>     long aw=o,ab=o+(long)L*E*E;o+=(long)L*E*E+(long)L*E;
+>     long l2w=o,l2b=o+L*E;o+=2*L*E;
+>     long fw=o,fb=o+(long)L*E*E4;o+=(long)L*E*E4+(long)L*E4;
+>     long pw=o,pb=o+(long)L*E4*E;o+=(long)L*E4*E+(long)L*E;
+>     long lw=o,lb=o+E;
+>     for(int t=0;t<T;t++){
+>         for(int i=0;i<E;i++)x[i]=W[wte+tok[t]*E+i]+W[wpe+t*E+i];
+>         for(int l=0;l<L;l++){
+>             ln(xb,x,W+ln1w+l*E,W+ln1b+l*E);
+>             mm(hb,xb,W+qw+(long)l*E*E*3,E,E*3);
+>             for(int i=0;i<E*3;i++)hb[i]+=W[qb+l*E*3+i];
+>             for(int h=0;h<NH;h++){
+>                 long co=(l*MX+t)*E+h*HS;
+>                 for(int i=0;i<HS;i++){kc[co+i]=hb[E+h*HS+i];vc[co+i]=hb[2*E+h*HS+i];qv[i]=hb[h*HS+i];}
+>                 for(int t2=0;t2<=t;t2++){float s=0;for(int i=0;i<HS;i++)s+=qv[i]*kc[(l*MX+t2)*E+h*HS+i];at[t2]=s/8.f;}
+>                 float mx=at[0];for(int t2=1;t2<=t;t2++)if(at[t2]>mx)mx=at[t2];
+>                 float sm=0;for(int t2=0;t2<=t;t2++){at[t2]=expf(at[t2]-mx);sm+=at[t2];}
+>                 for(int i=0;i<HS;i++){float s=0;for(int t2=0;t2<=t;t2++)s+=at[t2]/sm*vc[(l*MX+t2)*E+h*HS+i];xb2[h*HS+i]=s;}
+>             }
+>             mm(hb2,xb2,W+aw+(long)l*E*E,E,E);
+>             for(int i=0;i<E;i++)x[i]+=hb2[i]+W[ab+l*E+i];
+>             ln(xb,x,W+l2w+l*E,W+l2b+l*E);
+>             mm(hb,xb,W+fw+(long)l*E*E4,E,E4);
+>             for(int i=0;i<E4;i++)hb[i]=gl(hb[i]+W[fb+l*E4+i]);
+>             mm(hb2,hb,W+pw+(long)l*E4*E,E4,E);
+>             for(int i=0;i<E;i++)x[i]+=hb2[i]+W[pb+l*E+i];
+>         }
+>     }
+>     ln(xb,x,W+lw,W+lb);
+>     mm(lg,xb,W+wte,E,V);
+> }
+> int enc(char*text,int*tok){
+>     init_byte_map();
+>     int n=0,ids[MX];
+>     for(int i=0;text[i];i++)ids[n++]=b2u[(unsigned char)text[i]];
+>     for(int m=0;m<nm;m++){
+>         for(int i=0;i<n-1;i++){
+>             if(ids[i]==ma[m]&&ids[i+1]==mb[m]){
+>                 ids[i]=256+m;
+>                 memmove(ids+i+1,ids+i+2,(n-i-2)*4);
+>                 n--;i=-1;// restart
+>             }
+>         }
+>     }
+>     for(int i=0;i<n;i++)tok[i]=ids[i];
+>     return n;
+> }
+> void dec(int t){
+>     char*s=vocab[t];
+>     // Convert unicode representation back to bytes
+>     for(int i=0;s[i];){
+>         // Check for multi-byte UTF-8 (Ġ = 0xC4 0xA0)
+>         unsigned char c=s[i];
+>         if(c==0xC4&&(unsigned char)s[i+1]==0xA0){putchar(' ');i+=2;}
+>         else if(c==0xC4&&(unsigned char)s[i+1]==0xA1){putchar('\n');i+=2;}
+>         else if(c<128){
+>             if(t<256)putchar(u2b[t]);
+>             else putchar(c);
+>             i++;
+>         }else{i++;}
+>     }
+> }
+> int main(int ac,char**av){
+>     int fd=open(av[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     load_bpe(av[2]);
+>     int tok[MX],T=enc(av[3],tok);
+>     for(int g=0;g<20;g++){
+>         fwd(tok,T);
+>         int b=0;for(int i=1;i<V;i++)if(lg[i]>lg[b])b=i;
+>         tok[T++]=b;
+>         dec(b);
+>     }
+>     fflush(stdout);
+> }
+> CEOF
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# wc -c /app/gpt2.c
+4888 /app/gpt2.c
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app#

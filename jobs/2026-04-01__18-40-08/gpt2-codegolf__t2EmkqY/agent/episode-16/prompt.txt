@@ -1,0 +1,153 @@
+New Terminal Output:
+
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #define V 50257
+> #define C 1024
+> #define E 768
+> #define L 12
+> #define H 12
+> #define HS 64
+> #define E4 3072
+> float *W,*x,*xb,*xb2,*hb,*hb2,*q,*att,*logits,*kc,*vc;
+> int ntok;
+> char* vocab[V];
+> int vlen[V];
+> char merge_a[50001][64],merge_b[50001][64];
+> int nmerge;
+> float*P(int i){return W+i;}
+> void layernorm(float*o,float*inp,float*w,float*b,int n){
+>     float m=0,v=0;
+>     for(int i=0;i<n;i++)m+=inp[i];
+>     m/=n;
+>     for(int i=0;i<n;i++)v+=(inp[i]-m)*(inp[i]-m);
+>     v=1.0f/sqrtf(v/n+1e-5f);
+>     for(int i=0;i<n;i++)o[i]=w[i]*(inp[i]-m)*v+b[i];
+> }
+> void matmul(float*o,float*inp,float*w,int n,int d){
+>     for(int i=0;i<d;i++){
+>         float s=0;
+>         for(int j=0;j<n;j++)s+=inp[j]*w[j*d+i];
+>         o[i]=s;
+>     }
+> }
+> float gelu(float x){return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> void forward(int*tokens,int T){
+>     int wte=0,wpe=V*E;
+>     int ln1w=wpe+C*E,ln1b=ln1w+L*E;
+>     int qkvw=ln1b+L*E,qkvb=qkvw+L*E*3*E;
+>     int apw=qkvb+L*3*E,apb=apw+L*E*E;
+>     int ln2w=apb+L*E,ln2b=ln2w+L*E;
+>     int fcw=ln2b+L*E,fcb=fcw+L*E*E4;
+>     int fpw=fcb+L*E4,fpb=fpw+L*E4*E;
+>     int lfw=fpb+L*E,lfb=lfw+E;
+>     for(int t=0;t<T;t++){
+>         for(int i=0;i<E;i++)x[i]=W[wte+tokens[t]*E+i]+W[wpe+t*E+i];
+>         for(int l=0;l<L;l++){
+>             layernorm(xb,x,W+ln1w+l*E,W+ln1b+l*E,E);
+>             matmul(hb,xb,W+qkvw+l*E*3*E,E,3*E);
+>             for(int i=0;i<3*E;i++)hb[i]+=W[qkvb+l*3*E+i];
+>             for(int h=0;h<H;h++){
+>                 for(int i=0;i<HS;i++){
+>                     kc[(l*C+t)*E+h*HS+i]=hb[E+h*HS+i];
+>                     vc[(l*C+t)*E+h*HS+i]=hb[2*E+h*HS+i];
+>                     q[i]=hb[h*HS+i];
+>                 }
+>                 for(int t2=0;t2<=t;t2++){
+>                     float s=0;
+>                     for(int i=0;i<HS;i++)s+=q[i]*kc[(l*C+t2)*E+h*HS+i];
+>                     att[t2]=s/sqrtf(HS);
+>                 }
+>                 float mx=att[0];
+>                 for(int t2=1;t2<=t;t2++)if(att[t2]>mx)mx=att[t2];
+>                 float sm=0;
+>                 for(int t2=0;t2<=t;t2++){att[t2]=expf(att[t2]-mx);sm+=att[t2];}
+>                 for(int i=0;i<HS;i++){
+>                     float s=0;
+>                     for(int t2=0;t2<=t;t2++)s+=att[t2]/sm*vc[(l*C+t2)*E+h*HS+i];
+>                     xb2[h*HS+i]=s;
+>                 }
+>             }
+>             matmul(hb2,xb2,W+apw+l*E*E,E,E);
+>             for(int i=0;i<E;i++)x[i]+=hb2[i]+W[apb+l*E+i];
+>             layernorm(xb,x,W+ln2w+l*E,W+ln2b+l*E,E);
+>             matmul(hb,xb,W+fcw+l*E*E4,E,E4);
+>             for(int i=0;i<E4;i++)hb[i]=gelu(hb[i]+W[fcb+l*E4+i]);
+>             matmul(hb2,hb,W+fpw+l*E4*E,E4,E);
+>             for(int i=0;i<E;i++)x[i]+=hb2[i]+W[fpb+l*E+i];
+>         }
+>         layernorm(xb,x,W+lfw,W+lfb,E);
+>     }
+>     matmul(logits,xb,W+wte,E,V);
+> }
+> int bpe_encode(char*text,int*tokens){
+>     // Byte-level: GPT-2 maps bytes to unicode chars
+>     // For simplicity, map printable ASCII directly, handle Ġ = space prefix
+>     int len=strlen(text),n=0;
+>     // Build initial token list from bytes
+>     int ids[1024];
+>     for(int i=0;i<len;i++){
+>         unsigned char c=text[i];
+>         // GPT-2 byte encoding: space -> Ġ (token for space+char)
+>         // Actually bytes 33-126 map to themselves, space=32 maps to Ġ=288
+>         // and other bytes have different mappings
+>         if(c=='!')ids[n++]=0;
+>         else if(c>='"'&&c<='~')ids[n++]=c-'!'; // 1-93
+>         else if(c==' ')ids[n++]=220; // Ġ
+>         else ids[n++]=c; // fallback
+>     }
+>     // Apply BPE merges
+>     for(int m=0;m<nmerge;m++){
+>         int new_tok=256+m;
+>         // Find vocab strings for merge_a and merge_b
+>         // We need to find pairs that match
+>         for(int i=0;i<n-1;){
+>             // Check if ids[i],ids[i+1] match this merge
+>             if(ids[i]==new_tok-1||ids[i+1]==new_tok-1){i++;continue;}
+>             // Actually this approach is wrong. Let me use a different method.
+>             i++;
+>         }
+>     }
+>     // For now just copy
+>     for(int i=0;i<n;i++)tokens[i]=ids[i];
+>     return n;
+> }
+> int main(int argc,char**argv){
+>     if(argc<4){printf("Usage: %s model.ckpt vocab.bpe \"text\"\n",argv[0]);return 1;}
+>     // Load model
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st;fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     // Allocate buffers
+>     x=calloc(E,4);xb=calloc(E,4);xb2=calloc(E,4);
+>     hb=calloc(3*E,4);hb2=calloc(E,4);q=calloc(HS,4);
+>     att=calloc(C,4);logits=calloc(V,4);
+>     kc=calloc(L*C*E,4);vc=calloc(L*C*E,4);
+>     // Load BPE
+>     // TODO: proper BPE
+>     // Encode input
+>     int tokens[C],T;
+>     T=bpe_encode(argv[3],tokens);
+>     // Generate
+>     for(int g=0;g<20;g++){
+>         forward(tokens,T);
+>         int best=0;
+>         for(int i=1;i<V;i++)if(logits[i]>logits[best])best=i;
+>         tokens[T++]=best;
+>         // Decode and print token
+>         // TODO: proper decode
+>         printf("[%d]",best);
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# wc -c /app/gpt2.c
+4968 /app/gpt2.c
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app#

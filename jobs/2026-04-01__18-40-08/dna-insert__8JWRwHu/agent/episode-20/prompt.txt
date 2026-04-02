@@ -1,0 +1,174 @@
+New Terminal Output:
+
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# python3 << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # For insertion point 213:
+> tail213 = out[213:213+39]  # 'agtagattagaagaagaattaagaagaagattaacagaa'
+> non_anneal = 'agtagattagaagaagaattaagaagaagattaacagaa'
+> product = non_anneal + inp[213:] + inp[:213]
+>
+> print(f"tail213: {tail213}")
+> print(f"non_anneal: {non_anneal}")
+> print(f"Same: {tail213 == non_anneal}")
+> print()
+>
+> # Check circular equivalence
+> def is_circular_match(s1, s2):
+s not 3630.
+
+# OR:>     if len(s1) != len(s2):
+>         return False
+>     doubled = s1 + s1
+>     return s2 in doubled
+>
+> print(f"Product length: {len(product)}")
+> print(f"Output length: {len(out)}")
+> print(f"Circular match: {is_circular_match(product, out)}")
+>
+> # Let's see where they differ
+> for i in range(len(product)):
+>     if product[i] != out[i]:
+>         print(f"First diff at position {i}")
+>         print(f"Product[{i-5}:{i+10}]: {product[i-5:i+10]}")
+>         print(f"Output [{i-5}:{i+10}]: {out[i-5:i+10]}")
+>         break
+>
+> # The issue: the product is a linear representation starting from a different point
+> # In reality, Q5 SDM produces a circular product
+> # The circular product = the linear product joined end-to-end
+> # Linear product = fwd_primer_full + template_extension + rev_primer_RC_region
+> # Circular = join the 5' of fwd to the 5' of rev
+>
+> # For our case:
+> # fwd_primer = non_anneal_tail + anneal_fwd (annealing at inp[213:228])
+> # rev_primer anneals at inp[181:213]
+> # Linear product top strand = fwd_primer + inp[228:] + inp[:181]
+> # Wait, that's not right either. Let me think step by step.
+>
+> # fwd_primer: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag
+> # It anneals to the bottom strand at positions 213-227 (15 nt from 3' end)
+> # After annealing, extension goes from position 228 onwards (clockwise)
+>
+> # rev_primer: catatgtatatctccttcttaaagttaaacaa
+> # Its RC: ttgtttaactttaagaaggagatatacatatg
+> # This matches inp[183:213]? Let me check
+>
+> from subprocess import run
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq.lower()))
+>
+> rev_rc = reverse_complement('catatgtatatctccttcttaaagttaaacaa')
+> print(f"\nRev primer RC: {rev_rc}")
+> pos = inp.find(rev_rc)
+> print(f"Found at inp[{pos}:{pos+len(rev_rc)}]")
+> print(f"inp[{pos}:{pos+len(rev_rc)}] = {inp[pos:pos+len(rev_rc)]}")
+>
+> # So rev primer RC = inp[181:213] (32 nt)
+> # Rev primer anneals to bottom strand at positions 181-212
+> # The 3' end of rev primer corresponds to position 181 on template
+> # Extension goes from position 180 counterclockwise
+>
+> # The linear PCR product:
+> # Top strand (5'->3'): fwd_full + inp[228:] + inp[:181]
+> # Length: 54 + (3591-228) + 181 = 54 + 3363 + 181 = 3598
+> # But we expect 3630...
+>
+> # Wait, that's wrong. The PCR product includes the primer binding sites.
+> # Top strand = fwd_primer + template_between_primers_going_long_way
+> # = fwd_primer(54) + inp[228:3591] + inp[0:181]
+> # But the rev primer's binding site is on the bottom strand at 181-212
+> # So the top strand at 181-212 comes from extension of the fwd primer
+> # And the bottom strand at 213-227 comes from extension of the rev primer
+>
+> # Actually, the full linear product dsDNA:
+> # Top strand: fwd_primer_full + inp[228:] + inp[:213]
+> #   = 54 + 3363 + 213 = 3630 !
+> # Bottom strand: rev_primer_full + rc(inp[180::-1]) + rc(inp[3590:227:-1])
+> #   = rev_primer + rc(inp[:181]) + rc(inp[228:])
+>
+> # Wait, I think the top strand should be:
+> # fwd_primer_full + inp[228:] + inp[:213]
+> # Because:
+> # - fwd primer covers positions 213-227 on template (annealing part)
+> # - Extension from fwd goes 228, 229, ..., 3590, 0, 1, ..., 212
+> # - But position 213 is where the fwd primer starts annealing
+> # - The rev primer anneals at 181-212 on bottom strand
+> # - So extension from rev goes 180, 179, ..., 0, 3590, ..., 228, 227
+> # - The top strand of the product: fwd_primer + inp[228:3591] + inp[0:213]
+> # Hmm wait, the rev primer's 5' end is at position 212 on template
+> # So the linear product's other end is at position 212
+>
+> # Let me just compute it:
+> top_strand = 'agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag' + inp[228:] + inp[:213]
+> print(f"\nTop strand length: {len(top_strand)}")
+> print(f"Output length: {len(out)}")
+> print(f"Linear match: {top_strand == out}")
+> print(f"Circular match: {is_circular_match(top_strand, out)}")
+>
+> # Hmm, but the product should go from fwd to rev around the circle
+> # fwd anneals at 213-227, rev anneals at 181-212
+> # Going from 228 clockwise to 180: that's 228..3590, 0..180
+> # Product top strand = fwd_primer + inp[228:] + inp[:181]
+> # Length = 54 + 3363 + 181 = 3598
+> # That's not 3630.
+>
+> # OR: the product includes the primer binding regions
+> # Top strand = fwd_primer + inp[228:] + inp[:213]
+> # Because the bottom strand from rev primer covers 181-212,
+> # so the top strand extends all the way to position 212 (inclusive)
+> # = fwd_primer(54) + inp[228:](3363) + inp[:213](213) = 3630!
+>
+> print(f"\nLet me check circular match of this product with output:")
+> print(f"top_strand[:50] = {top_strand[:50]}")
+> print(f"out[:50] = {out[:50]}")
+>
+> # Find where out appears in doubled top_strand
+> doubled = top_strand + top_strand
+> idx = doubled.find(out)
+> print(f"Output found in doubled product at index: {idx}")
+> if idx >= 0:
+>     print("CIRCULAR MATCH CONFIRMED!")
+> PYEOF
+tail213: agtagattagaagaagaattaagaagaagattaacagaa
+non_anneal: agtagattagaagaagaattaagaagaagattaacagaa
+Same: True
+
+Product length: 3630
+Output length: 3630
+Circular match: True
+First diff at position 1
+Product[-4:11]:
+Output [-4:11]:
+
+Rev primer RC: ttgtttaactttaagaaggagatatacatatg
+Found at inp[181:213]
+inp[181:213] = ttgtttaactttaagaaggagatatacatatg
+
+Top strand length: 3630
+Output length: 3630
+Linear match: False
+Circular match: True
+
+Let me check circular match of this product with output:
+top_strand[:50] = agtagattagaagaagaattaagaagaagattaacagaaagcaagggcga
+out[:50] = actcttcctttttcaatattattgaagcatttatcagggttattgtctca
+Output found in doubled product at index: 3417
+CIRCULAR MATCH CONFIRMED!
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app#

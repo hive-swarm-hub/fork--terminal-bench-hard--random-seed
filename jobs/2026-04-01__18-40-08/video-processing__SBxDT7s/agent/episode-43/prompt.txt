@@ -1,0 +1,149 @@
+New Terminal Output:
+
+root@5b0797f4-1d5f-44d5-be7c-07b246682558:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>
+>     frames_gray = []
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frames_gray.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
+>     cap.release()
+>
+>     n_frames = len(frames_gray)
+>     bg = frames_gray[0]
+>
+>     # Step 1: For each frame, compute consecutive frame diff (gap=2)
+>     # and track the weighted vertical centroid (wcy)
+>     gap = 2
+>     frame_data = []  # (frame_idx, wcx, wcy, bot10, npix)
+>
+>     for i in range(gap, n_frames):
+>         diff = np.abs(frames_gray[i] - frames_gray[i - gap])
+>         mask = (diff > 20).astype(np.uint8)
+>         ys, xs = np.where(mask > 0)
+>
+>         if len(ys) < 100:
+>             continue
+>
+>         weights = diff[mask > 0]
+>         wcx = np.average(xs, weights=weights)
+>         wcy = np.average(ys, weights=weights)
+>
+>         sorted_ys = np.sort(ys)
+>         bot10 = sorted_ys[int(len(sorted_ys) * 0.9)]
+>         top10 = sorted_ys[int(len(sorted_ys) * 0.1)]
+>
+>         frame_data.append({
+>             'frame': i,
+>             'wcx': wcx,
+>             'wcy': wcy,
+>             'bot10': bot10,
+>             'top10': top10,
+>             'npix': len(ys)
+>         })
+>
+>     # Step 2: Filter to only frames with significant motion (athlete present)
+>     # The athlete is present when npix is large
+>     if not frame_data:
+>         return 0, 0
+>
+>     npix_values = [d['npix'] for d in frame_data]
+>     npix_threshold = max(npix_values) * 0.3
+>
+>     active_frames = [d for d in frame_data if d['npix'] > npix_threshold]
+>
+>     if len(active_frames) < 5:
+>         return 0, 0
+>
+>     # Step 3: Find the jump by analyzing the wcy signal
+>     # During the jump, wcy drops (athlete goes higher)
+>     # We need to find the sustained drop in wcy
+>
+>     frame_nums = np.array([d['frame'] for d in active_frames])
+>     wcy_values = np.array([d['wcy'] for d in active_frames])
+>     wcx_values = np.array([d['wcx'] for d in active_frames])
+>     bot10_values = np.array([d['bot10'] for d in active_frames])
+>
+>     # Smooth the wcy signal
+>     kernel_size = 5
+>     if len(wcy_values) >= kernel_size:
+>         wcy_smooth = np.convolve(wcy_values, np.ones(kernel_size)/kernel_size, mode='same')
+>     else:
+>         wcy_smooth = wcy_values
+>
+>     # Find the minimum of wcy (highest point = mid-jump)
+>     min_idx = np.argmin(wcy_smooth)
+>     mid_jump_frame = frame_nums[min_idx]
+>
+>     # Step 4: Find takeoff and landing
+>     # Takeoff: search backward from mid-jump for where wcy starts dropping
+>     # Landing: search forward from mid-jump for where wcy returns to baseline
+>
+>     # Get baseline wcy (average of first few and last few active frames)
+>     n_baseline = min(5, len(wcy_values) // 4)
+>     if n_baseline > 0:
+>         baseline_start = np.mean(wcy_smooth[:n_baseline])
+>         baseline_end = np.mean(wcy_smooth[-n_baseline:])
+>         baseline = (baseline_start + baseline_end) / 2
+>     else:
+>         baseline = np.mean(wcy_smooth)
+>
+>     min_wcy = wcy_smooth[min_idx]
+>     jump_depth = baseline - min_wcy  # how much wcy drops during jump
+>
+>     # Takeoff threshold: wcy drops below baseline - 20% of jump depth
+>     takeoff_threshold = baseline - jump_depth * 0.2
+>     landing_threshold = baseline - jump_depth * 0.2
+>
+>     # Search backward from min for takeoff
+>     takeoff_idx = min_idx
+>     for j in range(min_idx, -1, -1):
+>         if wcy_smooth[j] >= takeoff_threshold:
+>             takeoff_idx = j
+>             break
+>
+>     # Search forward from min for landing
+>     landing_idx = min_idx
+>     for j in range(min_idx, len(wcy_smooth)):
+>         if wcy_smooth[j] >= landing_threshold:
+>             landing_idx = j
+>             break
+>
+>     takeoff_frame = int(frame_nums[takeoff_idx])
+>     landing_frame = int(frame_nums[landing_idx])
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, landing_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': landing_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {landing_frame}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@5b0797f4-1d5f-44d5-be7c-07b246682558:/app#

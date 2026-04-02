@@ -1,0 +1,113 @@
+New Terminal Output:
+
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# cat > /tmp/test_gpt2.py << 'PYEOF'
+> import struct, mmap, math
+>
+> V, C, E, L, H = 50257, 1024, 768, 12, 12
+> HS = E // H  # 64
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(off, n):
+>     return list(struct.unpack_from(f'{n}f', m, off*4))
+>
+> # Load all weights with grouped layout
+> off = 0
+> wte = rf(off, V*E); off += V*E
+> wpe = rf(off, C*E); off += C*E
+> ln1w = rf(off, L*E); off += L*E
+> ln1b = rf(off, L*E); off += L*E
+> qkvw = rf(off, L*E*3*E); off += L*E*3*E
+> qkvb = rf(off, L*3*E); off += L*3*E
+> attprojw = rf(off, L*E*E); off += L*E*E
+> attprojb = rf(off, L*E); off += L*E
+> ln2w = rf(off, L*E); off += L*E
+> ln2b = rf(off, L*E); off += L*E
+> fcw = rf(off, L*E*4*E); off += L*E*4*E
+> fcb = rf(off, L*4*E); off += L*4*E
+> fcprojw = rf(off, L*4*E*E); off += L*4*E*E
+> fcprojb = rf(off, L*E); off += L*E
+> lnfw = rf(off, E); off += E
+> lnfb = rf(off, E); off += E
+> print(f'Loaded {off} params')
+>
+> def layernorm(x, w_off, b_off, w_arr, b_arr):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     inv = 1.0 / math.sqrt(var + 1e-5)
+>     return [w_arr[w_off+i] * (x[i] - mean) * inv + b_arr[b_off+i] for i in range(n)]
+>
+> def matmul(x, w, w_off, out_dim):
+>     # w is [in_dim, out_dim] stored row-major
+>     in_dim = len(x)
+>     result = [0.0] * out_dim
+>     for j in range(out_dim):
+>         s = 0.0
+>         for i in range(in_dim):
+>             s += x[i] * w[w_off + i * out_dim + j]
+>         result[j] = s
+>     return result
+>
+> def gelu(x):
+>     return [0.5 * xi * (1.0 + math.tanh(math.sqrt(2.0/math.pi) * (xi + 0.044715 * xi**3))) for xi in x]
+>
+> def softmax(x):
+>     mx = max(x)
+>     ex = [math.exp(xi - mx) for xi in x]
+>     s = sum(ex)
+>     return [e/s for e in ex]
+>
+> # Simple tokenization: just use token 464 = " The"
+> # Let's test with a single token
+> token = 464  # " The"
+> pos = 0
+>
+> # Get embedding
+> x = [wte[token*E+i] + wpe[pos*E+i] for i in range(E)]
+>
+> # Run through first layer only for speed
+> for layer in range(1):  # just first layer for testing
+>     # LayerNorm 1
+>     ln_x = layernorm(x, layer*E, layer*E, ln1w, ln1b)
+>
+>     # QKV projection
+>     qkv = matmul(ln_x, qkvw, layer*E*3*E, 3*E)
+>     qkv = [qkv[i] + qkvb[layer*3*E+i] for i in range(3*E)]
+>
+>     # Split Q, K, V
+>     q = qkv[:E]
+>     k = qkv[E:2*E]
+>     v = qkv[2*E:3*E]
+>
+>     # Self-attention (single token, so just q*k/sqrt(dk) -> softmax -> v)
+>     # For single token, attention is just the value
+>     attn_out = v
+>
+>     # Attention projection
+>     proj = matmul(attn_out, attprojw, layer*E*E, E)
+>     proj = [proj[i] + attprojb[layer*E+i] for i in range(E)]
+>
+>     # Residual
+>     x = [x[i] + proj[i] for i in range(E)]
+>
+>     # LayerNorm 2
+>     ln_x2 = layernorm(x, layer*E, layer*E, ln2w, ln2b)
+>
+>     # MLP: fc -> gelu -> proj
+>     fc = matmul(ln_x2, fcw, layer*E*4*E, 4*E)
+>     fc = [fc[i] + fcb[layer*4*E+i] for i in range(4*E)]
+>     fc = gelu(fc)
+>
+>     mlp_out = matmul(fc, fcprojw, layer*4*E*E, E)
+>     mlp_out = [mlp_out[i] + fcprojb[layer*E+i] for i in range(E)]
+>
+>     # Residual
+>     x = [x[i] + mlp_out[i] for i in range(E)]
+>     print(f'Layer {layer} output first 5: {x[:5]}')
+>
+> print('Done with layer 0')
+> PYEOF
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# python3 /tmp/test_gpt2.py
+

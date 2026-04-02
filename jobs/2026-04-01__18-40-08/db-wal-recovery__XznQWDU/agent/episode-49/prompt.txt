@@ -1,0 +1,81 @@
+New Terminal Output:
+MDEND__117__
+root@ca751578-76b5-4163-b4ef-dbb6830452cf:/app# cat > /tmp/search_heap.py << 'PYEOF'
+> import struct
+>
+> pid = 1
+> wal_magic1 = b'\x37\x7f\x06\x82'
+> wal_magic2 = b'\x37\x7f\x06\x83'
+>
+> try:
+>     with open(f'/proc/{pid}/maps', 'r') as maps:
+>         regions = []
+>         for line in maps:
+>             parts = line.split()
+>             if len(parts) >= 2 and ('rw' in parts[1]):
+>                 addr_range = parts[0].split('-')
+>                 start = int(addr_range[0], 16)
+>                 end = int(addr_range[1], 16)
+>                 size = end - start
+>                 regions.append((start, end, size))
+>
+>     # Sort by size, show all
+>     regions.sort(key=lambda x: x[2], reverse=True)
+>     print(f'Total regions: {len(regions)}')
+>     for start, end, size in regions[:10]:
+>         print(f'  {start:#x}-{end:#x}: {size/1024/1024:.1f} MB')
+>
+>     # Search ALL regions including large ones
+>     with open(f'/proc/{pid}/mem', 'rb') as mem:
+>         for start, end, size in regions:
+>             if size > 500 * 1024 * 1024:  # Skip regions > 500MB
+>                 continue
+>             try:
+>                 mem.seek(start)
+>                 # Read in chunks for large regions
+>                 chunk_size = 4 * 1024 * 1024
+>                 offset = 0
+>                 while offset < size:
+>                     read_size = min(chunk_size, size - offset)
+>                     data = mem.read(read_size)
+>                     if not data:
+>                         break
+>                     for magic in [wal_magic1, wal_magic2]:
+>                         idx = data.find(magic)
+>                         while idx != -1:
+>                             abs_addr = start + offset + idx
+>                             print(f'WAL magic at {abs_addr:#x}')
+>                             # Extract and save
+>                             wal_data = data[idx:idx+16512]
+>                             if len(wal_data) < 16512:
+>                                 # Read more from mem
+>                                 mem.seek(abs_addr)
+>                                 wal_data = mem.read(16512)
+>                                 mem.seek(start + offset + len(data))
+>                             with open(f'/tmp/wal_{abs_addr:x}.bin', 'wb') as f:
+>                                 f.write(wal_data)
+>                             print(f'  Saved {len(wal_data)} bytes')
+>                             idx = data.find(magic, idx + 4)
+>                     offset += len(data)
+>             except (OSError, ValueError) as e:
+>                 continue
+>
+> except Exception as e:
+>     print(f'Error: {e}')
+>
+> print('Search complete')
+> PYEOF
+root@ca751578-76b5-4163-b4ef-dbb6830452cf:/app# python3 /tmp/search_heap.py
+Total regions: 28
+  0xc000000000-0xc003400000: 52.0 MB
+  0x71affa800000-0x71affc800000: 32.0 MB
+  0x2300000-0x2bda000: 8.9 MB
+  0x71aff9dc0000-0x71affa400000: 6.2 MB
+  0x71affa410000-0x71affa590000: 1.5 MB
+  0x71affa6a0000-0x71affa800000: 1.4 MB
+  0x71affa5a0000-0x71affa6a0000: 1.0 MB
+  0x71b04106b000-0x71b04116b000: 1.0 MB
+  0x71aff9cf0000-0x71aff9db0000: 0.8 MB
+  0x71aff9c60000-0x71aff9ce0000: 0.5 MB
+Search complete
+root@ca751578-76b5-4163-b4ef-dbb6830452cf:/app#

@@ -1,0 +1,243 @@
+New Terminal Output:
+
+root@218ed018-3fe8-4035-87aa-a78f95815570:/app# cat > /app/convert_masks.py << 'SCRIPT_EOF'
+> import argparse
+> import os
+> import numpy as np
+> import pandas as pd
+> import cv2
+> import torch
+> from PIL import Image
+> from tqdm import tqdm
+> from mobile_sam import sam_model_registry, SamPredictor
+>
+>
+> def mask_to_polyline(mask):
+>     """
+>     Convert a binary mask to polyline coordinates.
+>     Returns coords_x, coords_y as comma-separated strings.
+>     Also returns xmin, xmax, ymin, ymax.
+>     """
+>     # Find contours
+>     contours, _ = cv2.findContours(
+>         mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+>     )
+>
+>     if len(contours) == 0:
+>         return None, None, None, None, None, None
+>
+>     # Take the largest contour
+>     largest_contour = max(contours, key=cv2.contourArea)
+>
+>     if len(largest_contour) < 3:
+>         return None, None, None, None, None, None
+>
+>     # Extract x, y coordinates
+>     # contour shape is (N, 1, 2) where 2 is (x, y)
+>     coords = largest_contour.squeeze(axis=1)  # (N, 2)
+>     xs = coords[:, 0]
+>     ys = coords[:, 1]
+>
+>     # Close the polyline by appending the first point
+>     xs = np.append(xs, xs[0])
+>     ys = np.append(ys, ys[0])
+>
+>     coords_x = ",".join(str(x) for x in xs)
+>     coords_y = ",".join(str(y) for y in ys)
+>
+>     xmin = int(np.min(xs))
+>     xmax = int(np.max(xs))
+>     ymin = int(np.min(ys))
+>     ymax = int(np.max(ys))
+>
+>     return coords_x, coords_y, xmin, xmax, ymin, ymax
+>
+>
+> def keep_largest_component(mask):
+>     """
+>     Keep only the largest connected component in a binary mask.
+>     """
+>     mask_uint8 = mask.astype(np.uint8)
+>     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_uint8, connectivity=8)
+>
+>     if num_labels <= 1:
+>         return mask
+>
+>     # Find the largest component (excluding background label 0)
+>     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+>     return (labels == largest_label).astype(np.uint8)
+>
+>
+> def main():
+>     parser = argparse.ArgumentParser(description="Convert rectangular masks to polylines using MobileSAM")
+>     parser.add_argument("weights_path", type=str, help="Path to MobileSAM weights")
+>     parser.add_argument("output_path", type=str, help="Path to the output CSV file or folder")
+>     parser.add_argument("rgb_path", type=str, help="Path to RGB image")
+>     parser.add_argument("csv_path", type=str, help="Path to input metadata CSV")
+>     args = parser.parse_args()
+>
+>     # Determine output file path
+>     output_path = args.output_path
+>     if os.path.isdir(output_path) or (not output_path.endswith(".csv")):
+>         # Treat as directory - save CSV inside with same name as input
+>         os.makedirs(output_path, exist_ok=True)
+>         csv_basename = os.path.basename(args.csv_path)
+>         output_path = os.path.join(output_path, csv_basename)
+>     else:
+>         # Treat as file path - ensure parent directory exists
+>         parent_dir = os.path.dirname(os.path.abspath(output_path))
+>         os.makedirs(parent_dir, exist_ok=True)
+>
+>     # Load image
+>     image = np.array(Image.open(args.rgb_path).convert("RGB"))
+>     h, w = image.shape[:2]
+>
+>     # Load CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     # Build MobileSAM model
+>     # Monkey-patch torch.load to ensure CPU loading works
+>     _original_torch_load = torch.load
+>     def _cpu_torch_load(*args_load, **kwargs_load):
+>         kwargs_load.setdefault('map_location', 'cpu')
+>         return _original_torch_load(*args_load, **kwargs_load)
+>     torch.load = _cpu_torch_load
+>
+>     device = torch.device("cpu")
+>     model = sam_model_registry["vit_t"](checkpoint=args.weights_path)
+>     model.to(device)
+>     model.eval()
+>
+>     # Restore original torch.load
+>     torch.load = _original_torch_load
+>
+>     predictor = SamPredictor(model)
+>     predictor.set_image(image)
+>
+>     # Store all masks and their IoU scores for overlap resolution
+>     all_masks = []
+>     all_scores = []
+>
+>     print("Generating masks for all cells...")
+>     for idx, row in tqdm(df.iterrows(), total=len(df)):
+>         xmin = int(row["xmin"])
+>         ymin = int(row["ymin"])
+>         xmax = int(row["xmax"])
+>         ymax = int(row["ymax"])
+>
+>         # Use bounding box as prompt (XYXY format)
+>         box = np.array([xmin, ymin, xmax, ymax])
+>
+>         masks, scores, _ = predictor.predict(
+>             box=box,
+>             multimask_output=True,
+>         )
+>
+>         # Select the mask with the highest IoU score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]
+>         best_score = scores[best_idx]
+>
+>         all_masks.append(best_mask)
+>         all_scores.append(best_score)
+>
+>     # Resolve overlaps: for each pixel, assign it to the mask with the highest score
+>     print("Resolving overlaps...")
+>     all_scores_arr = np.array(all_scores)
+>
+>     # Create a label map: -1 means unassigned
+>     label_map = -1 * np.ones((h, w), dtype=np.int32)
+>     score_map = -np.inf * np.ones((h, w), dtype=np.float32)
+>
+>     for i in range(len(all_masks)):
+>         mask = all_masks[i].astype(bool)
+>         score = all_scores_arr[i]
+>
+>         # Where this mask is active and has higher score than current assignment
+>         update = mask & (score > score_map)
+>         label_map[update] = i
+>         score_map[update] = score
+>
+>     # Extract cleaned masks and convert to polylines
+>     print("Converting masks to polylines...")
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_xmin = []
+>     new_xmax = []
+>     new_ymin = []
+>     new_ymax = []
+>
+>     for i in tqdm(range(len(df))):
+>         # Get the cleaned mask for this cell
+>         cleaned_mask = (label_map == i).astype(np.uint8)
+>
+>         # Keep only the largest connected component
+>         cleaned_mask = keep_largest_component(cleaned_mask)
+>
+>         # If the mask is empty after cleaning, fall back to the original mask
+>         if cleaned_mask.sum() == 0:
+>             # Use original bounding box as fallback
+>             row = df.iloc[i]
+>             xmin = int(row["xmin"])
+>             ymin = int(row["ymin"])
+>             xmax = int(row["xmax"])
+>             ymax = int(row["ymax"])
+>
+>             # Re-run prediction with just this box, no overlap resolution
+>             cleaned_mask = all_masks[i].astype(np.uint8)
+>             cleaned_mask = keep_largest_component(cleaned_mask)
+>
+>             if cleaned_mask.sum() == 0:
+>                 # Last resort: use the bounding box itself as a polyline
+>                 cx = f"{xmin},{xmax},{xmax},{xmin},{xmin}"
+>                 cy = f"{ymin},{ymin},{ymax},{ymax},{ymin}"
+>                 new_coords_x.append(cx)
+>                 new_coords_y.append(cy)
+>                 new_xmin.append(xmin)
+>                 new_xmax.append(xmax)
+>                 new_ymin.append(ymin)
+>                 new_ymax.append(ymax)
+>                 continue
+>
+>         # Convert to polyline
+>         cx, cy, xmin, xmax, ymin, ymax = mask_to_polyline(cleaned_mask)
+>
+>         if cx is None:
+>             # Fallback to bounding box
+>             row = df.iloc[i]
+>             xmin = int(row["xmin"])
+>             ymin = int(row["ymin"])
+>             xmax = int(row["xmax"])
+>             ymax = int(row["ymax"])
+>             cx = f"{xmin},{xmax},{xmax},{xmin},{xmin}"
+>             cy = f"{ymin},{ymin},{ymax},{ymax},{ymin}"
+>
+>         new_coords_x.append(cx)
+>         new_coords_y.append(cy)
+>         new_xmin.append(xmin)
+>         new_xmax.append(xmax)
+>         new_ymin.append(ymin)
+>         new_ymax.append(ymax)
+>
+>     # Update the dataframe
+>     df["coords_x"] = new_coords_x
+>     df["coords_y"] = new_coords_y
+>     df["xmin"] = new_xmin
+>     df["xmax"] = new_xmax
+>     df["ymin"] = new_ymin
+>     df["ymax"] = new_ymax
+>
+>     # Update type to polyline for all
+>     df["type"] = "polyline"
+>
+>     # Save output
+>     df.to_csv(output_path, index=False)
+>     print(f"Saved output to {output_path}")
+>
+>
+> if __name__ == "__main__":
+>     main()
+> SCRIPT_EOF
+root@218ed018-3fe8-4035-87aa-a78f95815570:/app# echo 'Script written'
+Script written
+root@218ed018-3fe8-4035-87aa-a78f95815570:/app#

@@ -1,0 +1,188 @@
+New Terminal Output:
+
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq.lower()))
+>
+> def oligotm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+ >
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input'].lower()
+> out = seqs['output'].lower()
+>
+> # The difference: output = inp[:215] + insertion(39bp) + inp[215:]
+> # insertion = out[215:254] = 'tagattagaagaagaattaagaagaagattaacagaaag'
+>
+> # For Q5 SDM, I can choose any equivalent insertion point.
+> # The key insight: the insertion 'tagattagaagaagaattaagaagaagattaacagaaag' ends with 'ag'
+> # and inp[213:215] = 'ag'. So the 'ag' is shared.
+>
+> # Equivalent representations:
+> # 1) Insert at 215: tail = 'tagattagaagaagaattaagaagaagattaacagaaag' (39bp)
+> #    out = inp[:215] + tail + inp[215:]
+> # 2) Insert at 214: tail = 'tagattagaagaagaattaagaagaagattaacagaaag' + inp[214]
+> #    but we need: inp[:214] + X + inp[214:] = out
+> #    X = out[214:214+39] = out[214:253]
+> #    Let me compute...
+>
+> print("Checking equivalent insertion points:")
+> for pt in range(210, 220):
+>     # out = inp[:pt] + tail + inp[pt:]
+>     # tail = out[pt : pt + (len(out) - len(inp))]
+>     diff = len(out) - len(inp)  # 39
+>     tail_candidate = out[pt:pt+diff]
+>     result = inp[:pt] + tail_candidate + inp[pt:]
+>     match = (result == out)
+>     if match:
+>         # Check if tail end overlaps with downstream template
+>         anneal_start = inp[pt:pt+5]
+>         tail_end = tail_candidate[-5:]
+>         # Check overlap: how many chars at end of tail match start of downstream template
+>         overlap = 0
+>         for k in range(1, min(len(tail_candidate), 10)+1):
+>             if tail_candidate[-k:] == inp[pt:pt+k]:
+>                 overlap = k
+>         print(f"  Point {pt}: tail='{tail_candidate}' ({len(tail_candidate)}bp), match={match}, 3' overlap with downstream={overlap}")
+>
+> print()
+> # So we need to find an insertion point where the tail doesn't overlap
+> # with the downstream template sequence.
+>
+> # Let me try each valid insertion point and design primers
+> print("\n=== Designing primers for each valid insertion point ===")
+>
+> diff = len(out) - len(inp)  # 39
+>
+> best_overall = None
+> best_overall_diff = float('inf')
+>
+> for pt in range(200, 225):
+>     tail_candidate = out[pt:pt+diff]
+>     result = inp[:pt] + tail_candidate + inp[pt:]
+>     if result != out:
+>         continue
+>
+>     # Check 3' overlap of tail with downstream template
+>     overlap = 0
+>     for k in range(1, min(len(tail_candidate), 20)+1):
+>         if tail_candidate[-k:] == inp[pt:pt+k]:
+>             overlap = k
+>         else:
+>             break
+>
+>     # The effective annealing of the forward primer would be:
+>     # designed_anneal_length + overlap
+>     # We want overlap = 0 for clean design
+>
+>     if overlap > 0:
+>         # Skip points with overlap for now
+>         continue
+>
+>     print(f"\nInsertion point {pt}: tail='{tail_candidate}' ({len(tail_candidate)}bp), no overlap")
+>
+>     # Design forward primer: tail + annealing starting at pt
+>     fwd_candidates = []
+>     for length in range(15, 37):
+>         anneal = inp[pt:pt+length]
+>         if len(anneal) < length:
+>             break
+>         tm = oligotm(anneal)
+>         if 58 <= tm <= 72:
+>             fwd_candidates.append((length, anneal, tm))
+>
+>     # Design reverse primer: RC of template ending at pt-1
+>     rev_candidates = []
+>     for length in range(15, 37):
+>         if pt - length < 0:
+>             break
+>         anneal_region = inp[pt-length:pt]
+>         rc = reverse_complement(anneal_region)
+>         tm = oligotm(rc)
+>         if 58 <= tm <= 72:
+>             rev_candidates.append((length, rc, tm))
+>
+>     # Find best pair
+>     for fl, fseq, ftm in fwd_candidates:
+>         for rl, rseq, rtm in rev_candidates:
+>             d = abs(ftm - rtm)
+>             if d <= 5.0 and d < best_overall_diff:
+>                 best_overall_diff = d
+>                 best_overall = (pt, tail_candidate, fl, fseq, ftm, rl, rseq, rtm)
+>
+> if best_overall:
+>     pt, tail, fl, fseq, ftm, rl, rseq, rtm = best_overall
+>     fwd_primer = tail + fseq
+>     rev_primer = rseq
+>     print(f"\n=== BEST OVERALL ===")
+>     print(f"Insertion point: {pt}")
+>     print(f"Forward: {fwd_primer} (total={len(fwd_primer)})")
+>     print(f"  Tail: {tail} ({len(tail)} nt)")
+>     print(f"  Anneal: {fseq} ({fl} nt, Tm={ftm:.2f})")
+>     print(f"Reverse: {rev_primer} ({rl} nt, Tm={rtm:.2f})")
+>     print(f"Tm diff: {abs(ftm-rtm):.2f}")
+>
+>     # Verify 3' match
+>     for k in range(len(fwd_primer), 0, -1):
+>         suffix = fwd_primer[-k:]
+>         if suffix in inp:
+>             print(f"Forward primer: longest 3' template match = {k} nt")
+>             assert k == fl, f"Mismatch: designed {fl}, actual {k}"
+>             print("CLEAN design confirmed!")
+>             break
+>
+>     # Verify output
+>     result = inp[:pt] + tail + inp[pt:]
+>     print(f"Output match: {result == out}")
+>
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer}\n")
+>         f.write(f">reverse_primer\n{rev_primer}\n")
+>     print("Written to primers.fasta")
+> else:
+>     print("No valid design found without overlap!")
+> PYEOF
+Checking equivalent insertion points:
+  Point 213: tail='agtagattagaagaagaattaagaagaagattaacagaa' (39bp), match=True, 3' overlap with downstream=1
+  Point 214: tail='gtagattagaagaagaattaagaagaagattaacagaaa' (39bp), match=True, 3' overlap with downstream=0
+  Point 215: tail='tagattagaagaagaattaagaagaagattaacagaaag' (39bp), match=True, 3' overlap with downstream=0
+
+
+=== Designing primers for each valid insertion point ===
+
+Insertion point 214: tail='gtagattagaagaagaattaagaagaagattaacagaaa' (39bp), no overlap
+
+Insertion point 215: tail='tagattagaagaagaattaagaagaagattaacagaaag' (39bp), no overlap
+
+=== BEST OVERALL ===
+Insertion point: 215
+Forward: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg (total=55)
+  Tail: tagattagaagaagaattaagaagaagattaacagaaag (39 nt)
+  Anneal: caagggcgaggagctg (16 nt, Tm=61.24)
+Reverse: ctcatatgtatatctccttcttaaagttaaacaa (34 nt, Tm=61.31)
+Tm diff: 0.07
+Forward primer: longest 3' template match = 18 nt
+Traceback (most recent call last):
+  File "<stdin>", line 147, in <module>
+AssertionError: Mismatch: designed 16, actual 18
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app#

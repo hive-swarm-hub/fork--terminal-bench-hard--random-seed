@@ -1,0 +1,178 @@
+New Terminal Output:
+
+root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app# cat > /app/fit_peaks.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Parse the data file (European decimal format: commas as decimal separators)
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         # Replace commas with dots for decimal
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+>
+> # Sort by x
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> print(f"X range: {x_data.min():.2f} to {x_data.max():.2f}")
+> print(f"Y range: {y_data.min():.2f} to {y_data.max():.2f}")
+> print(f"Number of points: {len(x_data)}")
+>
+> # Find approximate peak locations by looking at the data
+> # For graphene: G peak ~1580 cm-1, 2D peak ~2700 cm-1
+> # Let's first see where the intensity maxima are
+> from scipy.signal import find_peaks
+> peaks, properties = find_peaks(y_data, height=np.median(y_data)*1.5, distance=50, prominence=5000)
+> print(f"\nFound {len(peaks)} peaks:")
+> for p in peaks:
+>     print(f"  x={x_data[p]:.2f}, y={y_data[p]:.2f}")
+>
+> # Lorentzian function: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Identify G and 2D peak regions
+> # G peak should be around 1580 cm-1, 2D around 2700 cm-1
+> # Let's find peaks closest to these values
+> if len(peaks) >= 2:
+>     peak_positions = x_data[peaks]
+>     peak_heights = y_data[peaks]
+>
+>     # Sort peaks by position
+>     peak_sort = np.argsort(peak_positions)
+>     peak_positions = peak_positions[peak_sort]
+>     peak_heights = peak_heights[peak_sort]
+>     peaks_sorted = peaks[peak_sort]
+>
+>     print(f"\nSorted peak positions: {peak_positions}")
+>
+>     # Find G peak (closest to 1580)
+>     g_idx = np.argmin(np.abs(peak_positions - 1580))
+>     g_peak_x = peak_positions[g_idx]
+>     g_peak_y = peak_heights[g_idx]
+>
+>     # Find 2D peak (closest to 2700)
+>     td_idx = np.argmin(np.abs(peak_positions - 2700))
+>     td_peak_x = peak_positions[td_idx]
+>     td_peak_y = peak_heights[td_idx]
+>
+>     print(f"\nG peak estimate: x={g_peak_x:.2f}, y={g_peak_y:.2f}")
+>     print(f"2D peak estimate: x={td_peak_x:.2f}, y={td_peak_y:.2f}")
+> else:
+>     # Manual search
+>     g_mask = (x_data > 1500) & (x_data < 1650)
+>     if np.any(g_mask):
+>         g_peak_idx = np.argmax(y_data[g_mask])
+>         g_peak_x = x_data[g_mask][g_peak_idx]
+>         g_peak_y = y_data[g_mask][g_peak_idx]
+>
+>     td_mask = (x_data > 2600) & (x_data < 2800)
+>     if np.any(td_mask):
+>         td_peak_idx = np.argmax(y_data[td_mask])
+>         td_peak_x = x_data[td_mask][td_peak_idx]
+>         td_peak_y = y_data[td_mask][td_peak_idx]
+>
+>     print(f"\nG peak estimate: x={g_peak_x:.2f}, y={g_peak_y:.2f}")
+>     print(f"2D peak estimate: x={td_peak_x:.2f}, y={td_peak_y:.2f}")
+>
+> # Fit G peak
+> g_fit_mask = (x_data > g_peak_x - 100) & (x_data < g_peak_x + 100)
+> x_g = x_data[g_fit_mask]
+> y_g = y_data[g_fit_mask]
+> offset_g_est = np.min(y_g)
+>
+> try:
+>     popt_g, pcov_g = curve_fit(lorentzian, x_g, y_g,
+>                                 p0=[g_peak_x, 10, g_peak_y - offset_g_est, offset_g_est],
+>                                 maxfev=10000)
+>     print(f"\nG peak fit: x0={popt_g[0]:.6f}, gamma={popt_g[1]:.6f}, amplitude={popt_g[2]:.6f}, offset={popt_g[3]:.6f}")
+> except Exception as e:
+>     print(f"G peak fit failed: {e}")
+>     popt_g = None
+>
+> # Fit 2D peak
+> td_fit_mask = (x_data > td_peak_x - 100) & (x_data < td_peak_x + 100)
+> x_td = x_data[td_fit_mask]
+> y_td = y_data[td_fit_mask]
+> offset_td_est = np.min(y_td)
+>
+> try:
+>     popt_td, pcov_td = curve_fit(lorentzian, x_td, y_td,
+>                                   p0=[td_peak_x, 15, td_peak_y - offset_td_est, offset_td_est],
+>                                   maxfev=10000)
+>     print(f"2D peak fit: x0={popt_td[0]:.6f}, gamma={popt_td[1]:.6f}, amplitude={popt_td[2]:.6f}, offset={popt_td[3]:.6f}")
+> except Exception as e:
+>     print(f"2D peak fit failed: {e}")
+>     popt_td = None
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(popt_g[0]), 6),
+>         "gamma": round(float(abs(popt_g[1])), 6),
+>         "amplitude": round(float(popt_g[2]), 6),
+>         "offset": round(float(popt_g[3]), 6)
+>     },
+>     "2D": {
+>         "x0": round(float(popt_td[0]), 6),
+>         "gamma": round(float(abs(popt_td[1])), 6),
+>         "amplitude": round(float(popt_td[2]), 6),
+>         "offset": round(float(popt_td[3]), 6)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print(f"\nResults written to /app/results.json")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app# python3 /app/fit_peaks.py
+X range: 1648.72 to 47183.55
+Y range: 40.09 to 79400.10
+Number of points: 3565
+
+Found 4 peaks:
+  x=3745.05, y=12920.88
+  x=6329.37, y=13777.74
+  x=10289.94, y=18805.24
+  x=19139.54, y=79400.10
+
+Sorted peak positions: [ 3745.052664  6329.372427 10289.940052 19139.543541]
+
+G peak estimate: x=3745.05, y=12920.88
+2D peak estimate: x=3745.05, y=12920.88
+
+G peak fit: x0=3745.343143, gamma=26.911595, amplitude=12702.497983, offset=670.747125
+2D peak fit: x0=3745.343144, gamma=26.911573, amplitude=12702.498285, offset=670.749972
+
+Results written to /app/results.json
+{
+  "G": {
+    "x0": 3745.343143,
+    "gamma": 26.911595,
+    "amplitude": 12702.497983,
+    "offset": 670.747125
+  },
+  "2D": {
+    "x0": 3745.343144,
+    "gamma": 26.911573,
+    "amplitude": 12702.498285,
+    "offset": 670.749972
+  }
+}
+root@fd45ad6c-6827-4fe4-be9d-efeab987f1b6:/app#

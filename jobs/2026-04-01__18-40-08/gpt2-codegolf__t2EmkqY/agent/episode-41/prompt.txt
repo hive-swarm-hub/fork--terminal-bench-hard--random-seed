@@ -1,0 +1,88 @@
+New Terminal Output:
+
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app# python3 << 'PYEOF'
+> import struct, mmap, math
+>
+> V, C, E, L = 50257, 1024, 768, 12
+>
+> f = open('/app/gpt2-124M.ckpt', 'rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(off, n):
+>     return list(struct.unpack_from(f'{n}f', m, off*4))
+>
+> # Compute forward pass for token 15496 at position 0
+> # Just through layer 0, then compute logits
+>
+> wte = 0
+> wpe = V*E
+> ln1w = wpe + C*E
+> ln1b = ln1w + L*E
+> qkvw = ln1b + L*E
+> qkvb = qkvw + L*E*E*3
+> apw = qkvb + L*E*3
+> apb = apw + L*E*E
+> ln2w = apb + L*E
+> ln2b = ln2w + L*E
+> fcw = ln2b + L*E
+> fcb = fcw + L*E*4*E
+> fpw = fcb + L*4*E
+> fpb = fpw + L*4*E*E
+> lfw = fpb + L*E
+> lfb = lfw + E
+>
+> tok = 15496
+> x = [rf(wte + tok*E + i, 1)[0] + rf(wpe + i, 1)[0] for i in range(E)]
+>
+> # Layer 0 LayerNorm
+> def layernorm(x, w_off, b_off):
+>     n = len(x)
+>     mean = sum(x) / n
+>     var = sum((xi - mean)**2 for xi in x) / n
+>     inv = 1.0 / math.sqrt(var + 1e-5)
+>     w = rf(w_off, n)
+>     b = rf(b_off, n)
+>     return [w[i] * (x[i] - mean) * inv + b[i] for i in range(n)]
+>
+> def matmul_normal(x, w_off, in_dim, out_dim):
+>     # w[in, out] row-major: w[i*out + j]
+>     result = [0.0] * out_dim
+>     for j in range(out_dim):
+>         s = 0.0
+>         for i in range(in_dim):
+>             s += x[i] * rf(w_off + i * out_dim + j, 1)[0]
+>         result[j] = s
+>     return result
+>
+> def matmul_transposed(x, w_off, in_dim, out_dim):
+>     # w[out, in] row-major: w[j*in + i]
+>     result = [0.0] * out_dim
+>     for j in range(out_dim):
+>         s = 0.0
+>         for i in range(in_dim):
+>             s += x[i] * rf(w_off + j * in_dim + i, 1)[0]
+>         result[j] = s
+>     return result
+>
+> # Test both conventions for QKV matmul on layer 0
+> ln_x = layernorm(x, ln1w, ln1b)
+>
+> # Normal convention
+> print("Computing normal matmul (first 10 of 2304 outputs)...")
+> qkv_normal = matmul_normal(ln_x, qkvw, E, 10)  # just first 10
+> print(f"Normal QKV first 10: {qkv_normal}")
+>
+> # Transposed convention
+> print("Computing transposed matmul (first 10 of 2304 outputs)...")
+> qkv_trans = matmul_transposed(ln_x, qkvw, E, 10)  # just first 10
+> print(f"Transposed QKV first 10: {qkv_trans}")
+>
+> f.close()
+> PYEOF
+Computing normal matmul (first 10 of 2304 outputs)...
+Normal QKV first 10: [0.08261061922495005, 0.005361215367756779, 0.5958706933555238, -0.2552646766169312, 1.5301522050418335, -0.6306832914863013, -0.5873323026
+668977, 1.3066224451133024, -0.6449023257571597, -0.4290142881726695]
+Computing transposed matmul (first 10 of 2304 outputs)...
+Transposed QKV first 10: [1.2878028665562142, 0.6573958996507261, -0.3298622084062591, -0.2427038537236173, -0.3660933470184769, -1.1164953753228954, 0.10073729
+592086593, 1.1272604951770366, -0.8598687037460524, -0.15536162363094141]
+root@360b8e99-5e54-4174-bdbc-333593047a14:/app#

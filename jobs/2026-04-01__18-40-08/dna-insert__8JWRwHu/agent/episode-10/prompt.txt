@@ -1,0 +1,165 @@
+New Terminal Output:
+
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def oligotm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse all sequences
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+>
+> primers = parse_fasta('primers.fasta')
+> fwd = primers['forward_primer']
+> rev = primers['reverse_primer']
+>
+> print(f"Forward primer: {fwd} (length={len(fwd)})")
+> print(f"Reverse primer: {rev} (length={len(rev)})")
+>
+> # Forward primer annealing part: the part that matches the input template
+> # It's the suffix of the forward primer that anneals to the template
+> fwd_anneal = None
+> for i in range(len(fwd)):
+>     candidate = fwd[i:]
+>     # Check if this matches somewhere on the input
+>     if candidate.lower() in inp.lower():
+>         fwd_anneal = candidate
+>         fwd_tail = fwd[:i]
+>         break
+>
+> print(f"\nForward primer tail: {fwd_tail} (length={len(fwd_tail)})")
+> print(f"Forward primer annealing: {fwd_anneal} (length={len(fwd_anneal)})")
+>
+> # Reverse primer annealing: the reverse complement should match the input
+> rev_rc = reverse_complement(rev)
+> print(f"\nReverse primer: {rev}")
+> print(f"Reverse primer RC: {rev_rc}")
+> assert rev_rc.lower() in inp.lower(), "Reverse primer RC not found in input!"
+> print("Reverse primer RC found in input template ✓")
+>
+> # Verify Tm
+> fwd_tm = oligotm(fwd_anneal)
+> rev_tm = oligotm(rev)
+> print(f"\nForward annealing Tm: {fwd_tm:.2f}°C")
+> print(f"Reverse annealing Tm: {rev_tm:.2f}°C")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}°C")
+>
+> assert 58 <= fwd_tm <= 72, f"Forward Tm {fwd_tm} out of range!"
+> assert 58 <= rev_tm <= 72, f"Reverse Tm {rev_tm} out of range!"
+> assert abs(fwd_tm - rev_tm) <= 5, f"Tm difference {abs(fwd_tm-rev_tm)} > 5!"
+> assert 15 <= len(fwd_anneal) <= 45, f"Forward annealing length {len(fwd_anneal)} out of range!"
+> assert 15 <= len(rev) <= 45, f"Reverse primer length {len(rev)} out of range!"
+>
+> print("\nAll constraints satisfied ✓")
+>
+> # Simulate Q5 SDM: the linear PCR product would be:
+> # fwd_tail + template_from_fwd_anneal_start_to_rev_anneal_end_on_opposite_strand
+> # For circular plasmid:
+> # Forward anneals at position where fwd_anneal starts on template
+> # Reverse anneals at position where rev_rc ends on template
+> # The product goes: fwd_primer_full + template between primers + rev_rc
+> # After ligation of the linear product, we get the circular output
+>
+> fwd_pos = inp.lower().index(fwd_anneal.lower())
+> rev_rc_pos = inp.lower().index(rev_rc.lower())
+>
+> print(f"\nForward anneals at input position: {fwd_pos}")
+> print(f"Reverse RC found at input position: {rev_rc_pos} to {rev_rc_pos + len(rev_rc) - 1}")
+>
+> # The PCR goes from fwd binding site through the template (going clockwise)
+> # to where the reverse primer binds (on the opposite strand)
+> # For Q5 SDM on circular template:
+> # Product = fwd_tail + template[fwd_pos : rev_rc_pos + len(rev_rc)] going around if needed
+> # Actually for back-to-back primers:
+> # The reverse primer binds upstream (left of insertion), pointing left
+> # The forward primer binds downstream (right of insertion), pointing right
+> # PCR amplifies the whole plasmid EXCEPT the region between them
+> # Then ligation joins the ends
+>
+> # The linear product is:
+> # 5' [fwd_tail][fwd_anneal][...template...][rev_anneal_complement] 3'
+> # Which after ligation becomes circular
+>
+> # Template from fwd_pos going clockwise to rev_rc_pos + len(rev_rc) - 1
+> # But since they're back-to-back, going from fwd_pos clockwise means going
+> # through most of the plasmid
+>
+> # Circular template: going from fwd_pos clockwise
+> if fwd_pos > rev_rc_pos:
+>     # Normal case for back-to-back: fwd is downstream, rev is upstream
+>     template_segment = inp[fwd_pos:] + inp[:rev_rc_pos + len(rev_rc)]
+> else:
+>     template_segment = inp[fwd_pos:rev_rc_pos + len(rev_rc)]
+>
+> resulting_linear = fwd_tail + template_segment
+> print(f"\nResulting linear product length: {len(resulting_linear)}")
+> print(f"Expected output length: {len(out)}")
+>
+> # The circular product should match the output
+> # Normalize both as circular sequences
+> def normalize_circular(seq):
+>     seq = seq.lower()
+>     # Find the lexicographically smallest rotation
+>     doubled = seq + seq
+>     min_rot = min(doubled[i:i+len(seq)] for i in range(len(seq)))
+>     return min_rot
+>
+> result_norm = normalize_circular(resulting_linear)
+> output_norm = normalize_circular(out)
+>
+> if result_norm == output_norm:
+>     print("\n✓✓✓ The primers will produce the correct output plasmid! ✓✓✓")
+> else:
+>     print("\n✗✗✗ MISMATCH - primers may not produce correct output! ✗✗✗")
+>     # Debug
+>     print(f"Result: ...{resulting_linear[:50]}...")
+>     print(f"Output: ...{out[:50]}...")
+> PYEOF
+Forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg (length=55)
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa (length=34)
+
+Forward primer tail: tagattagaagaagaattaagaagaagattaacagaa (length=37)
+Forward primer annealing: agcaagggcgaggagctg (length=18)
+
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+Reverse primer RC: ttgtttaactttaagaaggagatatacatatgag
+Reverse primer RC found in input template ✓
+
+Forward annealing Tm: 66.27°C
+Reverse annealing Tm: 61.31°C
+Tm difference: 4.96°C
+
+All constraints satisfied ✓
+
+Forward anneals at input position: 213
+Reverse RC found at input position: 181 to 214
+
+Resulting linear product length: 3630
+Expected output length: 3630
+
+✓✓✓ The primers will produce the correct output plasmid! ✓✓✓
+root@971533fb-bb8c-4357-ba35-cbbb0e8df135:/app#
