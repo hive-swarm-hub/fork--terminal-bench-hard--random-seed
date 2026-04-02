@@ -1,0 +1,151 @@
+New Terminal Output:
+
+root@27d433e0-eadd-4d5d-afc9-2da931ed6edd:/app# python3 << 'EOF'
+> import numpy as np
+> from scipy.signal import find_peaks
+> import matplotlib
+> matplotlib.use('Agg')
+> import matplotlib.pyplot as plt
+>
+> x_data = []
+> y_data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line: continue
+>         parts = line.split()
+>         x_val = float(parts[0].replace(',', '.'))
+>         y_val = float(parts[1].replace(',', '.'))
+>         x_data.append(x_val)
+>         y_data.append(y_val)
+>
+> x_data = np.array(x_data)
+> y_data = np.array(y_data)
+>
+> # Data is in file order (decreasing x). Let's keep it that way and
+> # check if maybe we should interpret x differently
+>
+> # Sort by x
+> sort_idx = np.argsort(x_data)
+> x_data = x_data[sort_idx]
+> y_data = y_data[sort_idx]
+>
+> # Let's check: what if x/10 gives Raman shift in cm-1?
+> raman = x_data / 10
+> print('If x/10 = Raman shift (cm-1):')
+> print(f'  Range: {raman.min():.1f} to {raman.max():.1f}')
+>
+> # Check for peaks around G (1580) and 2D (2700)
+> for target, name in [(1580, 'G'), (2700, '2D')]:
+>     target_x = target * 10
+>     mask = (x_data >= target_x - 500) & (x_data <= target_x + 500)
+>     if mask.sum() > 0:
+>         sub_x = x_data[mask]
+>         sub_y = y_data[mask]
+>         peak_i = np.argmax(sub_y)
+>         print(f'  {name} at x~{target_x}: max at x={sub_x[peak_i]:.1f} (shift={sub_x[peak_i]/10:.1f}), y={sub_y[peak_i]:.1f}, {mask.sum()} pts')
+>
+> # The peak at 19140 would be at shift 1914 - not a standard graphene peak
+> # Unless this is something else
+>
+> # Let me try yet another approach: what if the spectrometer output
+> # has x in nm (wavelength) and the file just has weird large numbers?
+> # Let me check if data could be in 0.01 nm:
+> # x_nm = x / 100
+> # Then range = 16.49 to 471.84 nm - doesn't work (too UV on low end)
+>
+> # What about if x is in Angstroms?
+> # Range = 1648.7 A to 47183.6 A = 164.9 nm to 4718.4 nm
+> # Laser at 532nm = 5320 A - but there's no data at 5320
+> # Laser at 522nm = 5220 A - no data there either
+> # The data only goes up to 4718 A = 471.8 nm
+>
+> # Hmm, what about anti-Stokes? If x is wavelength in Angstroms,
+> # the range 1648-4718 A covers 165-472 nm, which is UV to blue.
+> # For a 473nm laser (4730 A), anti-Stokes Raman would be at shorter wavelengths.
+> # But anti-Stokes is typically very weak.
+>
+> # Let me try: x is in 0.001 nm (picometers)?
+> # Then range = 1.649 nm to 47.184 nm - X-ray range, doesn't work
+>
+> # OK final attempt: what if the data file format uses period as thousands
+> # separator? Like "47.183,554644" where . is thousands sep and , is decimal?
+> # Then x = 47183.554644 (same as before)
+>
+> # I think the x-axis IS in cm-1 and represents the Raman shift.
+> # The G peak might be partially cut off (starts at 1648.7)
+> # Let me look at the full spectrum structure
+>
+> # Find ALL peaks in the data
+> peaks, props = find_peaks(y_data, prominence=500, distance=10)
+> print(f'\nAll peaks found ({len(peaks)}):')
+> for p in sorted(peaks, key=lambda i: y_data[i], reverse=True)[:20]:
+>     print(f'  x={x_data[p]:.2f}, y={y_data[p]:.2f}')
+>
+> # Let me also check the spacing pattern
+> # If x is in cm-1, the spacing should be related to the spectrometer grating
+> dx = np.diff(x_data)
+> print(f'\nSpacing statistics:')
+> print(f'  Min dx: {dx.min():.6f} at x={x_data[np.argmin(dx)]:.2f}')
+> print(f'  Max dx: {dx.max():.6f} at x={x_data[np.argmax(dx)]:.2f}')
+> print(f'  Spacing at x=1650: {dx[0]:.6f}')
+> print(f'  Spacing at x=2000: {dx[np.searchsorted(x_data, 2000)]:.6f}')
+> print(f'  Spacing at x=5000: {dx[np.searchsorted(x_data, 5000)]:.6f}')
+> print(f'  Spacing at x=10000: {dx[np.searchsorted(x_data, 10000)]:.6f}')
+> print(f'  Spacing at x=20000: {dx[min(np.searchsorted(x_data, 20000), len(dx)-1)]:.6f}')
+> print(f'  Spacing at x=40000: {dx[min(np.searchsorted(x_data, 40000), len(dx)-1)]:.6f}')
+>
+> # The key question: does spacing scale as x^2?
+> # If original measurement is in wavelength (uniform pixel spacing in lambda),
+> # then dx_wavenumber = d(1/lambda) = -dlambda/lambda^2
+> # So dx should scale as 1/x^2 ... no, wait
+> # If wavenumber = 1e7/lambda_nm, then d(wavenumber) = -1e7/lambda^2 * dlambda
+> # So for uniform dlambda, d(wavenumber) ~ wavenumber^2
+> # Let's check:
+> for x_target in [2000, 5000, 10000, 20000, 40000]:
+>     idx = min(np.searchsorted(x_data, x_target), len(dx)-1)
+>     ratio = dx[idx] / (x_data[idx]**2)
+>     print(f'  dx/x^2 at x={x_data[idx]:.0f}: {ratio:.12f}')
+> EOF
+If x/10 = Raman shift (cm-1):
+  Range: 164.9 to 4718.4
+  G at x~15800: max at x=16245.6 (shift=1624.6), y=18159.9, 15 pts
+  2D at x~27000: max at x=27413.1 (shift=2741.3), y=16505.5, 5 pts
+
+All peaks found (43):
+  x=19139.54, y=79400.10
+  x=33244.97, y=21252.73
+  x=10289.94, y=18805.24
+  x=16245.58, y=18159.87
+  x=6329.37, y=13777.74
+  x=3745.05, y=12920.88
+  x=6971.42, y=7024.81
+  x=1660.07, y=6474.28
+  x=1656.08, y=6410.16
+  x=1666.80, y=6228.42
+  x=1673.36, y=6135.36
+  x=1683.65, y=5942.17
+  x=1703.74, y=5587.30
+  x=1727.16, y=5331.08
+  x=1745.96, y=4850.70
+  x=1754.97, y=4816.16
+  x=1760.20, y=4799.31
+  x=1764.81, y=4669.48
+  x=1783.69, y=4503.99
+  x=1806.13, y=4406.46
+
+Spacing statistics:
+  Min dx: 0.260747 at x=1648.72
+  Max dx: 595.194625 at x=46588.36
+  Spacing at x=1650: 0.260747
+  Spacing at x=2000: 0.496493
+  Spacing at x=5000: 5.302818
+  Spacing at x=10000: 24.533585
+  Spacing at x=20000: 105.345456
+  Spacing at x=40000: 436.820192
+  dx/x^2 at x=2000: 0.000000124112
+  dx/x^2 at x=5003: 0.000000211885
+  dx/x^2 at x=10013: 0.000000244708
+  dx/x^2 at x=20039: 0.000000262344
+  dx/x^2 at x=40038: 0.000000272489
+root@27d433e0-eadd-4d5d-afc9-2da931ed6edd:/app#

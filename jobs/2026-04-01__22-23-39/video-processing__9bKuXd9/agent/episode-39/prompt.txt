@@ -1,0 +1,172 @@
+New Terminal Output:
+
+root@d741271a-5563-41a3-9c2f-3f89cec4e36b:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>
+>     # Collect per-frame data
+>     frame_data = []
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         diff = cv2.absdiff(gray, bg_gray)
+>
+>         # Moderate threshold for background subtraction
+>         _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological cleanup
+>         kernel = np.ones((5, 5), np.uint8)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find all foreground pixels
+>         ys, xs = np.nonzero(thresh)
+>
+>         if len(ys) > 100:
+>             cx = int(np.mean(xs))
+>             cy = int(np.mean(ys))
+>
+>             # Filter to pixels within 150px of centroid horizontally
+>             mask = np.abs(xs - cx) < 150
+>             local_ys = ys[mask]
+>             local_xs = xs[mask]
+>
+>             if len(local_ys) > 50:
+>                 bot_y = int(np.percentile(local_ys, 98))
+>                 top_y = int(np.percentile(local_ys, 2))
+>                 local_cx = int(np.mean(local_xs))
+>                 local_cy = int(np.mean(local_ys))
+>                 frame_data.append({
+>                     'frame': frame_idx,
+>                     'bot_y': bot_y,
+>                     'top_y': top_y,
+>                     'cx': local_cx,
+>                     'cy': local_cy,
+>                     'pixels': len(local_ys)
+>                 })
+>             else:
+>                 frame_data.append({'frame': frame_idx, 'bot_y': None, 'pixels': 0})
+>         else:
+>             frame_data.append({'frame': frame_idx, 'bot_y': None, 'pixels': 0})
+>
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Filter to frames with valid detections and substantial pixel count
+>     valid = [d for d in frame_data if d['bot_y'] is not None and d['pixels'] > 2000]
+>
+>     if len(valid) < 3:
+>         valid = [d for d in frame_data if d['bot_y'] is not None and d['pixels'] > 500]
+>
+>     if len(valid) < 3:
+>         valid = [d for d in frame_data if d['bot_y'] is not None]
+>
+>     if not valid:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Find continuous sequences (allow gaps up to 3 frames)
+>     sequences = []
+>     current_seq = [valid[0]]
+>     for i in range(1, len(valid)):
+>         if valid[i]['frame'] - valid[i - 1]['frame'] <= 3:
+>             current_seq.append(valid[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [valid[i]]
+>     sequences.append(current_seq)
+>
+>     # Use the longest sequence as the main athlete run
+>     main_seq = max(sequences, key=len)
+>
+>     frame_nums = [d['frame'] for d in main_seq]
+>     bot_ys = [d['bot_y'] for d in main_seq]
+>
+>     # Determine ground level from the highest bot_y values
+>     ground_level = np.percentile(bot_ys, 90)
+>
+>     # Find the minimum bot_y (peak of jump - feet highest)
+>     min_idx = int(np.argmin(bot_ys))
+>     min_bot_y = bot_ys[min_idx]
+>
+>     # Jump amplitude
+>     jump_amplitude = ground_level - min_bot_y
+>
+>     # Threshold for detecting takeoff/landing
+>     # 20% of jump amplitude below ground level
+>     air_threshold = ground_level - jump_amplitude * 0.20
+>
+>     # Find takeoff: search backward from peak
+>     # Takeoff is the last frame before peak where bot_y >= air_threshold
+>     takeoff_idx = 0
+>     for i in range(min_idx, -1, -1):
+>         if bot_ys[i] >= air_threshold:
+>             takeoff_idx = i
+>             break
+>
+>     # Find landing: search forward from peak
+>     # Landing is the first frame after peak where bot_y >= air_threshold
+>     land_idx = len(frame_nums) - 1
+>     for i in range(min_idx, len(bot_ys)):
+>         if bot_ys[i] >= air_threshold:
+>             land_idx = i
+>             break
+>
+>     takeoff_frame = int(frame_nums[takeoff_idx])
+>     land_frame = int(frame_nums[land_idx])
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame,
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@d741271a-5563-41a3-9c2f-3f89cec4e36b:/app#

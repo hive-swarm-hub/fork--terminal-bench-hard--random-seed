@@ -1,0 +1,129 @@
+New Terminal Output:
+
+root@d41ec7ac-2349-4ee4-aad7-547625d4e13d:/app# python3 << 'PYEOF'
+> import array, math
+>
+> V,C,E,H,L = 50257,1024,768,12,12
+> D = 64
+>
+> with open('gpt2-124M.ckpt','rb') as f:
+>     W = array.array('f', f.read())
+>
+> alpha = [0,1,10,11,2,3,4,5,6,7,8,9]
+> PL = 7087872
+> layer_off = {}
+> for i,li in enumerate(alpha):
+>     layer_off[li] = i*PL
+>
+> lnfb = 12*PL
+> lnfg = lnfb+768
+> wpe = lnfg+768
+> wte = wpe+1024*768
+>
+> def get(off, n):
+>     return W[off:off+n]
+>
+> def layernorm(x, g_off, b_off):
+>     n = len(x)
+>     g = get(g_off, n)
+>     b = get(b_off, n)
+>     mean = sum(x)/n
+>     var = sum((v-mean)**2 for v in x)/n
+>     std = math.sqrt(var + 1e-5)
+>     return [(x[i]-mean)/std * g[i] + b[i] for i in range(n)]
+>
+> def linear(x, w_off, b_off, out_dim):
+>     # x @ W + b, W is [in_dim, out_dim]
+>     in_dim = len(x)
+>     b = get(b_off, out_dim)
+>     out = list(b)
+>     for i in range(in_dim):
+>         w_row = get(w_off + i*out_dim, out_dim)
+>         for j in range(out_dim):
+>             out[j] += x[i] * w_row[j]
+>     return out
+>
+> def gelu(x):
+>     return [0.5*v*(1+math.tanh(math.sqrt(2/math.pi)*(v+0.044715*v**3))) for v in x]
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(v-m) for v in x]
+>     s = sum(e)
+>     return [v/s for v in e]
+>
+> # Simple test: encode a single token and run forward pass
+> # Token for "The" - let me just use token 464 ("The")
+> # Actually let me use a simple token. Token 0 should be "!" in GPT-2
+>
+> # Run forward for token 0 at position 0
+> tok = 464  # "The" in GPT-2 vocab
+> pos = 0
+>
+> # Get embedding
+> x = [W[wte + tok*E + i] + W[wpe + pos*E + i] for i in range(E)]
+> print(f"Initial embedding (first 5): {x[:5]}")
+>
+> # Run through layers
+> for layer in range(L):
+>     lo = layer_off[layer]
+>     # Within layer offsets (alphabetical: attn/c_attn/b, attn/c_attn/w, ...)
+>     cab = lo          # c_attn bias
+>     caw = lo + 2304   # c_attn weight
+>     cpb = caw + 768*2304  # c_proj bias
+>     cpw = cpb + 768       # c_proj weight
+>     l1b = cpw + 768*768   # ln_1 bias
+>     l1g = l1b + 768       # ln_1 gamma
+>     l2b = l1g + 768       # ln_2 bias
+>     l2g = l2b + 768       # ln_2 gamma
+>     fcb = l2g + 768       # fc bias
+>     fcw = fcb + 3072      # fc weight
+>     fpb = fcw + 768*3072  # proj bias
+>     fpw = fpb + 768       # proj weight
+>
+>     # Pre-norm attention
+>     h = layernorm(x, l1g, l1b)
+>     qkv = linear(h, caw, cab, 2304)
+>     q = qkv[:768]
+>     k = qkv[768:1536]
+>     v = qkv[1536:2304]
+>
+>     # Single token, so attention is trivial (just v scaled by softmax of q.k)
+>     # For single position, attention output = v (since softmax of single element = 1)
+>     attn_out = v
+>
+>     # Project
+>     proj = linear(attn_out, cpw, cpb, 768)
+>
+>     # Residual
+>     x = [x[i] + proj[i] for i in range(768)]
+>
+>     # MLP
+>     h2 = layernorm(x, l2g, l2b)
+>     fc = linear(h2, fcw, fcb, 3072)
+>     fc = gelu(fc)
+>     proj2 = linear(fc, fpw, fpb, 768)
+>     x = [x[i] + proj2[i] for i in range(768)]
+>
+>     print(f"Layer {layer} done, x[:3] = {x[:3]}")
+>
+> # Final layer norm
+> x = layernorm(x, lnfg, lnfb)
+> print(f"After final LN: {x[:5]}")
+>
+> # Logits = x @ wte.T (weight tying)
+> logits = [0.0]*V
+> for i in range(V):
+>     s = 0
+>     for j in range(E):
+>         s += x[j] * W[wte + i*E + j]
+>     logits[i] = s
+>     if i % 10000 == 0:
+>         print(f"  logit[{i}] = {s}")
+>
+> top = max(range(V), key=lambda i: logits[i])
+> print(f"Top token: {top}, logit: {logits[top]}")
+> PYEOF
+Initial embedding (first 5): [-0.08744361437857151, -0.21771634183824062, 0.06849727686494589, -0.050737722776830196, -0.049695029854774475]
+Layer 0 done, x[:3] = [0.15586406696157534, -0.7946462221477081, 0.3942758216424548]
+

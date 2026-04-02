@@ -1,0 +1,166 @@
+New Terminal Output:
+
+root@d741271a-5563-41a3-9c2f-3f89cec4e36b:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>
+>     # Collect per-frame data
+>     frame_data = []  # list of (frame_idx, bot_y, top_y, left_x, right_x, area)
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         diff = cv2.absdiff(gray, bg_gray)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological cleanup
+>         kernel = np.ones((5, 5), np.uint8)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter contours by area
+>         significant = [c for c in contours if cv2.contourArea(c) > 100]
+>         total_area = sum(cv2.contourArea(c) for c in significant)
+>
+>         if significant and total_area > 300:
+>             all_points = np.vstack(significant)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             bot_y = y + h
+>             top_y = y
+>             frame_data.append((frame_idx, bot_y, top_y, x, x + w, total_area))
+>         else:
+>             frame_data.append((frame_idx, None, None, None, None, total_area))
+>
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Find frames where athlete is detected (has valid bot_y)
+>     valid_frames = [(f, by, ty, lx, rx, a) for f, by, ty, lx, rx, a in frame_data if by is not None]
+>
+>     if not valid_frames:
+>         raise ValueError("No athlete detected in video")
+>
+>     # The athlete should appear as a continuous run of detected frames.
+>     # Find the main run of athlete presence (longest continuous sequence with large area)
+>     # Filter out noise frames that have many small scattered contours
+>
+>     # First, identify the main athlete sequence by looking for frames with
+>     # reasonable bounding box size (not spanning the entire frame width)
+>     athlete_frames = []
+>     for f, by, ty, lx, rx, a in valid_frames:
+>         width = rx - lx
+>         height = by - ty
+>         # Athlete should have reasonable proportions
+>         if width < 500 and height > 20 and a > 500:
+>             athlete_frames.append((f, by, ty, lx, rx, a))
+>
+>     if not athlete_frames:
+>         # Fallback: use all valid frames
+>         athlete_frames = valid_frames
+>
+>     # Find the longest continuous sequence of athlete frames
+>     sequences = []
+>     current_seq = [athlete_frames[0]]
+>     for i in range(1, len(athlete_frames)):
+>         if athlete_frames[i][0] - athlete_frames[i-1][0] <= 3:  # allow small gaps
+>             current_seq.append(athlete_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [athlete_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # Use the longest sequence
+>     main_seq = max(sequences, key=len)
+>
+>     # Extract bot_y values for the main sequence
+>     frame_nums = [f for f, by, ty, lx, rx, a in main_seq]
+>     bot_ys = [by for f, by, ty, lx, rx, a in main_seq]
+>     top_ys = [ty for f, by, ty, lx, rx, a in main_seq]
+>
+>     # Determine ground level: the maximum bot_y values (when feet are on ground)
+>     # Use the first few and last few frames of the sequence as ground reference
+>     ground_candidates = bot_ys[:3] + bot_ys[-3:]
+>     ground_level = np.median(ground_candidates)
+>
+>     # Also try: ground level is the maximum bot_y observed
+>     ground_level = max(ground_level, np.percentile(bot_ys, 85))
+>
+>     # Find the frame with minimum bot_y (peak of jump - feet highest)
+>     min_bot_y_idx = np.argmin(bot_ys)
+>     peak_frame = frame_nums[min_bot_y_idx]
+>     min_bot_y = bot_ys[min_bot_y_idx]
+>
+>     # The jump threshold: bot_y must be significantly below ground level
+>     jump_threshold = ground_level - (ground_level - min_bot_y) * 0.15
+>
+>     # Find takeoff: search backward from peak to find where bot_y starts dropping
+>     # Takeoff is the last frame before the jump where bot_y is near ground level
+>     takeoff_frame = frame_nums[0]  # default
+>     for i in range(min_bot_y_idx, -1, -1):
+>         if bot_ys[i] >= jump_threshold:
+>             takeoff_frame = frame_nums[i]
+>             break
+>
+>     # Find landing: search forward from peak to find where bot_y returns to ground level
+>     land_frame = frame_nums[-1]  # default
+>     for i in range(min_bot_y_idx, len(bot_ys)):
+>         if bot_ys[i] >= jump_threshold:
+>             land_frame = frame_nums[i]
+>             break
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame,
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@d741271a-5563-41a3-9c2f-3f89cec4e36b:/app#

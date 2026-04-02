@@ -1,0 +1,99 @@
+New Terminal Output:
+
+root@e3bbade8-b740-4c0f-acc2-cef501387be1:/app# sleep 15 && python3 << 'PYEOF'
+> import socket, struct, time
+> from PIL import Image
+>
+> # Connect to VNC server
+> s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+> s.connect(('localhost', 5901))
+>
+> # Read server protocol version
+> version = s.recv(12)
+> print('Server version:', version)
+>
+> # Send client version
+> s.send(b'RFB 003.008\n')
+>
+> # Security types
+> num_types = struct.unpack('B', s.recv(1))[0]
+> print(f'Num security types: {num_types}')
+> types = s.recv(num_types)
+> print(f'Security types: {list(types)}')
+>
+> # Select no auth (type 1)
+> s.send(struct.pack('B', 1))
+>
+> # Security result
+> result = struct.unpack('>I', s.recv(4))[0]
+> print(f'Security result: {result}')
+>
+> # Client init (shared=1)
+> s.send(struct.pack('B', 1))
+>
+> # Server init
+> data = s.recv(24)
+> width, height = struct.unpack('>HH', data[:4])
+> print(f'Framebuffer: {width}x{height}')
+> bpp, depth, big_endian, true_color = struct.unpack('BBBB', data[4:8])
+> print(f'BPP: {bpp}, Depth: {depth}, BigEndian: {big_endian}, TrueColor: {true_color}')
+> rmax, gmax, bmax = struct.unpack('>HHH', data[8:14])
+> rshift, gshift, bshift = struct.unpack('BBB', data[14:17])
+> print(f'R: max={rmax} shift={rshift}, G: max={gmax} shift={gshift}, B: max={bmax} shift={bshift}')
+>
+> # Read name length and name
+> name_len = struct.unpack('>I', data[20:24])[0]
+> name = s.recv(name_len)
+> print(f'Name: {name}')
+>
+> # Request framebuffer update
+> # Message type 3 = FramebufferUpdateRequest
+> msg = struct.pack('>BBHHHH', 3, 0, 0, 0, width, height)
+> s.send(msg)
+>
+> # Read framebuffer update response
+> time.sleep(2)
+> header = s.recv(4)
+> msg_type, padding, num_rects = struct.unpack('>BBH', header)
+> print(f'Update: type={msg_type}, num_rects={num_rects}')
+>
+> # Read rectangles
+> img = Image.new('RGB', (width, height), (0, 0, 0))
+> for i in range(num_rects):
+>     rect_header = s.recv(12)
+>     x, y, w, h, encoding = struct.unpack('>HHHHi', rect_header)
+>     print(f'Rect {i}: x={x}, y={y}, w={w}, h={h}, encoding={encoding}')
+>
+>     if encoding == 0:  # Raw encoding
+>         bytes_per_pixel = bpp // 8
+>         total_bytes = w * h * bytes_per_pixel
+>         pixel_data = b''
+>         while len(pixel_data) < total_bytes:
+>             chunk = s.recv(min(total_bytes - len(pixel_data), 65536))
+>             if not chunk:
+>                 break
+>             pixel_data += chunk
+>         print(f'  Received {len(pixel_data)} bytes (expected {total_bytes})')
+>
+>         # Convert pixels to image
+>         for py in range(h):
+>             for px in range(w):
+>                 offset = (py * w + px) * bytes_per_pixel
+>                 if offset + bytes_per_pixel <= len(pixel_data):
+>                     pixel = pixel_data[offset:offset+bytes_per_pixel]
+>                     if bytes_per_pixel == 4:
+>                         b_val = pixel[0]
+>                         g_val = pixel[1]
+>                         r_val = pixel[2]
+>                         img.putpixel((x+px, y+py), (r_val, g_val, b_val))
+>     elif encoding == -223:  # DesktopSize pseudo-encoding
+>         print(f'  Desktop size: {w}x{h}')
+>     else:
+>         print(f'  Unknown encoding {encoding}, skipping')
+>         break
+>
+> img.save('/tmp/vnc_screen.png')
+> print(f'Saved VNC screenshot: {img.size}')
+> s.close()
+> PYEOF
+

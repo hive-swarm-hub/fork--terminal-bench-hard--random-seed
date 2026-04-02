@@ -1,0 +1,349 @@
+New Terminal Output:
+
+>           const aligned = addr & ~3; const bo = addr & 3;
+>           const mv = this.mem.readU32(aligned); const rv = this.getRegU(rt);
+>           let r; switch(bo) {
+>             case 0: r = mv; break;
+>             case 1: r = (rv & 0xFF000000) | (mv >>> 8); break;
+>             case 2: r = (rv & 0xFFFF0000) | (mv >>> 16); break;
+>             case 3: r = (rv & 0xFFFFFF00) | (mv >>> 24); break;
+>           }
+>           this.setReg(rt, r); }
+>         break;
+>       case 0x28: // SB
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           this.mem.writeU8(addr, this.getReg(rt) & 0xFF); }
+>         break;
+>       case 0x29: // SH
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           this.mem.writeU16(addr, this.getReg(rt) & 0xFFFF); }
+>         break;
+>       case 0x2A: // SWL
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           const aligned = addr & ~3; const bo = addr & 3;
+>           const mv = this.mem.readU32(aligned); const rv = this.getRegU(rt);
+>           let r; switch(bo) {
+>             case 0: r = (mv & 0xFFFFFF00) | (rv >>> 24); break;
+>             case 1: r = (mv & 0xFFFF0000) | (rv >>> 16); break;
+>             case 2: r = (mv & 0xFF000000) | (rv >>> 8); break;
+>             case 3: r = rv; break;
+>           }
+>           this.mem.writeU32(aligned, r >>> 0); }
+>         break;
+>       case 0x2B: // SW
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           this.mem.writeU32(addr, this.getRegU(rt)); }
+>         break;
+>       case 0x2E: // SWR
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           const aligned = addr & ~3; const bo = addr & 3;
+>           const mv = this.mem.readU32(aligned); const rv = this.getRegU(rt);
+>           let r; switch(bo) {
+>             case 0: r = rv; break;
+>             case 1: r = (mv & 0x000000FF) | (rv << 8); break;
+>             case 2: r = (mv & 0x0000FFFF) | (rv << 16); break;
+>             case 3: r = (mv & 0x00FFFFFF) | (rv << 24); break;
+>           }
+>           this.mem.writeU32(aligned, r >>> 0); }
+>         break;
+>
+>       case 0x30: // LL (load linked - treat as LW)
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           this.setReg(rt, this.mem.readU32(addr) | 0); }
+>         break;
+>       case 0x38: // SC (store conditional - treat as SW, always succeed)
+>         { const addr = ((this.getReg(rs) + simm16) | 0) >>> 0;
+>           this.mem.writeU32(addr, this.getRegU(rt));
+>           this.setReg(rt, 1); } // success
+>         break;
+>
+>       case 0x2F: // CACHE
+>         break; // no-op
+>       case 0x33: // PREF
+>         break; // no-op
+>
+>       default:
+>         console.error(`Unknown opcode=0x${opcode.toString(16)} at PC=0x${pc.toString(16)} instr=0x${instr.toString(16)}`);
+>         this.running = false;
+>         return;
+>     }
+>
+>     // Normal (non-branch) instruction: advance PC
+>     this.pc = this.nextPC;
+>   }
+>
+>   // Handle branch: execute delay slot, then jump to target
+>   _doBranch() {
+>     const branchTarget = this.nextPC;
+>     // Execute delay slot instruction
+>     this.pc = (this.pc + 4) | 0;
+>     this.inDelaySlot = true;
+>     this.execOne();
+>     this.inDelaySlot = false;
+>     // Now set PC to branch target (delay slot may have changed nextPC for non-branch instrs,
+>     // but we override with the branch target)
+>     this.pc = branchTarget;
+>   }
+>
+>   run(maxSteps) {
+>     let steps = 0;
+>     while (this.running && steps < maxSteps) {
+>       this.execOne();
+>       steps++;
+>     }
+>     return steps;
+>   }
+> }
+>
+> // ===================== SYSCALL HANDLER =====================
+> class SyscallHandler {
+>   constructor(mem) {
+>     this.mem = mem;
+>     this.files = new Map();
+>     this.fds = new Map();
+>     this.nextFd = 5;
+>     for (let i = 0; i < 5; i++) {
+>       this.fds.set(i, { path: '__reserved__', position: 0, mode: 0 });
+>     }
+>     this._loadDoomWad();
+>   }
+>
+>   _loadDoomWad() {
+>     const wadPath = path.join(process.cwd(), 'doom.wad');
+>     try {
+>       const data = fs.readFileSync(wadPath);
+>       this.files.set('doom.wad', { data: Buffer.from(data), size: data.length });
+ =>       console.log(`Loaded doom.wad (${data.length} bytes) into in-memory filesystem`);
+>     } catch (e) {
+>       console.error(`Failed to load doom.wad: ${e.message}`);
+>     }
+>   }
+>
+>   _normalizePath(p) {
+>     if (p.startsWith('/')) {
+>       if (p.startsWith('/tmp/')) return p;
+>       p = p.substring(1);
+>     }
+>     if (p === '') p = '/';
+>     return p;
+>   }
+>
+>   handle(cpu) {
+>     const sn = cpu.getRegU(2); // $v0 = syscall number
+>     const a0 = cpu.getRegU(4);
+>     const a1 = cpu.getRegU(5);
+>     const a2 = cpu.getRegU(6);
+>     const a3 = cpu.getRegU(7);
+>     let result = 0;
+>
+>     switch (sn) {
+>       case 0: result = this._sysRead(a0, a1, a2); break;
+>       case 1: result = this._sysWrite(a0, a1, a2); break;
+>       case 2: result = this._sysOpen(a0, a1, a2); break;
+>       case 3: result = this._sysClose(a0); break;
+as>       case 8: result = this._sysLseek(a0, a1 | 0, a2); break;
+>       case 60:
+>         console.log(`EXIT with code ${a0 | 0}`);
+>         process.exit(a0 | 0);
+>         break;
+>       case 74: result = 0; break; // fsync
+>       case 82: result = this._sysRename(a0, a1); break;
+>       case 83: result = 0; break; // mkdir
+>       case 87: result = this._sysUnlink(a0); break;
+>       case 201: // time
+>         result = Math.floor(Date.now() / 1000);
+>         if (a0 !== 0) this.mem.writeU32(a0, result);
+>         break;
+>       default:
+>         console.error(`Unknown syscall: ${sn} at PC=0x${cpu.pc.toString(16)}`);
+>         result = -22;
+>         break;
+>     }
+>
+>     cpu.setReg(2, result); // $v0
+>     cpu.setReg(7, 0);     // $a3 = 0 (no error)
+>   }
+>
+>   _sysRead(fd, bufAddr, count) {
+>     const fdInfo = this.fds.get(fd);
+>     if (!fdInfo) return -9;
+>     const file = this.files.get(fdInfo.path);
+>     if (!file) return -9;
+>     const available = file.size - fdInfo.position;
+>     const toRead = Math.min(count, available);
+>     if (toRead <= 0) return 0;
+>     for (let i = 0; i < toRead; i++) {
+>       this.mem.writeU8(bufAddr + i, file.data[fdInfo.position + i]);
+>     }
+>     fdInfo.position += toRead;
+>     return toRead;
+>   }
+>
+>   _sysWrite(fd, bufAddr, count) {
+>     if (fd === 0 || fd === 1 || fd === 2) {
+>       const buf = this.mem.readBuffer(bufAddr, count);
+>       process.stdout.write(buf);
+>       return count;
+>     }
+>     const fdInfo = this.fds.get(fd);
+>     if (!fdInfo) return -9;
+>     let file = this.files.get(fdInfo.path);
+>     if (!file) {
+>       file = { data: Buffer.alloc(0), size: 0 };
+>       this.files.set(fdInfo.path, file);
+>     }
+>     const buf = this.mem.readBuffer(bufAddr, count);
+>     const neededSize = fdInfo.position + count;
+>     if (neededSize > file.data.length) {
+>       const newCap = Math.max(neededSize, file.data.length * 2, 4096);
+>       const newData = Buffer.alloc(newCap);
+>       file.data.copy(newData);
+>       file.data = newData;
+>     }
+>     buf.copy(file.data, fdInfo.position);
+>     fdInfo.position += count;
+>     if (fdInfo.position > file.size) file.size = fdInfo.position;
+>     if (fdInfo.path.startsWith('/tmp/')) this._syncToRealFS(fdInfo.path);
+>     return count;
+>   }
+>
+>   _sysOpen(pathAddr, flags, mode) {
+>     const rawPath = this.mem.readString(pathAddr);
+>     const filePath = this._normalizePath(rawPath);
+>     const O_CREAT = 64, O_TRUNC = 512, O_APPEND = 1024;
+>     let file = this.files.get(filePath);
+>     if (!file) {
+>       if (flags & O_CREAT) {
+>         file = { data: Buffer.alloc(4096), size: 0 };
+>         this.files.set(filePath, file);
+>       } else {
+>         return -2;
+>       }
+>     }
+>     if ((flags & O_TRUNC) && file) file.size = 0;
+>     const fd = this.nextFd++;
+>     const position = (flags & O_APPEND) ? file.size : 0;
+>     this.fds.set(fd, { path: filePath, position: position, mode: flags & 3 });
+>     return fd;
+>   }
+>
+>   _sysClose(fd) {
+>     if (fd < 5) return 0;
+>     if (!this.fds.has(fd)) return -9;
+>     const fdInfo = this.fds.get(fd);
+>     if (fdInfo.path.startsWith('/tmp/')) this._syncToRealFS(fdInfo.path);
+>     this.fds.delete(fd);
+>     return 0;
+>   }
+>
+>   _sysLseek(fd, offset, whence) {
+>     const fdInfo = this.fds.get(fd);
+>     if (!fdInfo) return -9;
+>     const file = this.files.get(fdInfo.path);
+>     if (!file) return -9;
+>     switch (whence) {
+>       case 0: fdInfo.position = offset; break;
+>       case 1: fdInfo.position += offset; break;
+>       case 2: fdInfo.position = file.size + offset; break;
+>       default: return -22;
+>     }
+>     if (fdInfo.position < 0) fdInfo.position = 0;
+>     return fdInfo.position;
+>   }
+>
+>   _sysRename(oldPathAddr, newPathAddr) {
+>     const oldPath = this._normalizePath(this.mem.readString(oldPathAddr));
+>     const newPath = this._normalizePath(this.mem.readString(newPathAddr));
+>     const file = this.files.get(oldPath);
+>     if (!file) return -2;
+>     this.files.set(newPath, file);
+>     this.files.delete(oldPath);
+>     for (const [fd, info] of this.fds) {
+>       if (info.path === oldPath) info.path = newPath;
+>     }
+>     return 0;
+>   }
+>
+>   _sysUnlink(pathAddr) {
+>     const filePath = this._normalizePath(this.mem.readString(pathAddr));
+>     if (!this.files.has(filePath)) return -2;
+>     this.files.delete(filePath);
+>     return 0;
+>   }
+>
+>   _syncToRealFS(filePath) {
+>     const file = this.files.get(filePath);
+>     if (!file) return;
+>     try {
+>       const dir = path.dirname(filePath);
+>       fs.mkdirSync(dir, { recursive: true });
+>       fs.writeFileSync(filePath, file.data.slice(0, file.size));
+>     } catch (e) {
+>       console.error(`Failed to sync ${filePath}: ${e.message}`);
+>     }
+>   }
+> }
+>
+> // ===================== MAIN =====================
+> function main() {
+>   const mem = new SparseMemory();
+>   const entry = loadELF('doomgeneric_mips', mem);
+>   const cpu = new MIPSCPU(mem);
+>   cpu.pc = entry;
+>   const STACK_TOP = 0x7F000000;
+>   cpu.setReg(29, STACK_TOP); // $sp
+>   cpu.setReg(30, STACK_TOP); // $fp
+>   cpu.setReg(28, 0);         // $gp
+>   const handler = new SyscallHandler(mem);
+>   cpu.syscallHandler = (c) => handler.handle(c);
+>   console.log(`Starting MIPS execution at PC=0x${entry.toString(16)}`);
+>   const BATCH = 50000000;
+>   while (cpu.running) {
+>     cpu.run(BATCH);
+>     if (cpu.instructionCount % (BATCH * 10) === 0) {
+>       console.error(`Executed ${cpu.instructionCount} instructions, PC=0x${(cpu.pc >>> 0).toString(16)}`);
+>     }
+>   }
+>   console.log(`Stopped after ${cpu.instructionCount} instructions`);
+> }
+>
+> main();
+> VMEOF
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# node vm.js > /tmp/vm_output.log 2>&1 &
+[1] 2396
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# sleep 10 && tail -30 /tmp/vm_output.log
+Trying IWAD file:tnt.wad
+Trying IWAD file:doom.wad
+W_Init: Init WADfiles.
+ adding doom.wad
+Using ./.savegame/ for savegames
+===========================================================================
+                            DOOM Shareware
+CK
+===========================================================================
+ Doom Generic is free software, covered by the GNU General Public
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+M_Init: Init miscellaneous info.
+R_Init: Init DOOM refresh daemon - ...................
+P_Init: Init Playloop state.
+S_Init: Setting up sound.
+D_CheckNetGame: Checking network game status.
+startskill 2  deathmatch: 0  startmap: 1  startepisode: 1
+player 1 of 1 (1 nodes)
+Emulating the behavior of the 'Doom 1.9' executable.
+HU_Init: Setting up heads up display.
+ST_Init: Init status bar.
+DoomGeneric title: DOOM Shareware
+I_InitGraphics: framebuffer: x_res: 640, y_res: 400, x_virtual: 640, y_virtual: 400, bpp: 32
+I_InitGraphics: framebuffer: RGBA: 8888, red_off: 16, green_off: 8, blue_off: 0, transp_off: 24
+I_InitGraphics: DOOM screen size: w x h: 320 x 200
+I_InitGraphics: Auto-scaling factor: 2
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# kill -9 2396 2>/dev/null; kill -9 2129 2>/dev/null
+[1]+  Killed                  node vm.js > /tmp/vm_output.log 2>&1
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# wc -l /app/vm.js
+802 /app/vm.js
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app#

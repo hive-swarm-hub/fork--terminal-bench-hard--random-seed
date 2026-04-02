@@ -1,0 +1,162 @@
+New Terminal Output:
+END__31__'
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# cat doomgeneric/doomgeneric/Makefile
+################################################################
+#
+# $Id:$
+#
+# $Log:$
+#
+
+ifeq ($(V),1)
+        VB=''
+else
+        VB=@
+endif
+
+SRC_DOOM = dummy.o am_map.o doomdef.o doomstat.o dstrings.o d_event.o d_items.o d_iwad.o d_loop.o d_main.o d_mode.o d_net.o f_finale.o f_wipe.o g_game.o hu_lib.
+o hu_stuff.o info.o i_cdmus.o i_endoom.o i_joystick.o i_scale.o i_sound.o i_system.o i_timer.o memio.o m_argv.o m_bbox.o m_cheat.o m_config.o m_controls.o m_fix
+ed.o m_menu.o m_misc.o m_random.o p_ceilng.o p_doors.o p_enemy.o p_floor.o p_inter.o p_lights.o p_map.o p_maputl.o p_mobj.o p_plats.o p_pspr.o p_saveg.o p_setup
+.o p_sight.o p_spec.o p_switch.o p_telept.o p_tick.o p_user.o r_bsp.o r_data.o r_draw.o r_main.o r_plane.o r_segs.o r_sky.o r_things.o sha1.o sounds.o statdump.
+o st_lib.o st_stuff.o s_sound.o tables.o v_video.o wi_stuff.o w_checksum.o w_file.o w_main.o w_wad.o z_zone.o w_file_stdc.o i_input.o i_video.o doomgeneric.o do
+omgeneric_img.o my_stdlib.o
+
+# MIPS toolchain configuration
+CC=clang
+LLVM_TARGET=-target mips-unknown-linux-gnu
+MIPS_AS=mips-linux-gnu-as
+MIPS_LD=mips-linux-gnu-ld
+LLC=llc
+
+# MIPS-specific compilation flags
+MIPS_CFLAGS=-Wno-unknown-attributes -Wno-incompatible-library-redeclaration -nostdinc -isystem .
+MIPS_LLC_FLAGS=-march=mipsel -mcpu=mips32r2 -mattr=+nooddspreg -relocation-model=static -filetype=asm -O3
+MIPS_AS_FLAGS=-march=mips32r2 -EL
+MIPS_LD_FLAGS=-EL
+
+# Base compilation flags
+CFLAGS+=-ggdb3 -Os -Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE -fno-builtin -DMY_STDLIB -DARCH_MIPS -Wno-int-conversion
+
+# Remove -lc since we're providing our own libc
+LIBS+=-lm
+
+# subdirectory for objects
+OBJDIR=build
+LLVMDIR=$(OBJDIR)/llvm
+ASMDIR=$(OBJDIR)/asm
+OUTPUT=doomgeneric_mips
+
+# Convert source file list to various representations needed for the build process
+SRCS=$(SRC_DOOM:.o=.c)
+LL_FILES=$(addprefix $(LLVMDIR)/, $(SRC_DOOM:.o=.ll))
+ASM_FILES=$(addprefix $(ASMDIR)/, $(SRC_DOOM:.o=.s))
+OBJ_FILES=$(addprefix $(OBJDIR)/, $(SRC_DOOM))
+
+all: $(OUTPUT)
+
+clean:
+        rm -rf $(OBJDIR) $(LLVMDIR) $(ASMDIR)
+        rm -f $(OUTPUT)
+        rm -f $(OUTPUT).map
+        rm -f *.ll
+
+# Create necessary directories
+$(OBJDIR) $(LLVMDIR) $(ASMDIR):
+        mkdir -p $@
+
+# Step 1: Generate LLVM IR for each source file
+$(LLVMDIR)/%.ll: %.c | $(LLVMDIR)
+        @echo [Generating LLVM IR for $<]
+        $(VB)$(CC) $(LLVM_TARGET) $(MIPS_CFLAGS) $(CFLAGS) -S -emit-llvm -include my_stdlib.h $< -o $@
+
+# Step 2: Convert LLVM IR to MIPS assembly
+$(ASMDIR)/%.s: $(LLVMDIR)/%.ll | $(ASMDIR)
+        @echo [Converting IR to MIPS assembly for $<]
+        $(VB)$(LLC) $(MIPS_LLC_FLAGS) $< -o $@
+
+# Step 3: Assemble MIPS assembly to object files
+$(OBJDIR)/%.o: $(ASMDIR)/%.s | $(OBJDIR)
+        @echo [Assembling $<]
+        $(VB)$(MIPS_AS) $(MIPS_AS_FLAGS) $< -o $@
+
+# Step 4: Link all object files into the final executable
+$(OUTPUT): $(OBJ_FILES)
+        @echo [Linking $@]
+        $(VB)$(MIPS_LD) $(MIPS_LD_FLAGS) $(OBJ_FILES) -o $@ -Map $(OUTPUT).map
+        @echo [Size]
+        -$(CROSS_COMPILE)size $(OUTPUT)
+
+# Special rule for my_stdlib.c to ensure it's compiled first
+$(LLVMDIR)/my_stdlib.ll: my_stdlib.c my_stdlib.h | $(LLVMDIR)
+        @echo [Generating LLVM IR for custom stdlib]
+        $(VB)$(CC) $(LLVM_TARGET) $(MIPS_CFLAGS) $(CFLAGS) -S -emit-llvm $< -o $@
+
+# Combined IR target (generates all IR files)
+ir-output: $(LL_FILES)
+        @echo [LLVM IR files generated]
+
+# Combined IR into a single file
+combined-ir: $(LL_FILES)
+        @echo [Combining LLVM IR files]
+        $(VB)llvm-link $^ -o doom-combined.ll
+
+# Target to check for problematic includes
+check-includes:
+        @echo "Checking problematic includes..."
+        @find . -name "*.c" -o -name "*.h" | xargs grep -l "#include <" || echo "No system includes found!"
+        @echo "Done"
+
+# Print debug information
+print:
+        @echo "Source files: $(SRCS)"
+        @echo "LLVM IR files: $(LL_FILES)"
+        @echo "ASM files: $(ASM_FILES)"
+        @echo "Object files: $(OBJ_FILES)"
+
+# Phony targets
+.PHONY: all clean ir-output combined-ir check-includes print
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# grep -n 'brk\|sbrk\|SYS_brk\|heap\|HEAP' doomgeneric/doomgeneric/my_stdlib.c | head -20
+949:#define HEAP_SIZE (1024 * 1024 * 1024)  // 1 GB static heap
+950:static unsigned char heap[HEAP_SIZE] __attribute__((aligned(64)));  // Cache line aligned
+951:static size_t heap_pos = 0;  // Current position in the heap
+1044:    // No free block found, allocate from the heap
+1045:    if (heap_pos + total_size > HEAP_SIZE)
+1048:    // Create a new block at the current heap position
+1049:    block_header_t* new_block = (block_header_t*)(heap + heap_pos);
+1051:    heap_pos += total_size;
+1065:    if ((void*)block < (void*)heap || (void*)block >= (void*)(heap + heap_pos))
+1097:        // Allocate pool from the heap
+1098:        fixed_pools[i].memory = heap + heap_pos;
+1110:        heap_pos += pool_size;
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app# grep -n 'SYS_' doomgeneric/doomgeneric/my_stdlib.c | head -30
+9:#define SYS_read    0
+10:#define SYS_write   1
+11:#define SYS_open    2
+12:#define SYS_close   3
+13:#define SYS_lseek   8
+14:#define SYS_fsync   74
+15:#define SYS_rename  82
+16:#define SYS_mkdir   83
+17:#define SYS_unlink  87
+234:        int real_fd = real_syscall6(SYS_open, (long)wad_path, O_RDONLY, 0, 0, 0, 0);
+237:            off_t file_size = real_syscall6(SYS_lseek, real_fd, 0, SEEK_END, 0, 0, 0);
+238:            real_syscall6(SYS_lseek, real_fd, 0, SEEK_SET, 0, 0, 0); // Reset to beginning
+245:                    ssize_t bytes_read = real_syscall6(SYS_read, real_fd, (long)wad_data, file_size, 0, 0, 0);
+270:            real_syscall6(SYS_close, real_fd, 0, 0, 0, 0, 0);
+438:// SYS_read: Read from a file
+465:// SYS_write: Write to a file
+517:// SYS_open: Open a file
+594:// SYS_close: Close a file
+604:// SYS_lseek: Reposition read/write file offset
+635:// SYS_fsync: Synchronize a file's in-memory state (no-op for in-memory FS)
+646:// SYS_unlink: Delete a file
+704:// SYS_rename: Rename a file
+799:// SYS_mkdir: Create a directory
+850:        case SYS_read: {
+857:        case SYS_write: {
+864:        case SYS_open: {
+871:        case SYS_close: {
+876:        case SYS_lseek: {
+883:        case SYS_fsync: {
+888:        case SYS_rename: {
+root@71ccdfe6-cd40-4523-af66-d0125512c281:/app#

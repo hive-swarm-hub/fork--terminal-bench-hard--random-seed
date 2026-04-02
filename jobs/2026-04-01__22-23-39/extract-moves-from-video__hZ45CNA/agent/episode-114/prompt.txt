@@ -1,0 +1,165 @@
+New Terminal Output:
+
+root@1ac6efde-fd43-4a4d-bf39-6e1eff942acc:/app# export PATH="/root/.deno/bin:$PATH"
+root@1ac6efde-fd43-4a4d-bf39-6e1eff942acc:/app# cat << 'EOF' > /tmp/download_video.py
+> import json
+> import subprocess
+> import urllib.request
+> import urllib.parse
+> import re
+> import os
+>
+> os.environ['PATH'] = '/root/.deno/bin:' + os.environ['PATH']
+>
+> # Step 1: Generate PO token using bgutil
+> print('Generating PO token...')
+> result = subprocess.run(
+>     ['deno', 'run', '--allow-all', 'src/generate_once.ts'],
+>     capture_output=True, text=True, timeout=120,
+>     cwd='/root/bgutil-ytdlp-pot-provider/server'
+> )
+> print('stdout:', result.stdout[-200:])
+> print('stderr:', result.stderr[-200:])
+>
+> # Parse the JSON output
+> lines = result.stdout.strip().split('\n')
+> json_line = lines[-1]
+> data = json.loads(json_line)
+> visitor_data = data['contentBinding']
+> po_token_general = data['poToken']
+> print(f'Got visitor data: {visitor_data[:50]}...')
+> print(f'Got PO token: {po_token_general[:50]}...')
+>
+> # Step 2: Generate video-specific PO token
+> print('\nGenerating video-specific PO token...')
+> result2 = subprocess.run(
+>     ['deno', 'run', '--allow-all', 'src/generate_once.ts', '-c', 'ZCbvyPbhRfA'],
+>     capture_output=True, text=True, timeout=120,
+>     cwd='/root/bgutil-ytdlp-pot-provider/server'
+> )
+> lines2 = result2.stdout.strip().split('\n')
+> json_line2 = lines2[-1]
+> data2 = json.loads(json_line2)
+> po_token_video = data2['poToken']
+> print(f'Got video PO token: {po_token_video[:50]}...')
+>
+> # Step 3: Try innertube API directly
+> print('\nTrying innertube API...')
+>
+> # First get the player JS to extract the signature timestamp
+> url = 'https://www.youtube.com/watch?v=ZCbvyPbhRfA'
+> req = urllib.request.Request(url, headers={
+>     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+>     'Accept-Language': 'en-US,en;q=0.9',
+> })
+> try:
+>     resp = urllib.request.urlopen(req, timeout=30)
+>     html = resp.read().decode('utf-8')
+>     print(f'Got HTML page: {len(html)} bytes')
+>
+>     # Extract innertube API key
+>     api_key_match = re.search(r'"INNERTUBE_API_KEY":"([^"]+)"', html)
+>     if api_key_match:
+>         api_key = api_key_match.group(1)
+>         print(f'API key: {api_key}')
+>     else:
+>         api_key = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+>         print(f'Using default API key: {api_key}')
+>
+>     # Extract client version
+>     cv_match = re.search(r'"clientVersion":"([^"]+)"', html)
+>     client_version = cv_match.group(1) if cv_match else '2.20240101.00.00'
+>     print(f'Client version: {client_version}')
+>
+> except Exception as e:
+>     print(f'Error fetching page: {e}')
+>     api_key = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+>     client_version = '2.20240101.00.00'
+>
+> # Step 4: Call player API with PO token
+> player_url = f'https://www.youtube.com/youtubei/v1/player?key={api_key}&prettyPrint=false'
+> player_body = json.dumps({
+>     'videoId': 'ZCbvyPbhRfA',
+>     'context': {
+>         'client': {
+>             'clientName': 'WEB',
+>             'clientVersion': client_version,
+>             'hl': 'en',
+>             'gl': 'US',
+>             'visitorData': visitor_data,
+>         }
+>     },
+>     'serviceIntegrityDimensions': {
+>         'poToken': po_token_video
+>     }
+> }).encode('utf-8')
+>
+> req2 = urllib.request.Request(player_url, data=player_body, headers={
+>     'Content-Type': 'application/json',
+>     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+>     'X-Goog-Visitor-Id': visitor_data,
+>     'Origin': 'https://www.youtube.com',
+>     'Referer': 'https://www.youtube.com/',
+> })
+>
+> try:
+>     resp2 = urllib.request.urlopen(req2, timeout=30)
+>     player_data = json.loads(resp2.read().decode('utf-8'))
+>
+>     status = player_data.get('playabilityStatus', {}).get('status', 'unknown')
+>     print(f'Playability status: {status}')
+>
+>     if status == 'OK':
+>         # Get streaming data
+>         streaming = player_data.get('streamingData', {})
+>         formats = streaming.get('formats', []) + streaming.get('adaptiveFormats', [])
+>         print(f'Found {len(formats)} formats')
+>
+>         # Find best mp4 video with audio
+>         best = None
+>         for f in streaming.get('formats', []):
+>             if f.get('mimeType', '').startswith('video/mp4'):
+>                 if best is None or f.get('height', 0) > best.get('height', 0):
+>                     best = f
+>
+>         if best:
+>             video_url = best.get('url', '')
+>             if not video_url:
+>                 sc = best.get('signatureCipher', '')
+>                 print(f'Need to decipher signature: {sc[:100]}')
+>             else:
+>                 print(f'Downloading video: {best.get("qualityLabel", "unknown")} ({best.get("width", "?")}x{best.get("height", "?")})')
+>                 # Download
+>                 req3 = urllib.request.Request(video_url, headers={
+>                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+>                 })
+>                 resp3 = urllib.request.urlopen(req3, timeout=300)
+>                 with open('/app/zork_video.mp4', 'wb') as f:
+>                     while True:
+>                         chunk = resp3.read(1024*1024)
+>                         if not chunk:
+>                             break
+>                         f.write(chunk)
+>                 print(f'Downloaded to /app/zork_video.mp4')
+>                 print(f'File size: {os.path.getsize("/app/zork_video.mp4")} bytes')
+>         else:
+>             print('No suitable format found')
+>             print('Available formats:')
+>             for f in formats[:5]:
+>                 print(f'  {f.get("qualityLabel", "?")} {f.get("mimeType", "?")}')
+>     else:
+>         reason = player_data.get('playabilityStatus', {}).get('reason', 'unknown')
+>         print(f'Cannot play: {reason}')
+>         # Save full response for debugging
+>         with open('/tmp/player_response.json', 'w') as f:
+>             json.dump(player_data, f, indent=2)
+>         print('Saved response to /tmp/player_response.json')
+> except Exception as e:
+>     print(f'Error: {e}')
+>     import traceback
+>     traceback.print_exc()
+>
+> EOF
+root@1ac6efde-fd43-4a4d-bf39-6e1eff942acc:/app# python3 /tmp/download_video.py
+Generating PO token...
+

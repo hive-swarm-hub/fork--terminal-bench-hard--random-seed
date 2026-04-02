@@ -1,0 +1,201 @@
+New Terminal Output:
+
+root@a8ca2d8b-c15d-4f31-b48e-624540fd0609:/app# cat > /tmp/design_primers.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rev_comp(seq):
+>     comp = {'a':'t','t':'a','g':'c','c':'g',
+>             'A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     """Get melting temperature using oligotm with specified flags."""
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].lower()
+> output_seq = seqs['output'].lower()
+>
+> # The insertion: 39 bases at position 213
+> insertion_point = 213
+> insertion_seq = "agtagattagaagaagaattaagaagaagattaacagaa"
+>
+> # Verify
+> assert input_seq[:insertion_point] + insertion_seq + input_seq[insertion_point:] == output_seq
+> print("Insertion verified!")
+> print(f"Insertion point: {insertion_point}")
+> print(f"Insertion: {insertion_seq}")
+> print(f"Insertion length: {len(insertion_seq)}")
+>
+> # For Q5 SDM insertion:
+> # Forward primer: insertion_seq (5' tail) + annealing region downstream of insertion point
+> # Reverse primer: reverse complement of region upstream of insertion point
+>
+> # The input is circular, so we can wrap around
+> def get_circular_base(seq, pos):
+>     return seq[pos % len(seq)]
+>
+> def get_circular_substr(seq, start, length):
+>     result = []
+>     for i in range(length):
+>         result.append(seq[(start + i) % len(seq)])
+>     return ''.join(result)
+>
+> # Compute Tm for all possible forward annealing lengths (15-45)
+> print("\n--- Forward primer annealing Tm ---")
+> fwd_tms = {}
+> for length in range(15, 46):
+>     # Forward annealing: starts at insertion_point, goes downstream
+>     anneal = get_circular_substr(input_seq, insertion_point, length)
+>     if len(anneal) < 2 or len(anneal) > 36:
+>         # oligotm limit is 36
+>         continue
+>     try:
+>         tm = get_tm(anneal)
+>         fwd_tms[length] = (anneal, tm)
+>         if 58 <= tm <= 72:
+>             print(f"  Length {length}: Tm={tm:.1f} seq={anneal}")
+>     except:
+>         pass
+>
+> # Compute Tm for all possible reverse annealing lengths (15-45)
+> print("\n--- Reverse primer annealing Tm ---")
+> rev_tms = {}
+> for length in range(15, 46):
+>     # Reverse annealing: ends at insertion_point, goes upstream
+>     # The reverse primer anneals to the top strand from (insertion_point - length) to insertion_point
+>     # But it's written as reverse complement
+>     start = insertion_point - length
+>     if start < 0:
+>         start = start % len(input_seq)
+>     anneal_top = get_circular_substr(input_seq, (insertion_point - length) % len(input_seq), length)
+>     # The reverse primer sequence is the reverse complement of this
+>     rev_primer_seq = rev_comp(anneal_top)
+>     # But for Tm calculation, we use the annealing portion which is the same as anneal_top
+>     # (Tm is the same for a sequence and its reverse complement)
+>     if len(anneal_top) < 2 or len(anneal_top) > 36:
+>         continue
+>     try:
+>         tm = get_tm(anneal_top)
+>         rev_tms[length] = (anneal_top, rev_primer_seq, tm)
+>         if 58 <= tm <= 72:
+>             print(f"  Length {length}: Tm={tm:.1f} anneal={anneal_top} primer={rev_primer_seq}")
+>     except:
+>         pass
+>
+> # Find best pair
+> print("\n--- Finding best primer pairs ---")
+> best_pair = None
+> best_diff = 999
+> for fwd_len, (fwd_anneal, fwd_tm) in fwd_tms.items():
+>     if not (58 <= fwd_tm <= 72):
+>         continue
+>     for rev_len, (rev_anneal_top, rev_primer, rev_tm) in rev_tms.items():
+>         if not (58 <= rev_tm <= 72):
+>             continue
+>         tm_diff = abs(fwd_tm - rev_tm)
+>         if tm_diff <= 5:
+>             if best_pair is None or tm_diff < best_diff:
+>                 best_diff = tm_diff
+>                 best_pair = (fwd_len, fwd_anneal, fwd_tm, rev_len, rev_anneal_top, rev_primer, rev_tm)
+>
+> if best_pair:
+>     fwd_len, fwd_anneal, fwd_tm, rev_len, rev_anneal_top, rev_primer, rev_tm = best_pair
+>     # Full forward primer = insertion + annealing
+>     fwd_primer = insertion_seq + fwd_anneal
+>     print(f"\nBest pair (Tm diff = {abs(fwd_tm - rev_tm):.1f}):")
+>     print(f"  Forward primer: {fwd_primer}")
+>     print(f"    Annealing part: {fwd_anneal} (length={fwd_len}, Tm={fwd_tm:.1f})")
+>     print(f"    Tail (insertion): {insertion_seq}")
+>     print(f"  Reverse primer: {rev_primer}")
+>     print(f"    Annealing to top strand: {rev_anneal_top} (length={rev_len}, Tm={rev_tm:.1f})")
+>     print(f"  Tm difference: {abs(fwd_tm - rev_tm):.1f}")
+>
+>     # Write output
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{fwd_primer.upper()}\n")
+>         f.write(f">reverse_primer\n{rev_primer.upper()}\n")
+>     print("\nPrimers written to primers.fasta")
+>
+>     # Verify the PCR product would give the correct output
+>     # The PCR amplifies the entire plasmid with the insertion added
+>     print("\n--- Verification ---")
+>     # Forward anneals at position insertion_point going right
+>     # Reverse anneals at position (insertion_point - rev_len) going left (as rev comp)
+>     # The product should be: insertion + input[insertion_point:] + input[:insertion_point]
+>     # When circularized, this gives the output plasmid
+>     product_linear = insertion_seq + input_seq[insertion_point:] + input_seq[:insertion_point]
+>     # This should be a rotation of the output sequence
+>     output_doubled = output_seq + output_seq
+>     if product_linear in output_doubled:
+>         print("SUCCESS: Product matches output plasmid (as circular)")
+>     else:
+>         print("WARNING: Product does not match output plasmid")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@a8ca2d8b-c15d-4f31-b48e-624540fd0609:/app# python3 /tmp/design_primers.py
+Insertion verified!
+Insertion point: 213
+Insertion: agtagattagaagaagaattaagaagaagattaacagaa
+Insertion length: 39
+
+--- Forward primer annealing Tm ---
+  Length 15: Tm=59.5 seq=agcaagggcgaggag
+  Length 16: Tm=63.5 seq=agcaagggcgaggagc
+  Length 17: Tm=65.1 seq=agcaagggcgaggagct
+  Length 18: Tm=66.3 seq=agcaagggcgaggagctg
+  Length 19: Tm=67.9 seq=agcaagggcgaggagctgt
+  Length 20: Tm=68.2 seq=agcaagggcgaggagctgtt
+  Length 21: Tm=68.7 seq=agcaagggcgaggagctgttc
+  Length 22: Tm=70.1 seq=agcaagggcgaggagctgttca
+  Length 23: Tm=70.7 seq=agcaagggcgaggagctgttcac
+
+--- Reverse primer annealing Tm ---
+  Length 30: Tm=58.1 anneal=gtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaac
+  Length 31: Tm=59.3 anneal=tgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaaca
+  Length 32: Tm=59.7 anneal=ttgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaacaa
+  Length 33: Tm=60.1 anneal=tttgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaacaaa
+  Length 34: Tm=60.5 anneal=ttttgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaacaaaa
+  Length 35: Tm=60.8 anneal=attttgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaacaaaat
+  Length 36: Tm=61.1 anneal=aattttgtttaactttaagaaggagatatacatatg primer=catatgtatatctccttcttaaagttaaacaaaatt
+
+--- Finding best primer pairs ---
+
+Best pair (Tm diff = 0.2):
+  Forward primer: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag
+    Annealing part: agcaagggcgaggag (length=15, Tm=59.5)
+    Tail (insertion): agtagattagaagaagaattaagaagaagattaacagaa
+  Reverse primer: catatgtatatctccttcttaaagttaaacaa
+    Annealing to top strand: ttgtttaactttaagaaggagatatacatatg (length=32, Tm=59.7)
+  Tm difference: 0.2
+
+Primers written to primers.fasta
+
+--- Verification ---
+SUCCESS: Product matches output plasmid (as circular)
+root@a8ca2d8b-c15d-4f31-b48e-624540fd0609:/app#

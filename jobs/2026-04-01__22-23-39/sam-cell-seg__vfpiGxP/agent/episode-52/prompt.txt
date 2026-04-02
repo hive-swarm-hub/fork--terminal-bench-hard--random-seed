@@ -1,0 +1,382 @@
+New Terminal Output:
+
+>     mask_uint8 = mask.astype(np.uint8) * 255
+>     contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>     if len(contours) == 0:
+>         return None, None
+>
+>     # Take the largest contour
+>     largest_contour = max(contours, key=cv2.contourArea)
+>
+>     # Extract x and y coordinates
+>     coords = largest_contour.squeeze()
+>     if coords.ndim == 1:
+>         # Single point contour, not useful
+>         return None, None
+>
+>     coords_x = coords[:, 0].tolist()
+>     coords_y = coords[:, 1].tolist()
+>
+>     # Close the polyline (first point = last point)
+>     if coords_x[0] != coords_x[-1] or coords_y[0] != coords_y[-1]:
+>         coords_x.append(coords_x[0])
+>         coords_y.append(coords_y[0])
+>
+>     return coords_x, coords_y
+>
+>
+ > def main():
+>     parser = argparse.ArgumentParser(description='Convert cell masks to polylines using MobileSAM')
+>     parser.add_argument('weights_path', type=str, help='Path to MobileSAM weights')
+>     parser.add_argument('output_path', type=str, help='Path to output CSV file')
+>     parser.add_argument('rgb_path', type=str, help='Path to RGB image')
+>     parser.add_argument('csv_path', type=str, help='Path to metadata CSV')
+>     args = parser.parse_args()
+>
+>     # Load the image
+>     image = cv2.imread(args.rgb_path)
+>     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+>     h, w = image.shape[:2]
+>
+>     # Load MobileSAM
+>     device = 'cpu'
+>     model_type = 'vit_t'
+>     sam = sam_model_registry[model_type](checkpoint=args.weights_path)
+>     sam.to(device)
+>     sam.eval()
+>
+>     predictor = SamPredictor(sam)
+>     predictor.set_image(image_rgb)
+>
+>     # Load CSV
+>     df = pd.read_csv(args.csv_path)
+>
+>     num_masks = len(df)
+>
+>     # Step 1: Generate SAM masks and scores for all cells
+>     all_masks = []
+>     all_scores = []
+>
+>     for idx in tqdm(range(num_masks), desc='Generating SAM masks'):
+>         row = df.iloc[idx]
+>         xmin, ymin, xmax, ymax = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+>
+>         # Use bounding box as prompt
+>         input_box = np.array([xmin, ymin, xmax, ymax])
+>
+>         masks, scores, logits = predictor.predict(
+>             point_coords=None,
+>             point_labels=None,
+>             box=input_box[None, :],
+>             multimask_output=True,
+>         )
+>
+>         # Select the mask with the highest score
+>         best_idx = np.argmax(scores)
+>         best_mask = masks[best_idx]  # Boolean array (H, W)
+>         best_score = scores[best_idx]
+>
+>         all_masks.append(best_mask)
+>         all_scores.append(best_score)
+>
+>     # Step 2: Resolve overlaps - assign each pixel to the mask with highest score
+>     # Create a label map where each pixel is assigned to the highest-scoring mask
+>     all_masks_np = np.stack(all_masks, axis=0)  # (N, H, W)
+>     all_scores_np = np.array(all_scores)  # (N,)
+>
+>     # Create score-weighted mask array
+>     score_map = all_masks_np.astype(np.float32) * all_scores_np[:, None, None]  # (N, H, W)
+>
+>     # For each pixel, find which mask has the highest score (among masks that claim it)
+>     # Where no mask claims a pixel, the max score is 0
+>     max_score_per_pixel = np.max(score_map, axis=0)  # (H, W)
+>     winner_per_pixel = np.argmax(score_map, axis=0)  # (H, W)
+>
+>     # Create resolved masks
+>     resolved_masks = []
+>     for i in range(num_masks):
+>         # A pixel belongs to mask i if:
+>         # 1. mask i claims it (all_masks_np[i] is True)
+>         # 2. mask i has the highest score for that pixel
+>         resolved = (winner_per_pixel == i) & (all_masks_np[i])
+>         resolved_masks.append(resolved)
+>
+>     # Step 3: Ensure each mask is contiguous (keep only the largest connected component)
+>     final_masks = []
+>     for i in range(num_masks):
+>         mask = resolved_masks[i].astype(np.uint8)
+>         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+>
+>         if num_labels <= 1:
+>             # No foreground or only one component
+>             final_masks.append(mask.astype(bool))
+>             continue
+>
+>         # Find the largest component (skip background label 0)
+>         # Use the bounding box center to pick the best component
+>         row = df.iloc[i]
+>         cx = (int(row['xmin']) + int(row['xmax'])) / 2
+>         cy = (int(row['ymin']) + int(row['ymax'])) / 2
+>
+>         # Find component closest to bbox center, weighted by area
+>         best_label = -1
+>         best_area = 0
+>         for label_id in range(1, num_labels):
+>             area = stats[label_id, cv2.CC_STAT_AREA]
+>             if area > best_area:
+>                 best_area = area
+>                 best_label = label_id
+>
+>         final_mask = (labels == best_label).astype(bool)
+>         final_masks.append(final_mask)
+>
+>     # Step 4: Convert masks to polylines and update DataFrame
+>     new_xmin = []
+>     new_ymin = []
+>     new_xmax = []
+>     new_ymax = []
+>     new_coords_x = []
+>     new_coords_y = []
+>     new_types = []
+>
+>     for i in tqdm(range(num_masks), desc='Converting to polylines'):
+>         mask = final_masks[i]
+>
+>         coords_x, coords_y = mask_to_polyline(mask)
+>
+>         if coords_x is None or len(coords_x) < 3:
+>             # Fallback: keep original coordinates if mask conversion fails
+>             row = df.iloc[i]
+>             coords_x = parse_coords(row['coords_x'])
+>             coords_y = parse_coords(row['coords_y'])
+>             new_xmin.append(int(row['xmin']))
+>             new_ymin.append(int(row['ymin']))
+>             new_xmax.append(int(row['xmax']))
+>             new_ymax.append(int(row['ymax']))
+>             new_coords_x.append(','.join(str(c) for c in coords_x))
+>             new_coords_y.append(','.join(str(c) for c in coords_y))
+>             new_types.append(row['type'])
+>         else:
+>             xmin_val = min(coords_x)
+>             xmax_val = max(coords_x)
+>             ymin_val = min(coords_y)
+>             ymax_val = max(coords_y)
+>             new_xmin.append(xmin_val)
+>             new_ymin.append(ymin_val)
+>             new_xmax.append(xmax_val)
+>             new_ymax.append(ymax_val)
+>             new_coords_x.append(','.join(str(c) for c in coords_x))
+>             new_coords_y.append(','.join(str(c) for c in coords_y))
+>             new_types.append('polyline')
+>
+>     # Update the DataFrame
+>     df['xmin'] = new_xmin
+>     df['ymin'] = new_ymin
+>     df['xmax'] = new_xmax
+>     df['ymax'] = new_ymax
+>     df['coords_x'] = new_coords_x
+>     df['coords_y'] = new_coords_y
+>     df['type'] = new_types
+>
+>     # Ensure output directory exists
+>     output_dir = os.path.dirname(args.output_path)
+>     if output_dir:
+>         os.makedirs(output_dir, exist_ok=True)
+>
+>     # Save the output CSV
+>     df.to_csv(args.output_path, index=False)
+>     print(f'Saved output to {args.output_path}')
+>     print(f'Total masks: {num_masks}')
+>     print(f'All polyline: {(df["type"] == "polyline").all()}')
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPT_EOF
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_r
+gb.png /app/demo_metadata.csv 2>&1 | tee /tmp/run_output.log
+Traceback (most recent call last):
+  File "/app/convert_masks.py", line 5, in <module>
+    import cv2
+  File "/usr/local/lib/python3.11/site-packages/cv2/__init__.py", line 181, in <module>
+    bootstrap()
+  File "/usr/local/lib/python3.11/site-packages/cv2/__init__.py", line 153, in bootstrap
+    native_module = importlib.import_module("cv2")
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ImportError: libGL.so.1: cannot open shared object file: No such file or directory
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# pip uninstall -y opencv-python && pip install opencv-python-headless --no-cache-dir 2>&1 | tail -5
+Found existing installation: opencv-python 4.13.0.92
+Uninstalling opencv-python-4.13.0.92:
+  Successfully uninstalled opencv-python-4.13.0.92
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a v
+irtual environment instead: https://pip.pypa.io/warnings/venv
+Successfully installed opencv-python-headless-4.13.0.92
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a v
+irtual environment instead: https://pip.pypa.io/warnings/venv
+
+[notice] A new release of pip is available: 24.0 -> 26.0.1
+[notice] To update, run: pip install --upgrade pip
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_r
+gb.png /app/demo_metadata.csv 2>&1 | tee /tmp/run_output.log
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_5m_2
+24. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_11m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+Generating SAM masks:   0%|          | 0/48 [00:00<?, ?it/s]^C
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_r
+gb.png /app/demo_metadata.csv > /tmp/run_output.log 2>&1 &
+[1] 2900
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# echo $!
+2900
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# sleep 30 && cat /tmp/run_output.log
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_5m_2
+24. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_11m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# sleep 60 && cat /tmp/run_output.log | tail -20
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_5m_2
+24. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_11m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# jobs
+[1]+  Running                 cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png /app/demo_m
+etadata.csv > /tmp/run_output.log 2>&1 &
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# ps aux | grep python
+root          83  0.0  0.0  16132 11784 ?        S    05:23   0:00 python3 /tmp/daytona_repl_worker.py
+root         188  0.0  0.0 106320 23132 pts/1    Sl+  05:23   0:00 /usr/bin/python3 /usr/bin/asciinema rec --stdin /logs/agent/recording.cast
+root         190  0.0  0.0  32556 15596 pts/1    S+   05:23   0:00 /usr/bin/python3 /usr/bin/asciinema rec --stdin /logs/agent/recording.cast
+root         191  0.0  0.0  32568 16108 pts/1    S+   05:23   0:00 /usr/bin/python3 /usr/bin/asciinema rec --stdin /logs/agent/recording.cast
+root        2902 96.1  0.0 14793540 548100 pts/0 Rl   05:30   2:51 python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /ap
+p/demo_rgb.png /app/demo_metadata.csv
+root        3502  0.0  0.0   3940  1544 pts/0    S+   05:33   0:00 grep python
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# ls -la /app/output/ 2>/dev/null
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# sleep 60 && jobs && tail -5 /tmp/run_output.log
+[1]+  Running                 cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png /app/demo_m
+etadata.csv > /tmp/run_output.log 2>&1 &
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# sleep 120 && jobs && ls -la /app/output/ 2>/dev/null && tail -10 /tmp/run_output.log
+^C
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# kill -9 2902 2>/dev/null; kill %1 2>/dev/null
+[1]+  Terminated              cd /app && python3 convert_masks.py /tmp/MobileSAM/weights/mobile_sam.pt /app/output/demo_output.csv /app/demo_rgb.png /app/demo_m
+etadata.csv > /tmp/run_output.log 2>&1
+root@82babcdf-feb7-48fb-9af7-d88871d388f5:/app# python3 -c "
+> import time
+> import numpy as np
+> import cv2
+> import torch
+>
+> print('Loading model...')
+> t0 = time.time()
+> from mobile_sam import sam_model_registry, SamPredictor
+> model_type = 'vit_t'
+> sam = sam_model_registry[model_type](checkpoint='/tmp/MobileSAM/weights/mobile_sam.pt')
+> sam.to('cpu')
+> sam.eval()
+> print(f'Model loaded in {time.time()-t0:.1f}s')
+>
+> print('Loading image...')
+> image = cv2.imread('/app/demo_rgb.png')
+> image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+> print(f'Image shape: {image_rgb.shape}')
+>
+> print('Setting image...')
+> t1 = time.time()
+> predictor = SamPredictor(sam)
+> with torch.no_grad():
+>     predictor.set_image(image_rgb)
+> print(f'set_image done in {time.time()-t1:.1f}s')
+>
+> print('Testing predict...')
+> t2 = time.time()
+> input_box = np.array([43, 67, 139, 107])
+> masks, scores, logits = predictor.predict(point_coords=None, point_labels=None, box=input_box[None, :], multimask_output=True)
+> print(f'predict done in {time.time()-t2:.1f}s')
+> print(f'masks shape: {masks.shape}, scores: {scores}')
+> " 2>&1
+Loading model...
+/usr/local/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via tim
+m.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/usr/local/lib/python3.11/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.mode
+ls
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_5m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_5m_2
+24. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_11m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_11m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_224 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_384 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/tmp/MobileSAM/mobile_sam/modeling/tiny_vit_sam.py:656: UserWarning: Overwriting tiny_vit_21m_512 in registry with mobile_sam.modeling.tiny_vit_sam.tiny_vit_21m
+_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+Model loaded in 21.7s
+Loading image...
+Image shape: (355, 374, 3)
+Setting image...
+
