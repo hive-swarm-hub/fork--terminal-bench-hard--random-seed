@@ -339,6 +339,22 @@ class AgentHarness(Terminus2):
         except asyncio.TimeoutError:
             raise BlockError(f"Infrastructure API blocked for {timeout_sec}s")
 
+    @staticmethod
+    def _sanitize_command(keystrokes: str) -> str:
+        """Rewrite known-dangerous command patterns at infrastructure level.
+
+        This prevents terminal stalls without relying on the model following
+        prompt instructions (which V4 and V9 proved is unreliable).
+        """
+        import re
+        stripped = keystrokes.strip()
+        # tail -f → tail -100 (tail -f blocks terminal permanently)
+        if re.match(r'^tail\s+(-[nN]\s*\d+\s+)?-f\b', stripped):
+            keystrokes = re.sub(r'-f\b', '-100', keystrokes, count=1)
+        elif re.match(r'^tail\s+--follow\b', stripped):
+            keystrokes = keystrokes.replace('--follow', '-100', 1)
+        return keystrokes
+
     async def _execute_commands(
         self,
         commands: list[Command],
@@ -357,6 +373,10 @@ class AgentHarness(Terminus2):
         if not commands:
             output = await session.get_incremental_output()
             return False, self._limit_output_length(output)
+
+        # Sanitize dangerous commands before execution
+        for cmd in commands:
+            cmd.keystrokes = self._sanitize_command(cmd.keystrokes)
 
         total_duration = sum(c.duration_sec for c in commands)
         max_duration = max(c.duration_sec for c in commands)
