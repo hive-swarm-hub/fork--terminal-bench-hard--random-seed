@@ -1,0 +1,166 @@
+New Terminal Output:
+
+root@eef99810-3032-441e-a45a-659ddbee9360:/app# python3 << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g',
+>             'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input']
+> output_seq = seqs['output']
+>
+> primers = parse_fasta('primers.fasta')
+> fwd_primer = primers['primer_forward']
+> rev_primer = primers['primer_reverse']
+>
+> print(f"Forward primer: {fwd_primer}")
+> print(f"Reverse primer: {rev_primer}")
+>
+> # Find where forward primer anneals to input template
+> # The 3' end of the forward primer should anneal to the input
+> # Try different tail lengths
+> fwd_anneal = None
+> fwd_tail = None
+> for tail_len in range(0, len(fwd_primer)):
+>     candidate = fwd_primer[tail_len:]
+>     if len(candidate) >= 15 and candidate.lower() in input_seq.lower():
+>         fwd_tail = fwd_primer[:tail_len]
+>         fwd_anneal = candidate
+>         break
+>
+> if fwd_anneal:
+>     fwd_pos = input_seq.lower().index(fwd_anneal.lower())
+>     print(f"\nFwd annealing: '{fwd_anneal}' at input pos {fwd_pos}-{fwd_pos+len(fwd_anneal)-1}")
+>     print(f"Fwd 5' tail (insertion): '{fwd_tail}'")
+> else:
+>     print("ERROR: Forward primer doesn't anneal to input!")
+>
+> # Find where reverse primer anneals to input template
+> # Reverse primer is reverse complement of template region
+> rev_anneal_on_template = reverse_complement(rev_primer)
+> if rev_anneal_on_template.lower() in input_seq.lower():
+>     rev_pos = input_seq.lower().index(rev_anneal_on_template.lower())
+>     print(f"\nRev annealing region on template: '{rev_anneal_on_template}' at input pos {rev_pos}-{rev_pos+len(rev_anneal_on_template)-1}")
+> else:
+>     # Check circular - maybe it wraps around
+>     doubled = input_seq + input_seq
+>     if rev_anneal_on_template.lower() in doubled.lower():
+>         rev_pos = doubled.lower().index(rev_anneal_on_template.lower())
+>         print(f"\nRev annealing (circular) at pos {rev_pos}-{rev_pos+len(rev_anneal_on_template)-1}")
+>     else:
+>         print(f"ERROR: Reverse primer doesn't anneal to input!")
+>         print(f"Rev complement: {rev_anneal_on_template}")
+>
+> # Simulate Q5 SDM product
+> # The PCR product is: fwd_primer + template_between_primers + rc(rev_primer)
+> # For circular template, the region amplified goes from fwd_anneal_start around the circle to rev_anneal_end
+> # Product = fwd_tail + template[fwd_pos:] + template[:rev_pos+len(rev_anneal_on_template)]
+> # Wait, for back-to-back primers on circular template:
+> # The product after KLD ligation is:
+> # fwd_tail + template[fwd_pos : fwd_pos + len going around circle to rev_pos+len(rev)]
+>
+> # Actually simpler: the linearized PCR product is:
+> # fwd_primer_full_sequence + template_between_primers_going_forward + reverse_complement(rev_primer)
+> # Then KLD ligates the ends to re-circularize
+>
+> # The template region copied: from end of fwd_anneal to start of rev_anneal (going around the circle)
+> fwd_end = fwd_pos + len(fwd_anneal)  # first position after fwd annealing
+> rev_start = rev_pos  # first position of rev annealing on template
+>
+> print(f"\nFwd annealing ends at input pos: {fwd_end}")
+> print(f"Rev annealing starts at input pos: {rev_start}")
+> print(f"Rev annealing ends at input pos: {rev_pos + len(rev_anneal_on_template)}")
+>
+> # The PCR product (linear) from 5' to 3' of the top strand:
+> # = fwd_primer_full + template[fwd_end : ... going around circle ... : rev_start]
+> # Since primers are back-to-back, the region between them (going forward from fwd)
+> # is the entire plasmid minus the region between rev_end and fwd_start
+>
+> # For back-to-back: rev anneals just before fwd on the template
+> # Region NOT copied = nothing (they're adjacent)
+> # Region copied = entire rest of the plasmid
+>
+> rev_end = rev_pos + len(rev_anneal_on_template)  # position after rev annealing
+> print(f"\nRev annealing end pos: {rev_end}, Fwd annealing start pos: {fwd_pos}")
+> print(f"Gap between rev_end and fwd_start: {fwd_pos - rev_end}")
+>
+> # The circular product after ligation:
+> # fwd_tail + fwd_anneal + template[fwd_end to rev_start going around] + rev_anneal_on_template
+> # = fwd_tail + template[fwd_pos to rev_end going around the circle]
+>
+> if fwd_pos >= rev_end:
+>     # Normal case: rev ends before fwd starts (or they're adjacent)
+>     between = input_seq[fwd_end:rev_start] if fwd_end <= rev_start else input_seq[fwd_end:] + input_seq[:rev_start]
+>     # Actually for circular: template from fwd_end going forward to rev_start
+>     if fwd_end <= rev_start:
+>         middle = input_seq[fwd_end:rev_start]
+>     else:
+>         middle = input_seq[fwd_end:] + input_seq[:rev_start]
+>
+>     # Linear PCR product (top strand, 5'->3'):
+>     pcr_product = fwd_primer + middle + reverse_complement(rev_primer)
+>     # After KLD ligation, this becomes circular
+>     # The circular sequence is the same as pcr_product
+>
+>     print(f"\nPCR product length: {len(pcr_product)}")
+>     print(f"Output sequence length: {len(output_seq)}")
+>
+>     # Check if pcr_product matches output (as circular sequence)
+>     # For circular comparison, check if one is a rotation of the other
+>     doubled_output = output_seq + output_seq
+>     doubled_pcr = pcr_product + pcr_product
+>
+>     if pcr_product.lower() in doubled_output.lower():
+>         print("SUCCESS: PCR product matches output sequence (circular)!")
+>     elif output_seq.lower() in doubled_pcr.lower():
+>         print("SUCCESS: Output sequence found in PCR product (circular)!")
+>     else:
+>         print("MISMATCH: PCR product does not match output!")
+>         # Debug
+>         print(f"PCR first 50: {pcr_product[:50]}")
+>         print(f"Out first 50: {output_seq[:50]}")
+>         # Try to find where they differ
+>         for rot in range(len(pcr_product)):
+>             rotated = pcr_product[rot:] + pcr_product[:rot]
+>             if rotated.lower() == output_seq.lower():
+>                 print(f"Match found at rotation {rot}!")
+>                 break
+> else:
+>     print(f"Overlap between primers on template!")
+>
+> PYEOF
+Forward primer: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+Reverse primer: ctcatatgtatatctccttcttaaagttaaacaa
+
+Fwd annealing: 'agcaagggcgaggagctg' at input pos 213-230
+Fwd 5' tail (insertion): 'tagattagaagaagaattaagaagaagattaacagaa'
+
+Rev annealing region on template: 'ttgtttaactttaagaaggagatatacatatgag' at input pos 181-214
+
+Fwd annealing ends at input pos: 231
+Rev annealing starts at input pos: 181
+Rev annealing ends at input pos: 215
+
+Rev annealing end pos: 215, Fwd annealing start pos: 213
+Gap between rev_end and fwd_start: -2
+Overlap between primers on template!
+root@eef99810-3032-441e-a45a-659ddbee9360:/app#

@@ -1,0 +1,182 @@
+New Terminal Output:
+
+root@acdadb09-31de-4914-86ec-459ba2361240:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+  bot_smooth = np.convolve(bot_array, kern> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         print(f"Error: Could not open video {video_path}")
+>         sys.exit(1)
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+>
+>     # Read first frame as background (guaranteed no runner)
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     ret, bg_frame = cap.read()
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>
+>     # Process all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     frame_data = []  # list of dicts per frame
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray - bg_gray)
+>
+>         # Threshold
+>         mask = (diff > 40).astype(np.uint8) * 255
+>
+>         # Morphological cleanup
+>         kernel = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>         mask = cv2.dilate(mask, kernel, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter contours by minimum area
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 500]
+>
+>         entry = {
+>             'frame': frame_idx,
+>             'bot': -1,
+>             'top': -1,
+>             'cx': -1,
+>             'area': 0,
+>             'bbox': None
+>         }
+>
+>         if big_contours:
+>             # Use the largest single contour as the runner
+>             largest = max(big_contours, key=cv2.contourArea)
+>             area = cv2.contourArea(largest)
+>             x, y, w, h = cv2.boundingRect(largest)
+>             entry['bot'] = y + h
+>             entry['top'] = y
+>             entry['cx'] = x + w // 2
+>             entry['area'] = area
+>             entry['bbox'] = (x, y, w, h)
+>
+>         frame_data.append(entry)
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Step 1: Find the runner's trajectory
+>     # The runner should be a large contour moving consistently across the frame
+>     # Filter frames where runner is detected with reasonable area
+>     runner_candidates = [d for d in frame_data if d['area'] > 2000]
+>
+>     if not runner_candidates:
+>         runner_candidates = [d for d in frame_data if d['area'] > 1000]
+>
+>     if not runner_candidates:
+>         print("Error: No runner detected")
+>         sys.exit(1)
+>
+>     # Step 2: Find the main continuous sequence of the runner
+>     # The runner should appear in a continuous block of frames
+>     # Group consecutive frames
+>     groups = []
+>     current_group = [runner_candidates[0]]
+>     for i in range(1, len(runner_candidates)):
+>         if runner_candidates[i]['frame'] - runner_candidates[i-1]['frame'] <= 3:
+>             current_group.append(runner_candidates[i])
+>         else:
+>             groups.append(current_group)
+>             current_group = [runner_candidates[i]]
+>     groups.append(current_group)
+>
+>     # The runner's main sequence is the longest group
+>     main_group = max(groups, key=len)
+>
+>     # Step 3: Within the main group, find ground level and detect jump
+>     bot_values = [d['bot'] for d in main_group]
+>
+>     # Ground level is the maximum bottom_y (when feet are on ground)
+>     # Use a robust estimate - the highest bottom values
+>     ground_level = np.percentile(bot_values, 90)
+>
+>     # Find the minimum bottom_y (peak of jump)
+>     min_bot = min(bot_values)
+>     min_bot_frame = main_group[bot_values.index(min_bot)]['frame']
+>
+>     # The jump should show a clear dip in bottom_y
+>     # Find the parabolic dip: bottom_y goes from ground level, dips, returns to ground level
+>
+>     # Smooth the bottom_y values to reduce noise
+>     bot_array = np.array(bot_values, dtype=np.float64)
+>     # Simple moving average with window 3
+>     if len(bot_array) > 3:
+>         kernel_smooth = np.ones(3) / 3
+>         bot_smooth = np.convolve(bot_array, kernel_smooth, mode='same')
+>     else:
+>         bot_smooth = bot_array
+>
+>     # Find the frame with minimum smoothed bottom_y (peak of jump)
+>     peak_idx = np.argmin(bot_smooth)
+>     peak_frame = main_group[peak_idx]['frame']
+>
+>     # Takeoff: search backwards from peak to find where bot starts decreasing from ground level
+>     # Landing: search forwards from peak to find where bot returns to ground level
+>
+>     ground_threshold = ground_level - 20  # Allow some tolerance
+>
+>     # Find takeoff: last frame before peak where bot >= ground_threshold
+>     takeoff_idx = peak_idx
+>     for i in range(peak_idx - 1, -1, -1):
+>         if bot_smooth[i] >= ground_threshold:
+>             takeoff_idx = i
+>             break
+>
+>     # Find landing: first frame after peak where bot >= ground_threshold
+>     land_idx = peak_idx
+>     for i in range(peak_idx + 1, len(bot_smooth)):
+>         if bot_smooth[i] >= ground_threshold:
+>             land_idx = i
+>             break
+>
+>     takeoff_frame = main_group[takeoff_idx]['frame']
+>     land_frame = main_group[land_idx]['frame']
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@acdadb09-31de-4914-86ec-459ba2361240:/app#

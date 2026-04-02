@@ -1,0 +1,280 @@
+New Terminal Output:
+
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app# cat > /app/gpt2.c << 'CEOF'
+> #include <stdio.h>
+> #include <stdlib.h>
+> #include <string.h>
+> #include <math.h>
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+>
+> #define V 50257
+> #define T 1024
+> #define C 768
+> #define L 12
+i> #define H 12
+> #define HS 64
+> #define PL 7087872
+>
+> float *W; // all weights
+> // Per-layer offsets within the file (in floats)
+> // Layout per layer (alphabetical TF names):
+> // c_attn/b(2304), c_attn/w(C*3C), c_proj/b(C), c_proj/w(C*C),
+> // ln_1/b(C), ln_1/g(C), ln_2/b(C), ln_2/g(C),
+> // mlp/c_fc/b(4C), mlp/c_fc/w(C*4C), mlp/c_proj/b(C), mlp/c_proj/w(4C*C)
+> // Then: ln_f/b(C), ln_f/g(C), wpe(T*C), wte(V*C)
+>
+> float x[T][C], kc[L][T][C], vc[L][T][C];
+> float buf[4*C], buf2[4*C], att[T];
+>
+> void ln(float *o, float *inp, float *g, float *b) {
+>     float m=0,v=0;
+>     for(int i=0;i<C;i++) m+=inp[i];
+>     m/=C;
+>     for(int i=0;i<C;i++) v+=(inp[i]-m)*(inp[i]-m);
+>     v=1.0f/sqrtf(v/C+1e-5f);
+>     for(int i=0;i<C;i++) o[i]=(inp[i]-m)*v*g[i]+b[i];
+> }
+>
+> void matmul(float *o, float *inp, float *w, int n, int m) {
+>     for(int j=0;j<m;j++) {
+>         float s=0;
+>         for(int i=0;i<n;i++) s+=inp[i]*w[i*m+j];
+>         o[j]=s;
+>     }
+> }
+>
+> float gelu(float x) {
+>     return 0.5f*x*(1.0f+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));
+> }
+>
+> int forward(int *toks, int ntok) {
+>     // Get pointers
+n(li>     int lnfb=L*PL, lnfg=lnfb+C, wpe=lnfg+C, wte=wpe+T*C;
+>
+>     // Initialize all positions
+>     for(int t=0;t<ntok;t++)
+>         for(int i=0;i<C;i++)
+>             x[t][i]=W[wte+toks[t]*C+i]+W[wpe+t*C+i];
+>
+>     for(int l=0;l<L;l++) {
+>         int base=l*PL;
+>         float *cab=W+base, *caw=W+base+3*C;
+>         float *cpb=W+base+3*C+C*3*C, *cpw=W+base+3*C+C*3*C+C;
+>         float *l1b=W+base+3*C+C*3*C+C+C*C, *l1g=l1b+C;
+>         float *l2b=l1g+C, *l2g=l2b+C;
+>         float *fcb=l2g+C, *fcw=fcb+4*C;
+>         float *fpb=fcw+C*4*C, *fpw=fpb+C;
+>
+>         // Compute K,V for all positions, Q only for all
+>         for(int t=0;t<ntok;t++) {
+>             ln(buf, x[t], l1g, l1b);
+>             matmul(buf2, buf, caw, C, 3*C);
+>             for(int i=0;i<3*C;i++) buf2[i]+=cab[i];
+>             // Store K,V
+>             memcpy(kc[l][t], buf2+C, C*sizeof(float));
+>             memcpy(vc[l][t], buf2+2*C, C*sizeof(float));
+>         }
+>
+>         // Attention for each position
+>         for(int t=0;t<ntok;t++) {
+>             ln(buf, x[t], l1g, l1b);
+>             matmul(buf2, buf, caw, C, 3*C);
+>             for(int i=0;i<3*C;i++) buf2[i]+=cab[i];
+>             float *q=buf2; // first C elements
+>
+>             // Multi-head attention
+>             float out[C];
+>             memset(out, 0, sizeof(out));
+>             for(int h=0;h<H;h++) {
+>                 float mx=-1e9;
+>                 for(int t2=0;t2<=t;t2++) {
+>                     float s=0;
+>                     for(int i=0;i<HS;i++) s+=q[h*HS+i]*kc[l][t2][h*HS+i];
+>                     att[t2]=s/sqrtf(HS);
+>                     if(att[t2]>mx) mx=att[t2];
+>                 }
+>                 float sum=0;
+>                 for(int t2=0;t2<=t;t2++) { att[t2]=expf(att[t2]-mx); sum+=att[t2]; }
+>                 for(int t2=0;t2<=t;t2++) att[t2]/=sum;
+>                 for(int t2=0;t2<=t;t2++)
+>                     for(int i=0;i<HS;i++)
+>                         out[h*HS+i]+=att[t2]*vc[l][t2][h*HS+i];
+>             }
+>             // c_proj
+>             matmul(buf, out, cpw, C, C);
+>             for(int i=0;i<C;i++) x[t][i]+=buf[i]+cpb[i];
+>
+i>             // MLP
+>             ln(buf, x[t], l2g, l2b);
+>             matmul(buf2, buf, fcw, C, 4*C);
+>             for(int i=0;i<4*C;i++) buf2[i]=gelu(buf2[i]+fcb[i]);
+>             matmul(buf, buf2, fpw, 4*C, C);
+>             for(int i=0;i<C;i++) x[t][i]+=buf[i]+fpb[i];
+>         }
+>     }
+>
+>     // Final layer norm on last position
+>     ln(buf, x[ntok-1], W+lnfg, W+lnfb);
+>
+>     // Logits: multiply by wte^T
+>     float mx=-1e30; int mi=0;
+>     for(int v=0;v<V;v++) {
+>         float s=0;
+>         for(int i=0;i<C;i++) s+=buf[i]*W[wte+v*C+i];
+>         if(s>mx) { mx=s; mi=v; }
+>     }
+>     return mi;
+> }
+>
+> // BPE tokenizer
+> char *merges[50000][2];
+> int nmerge;
+> char *vocab[V]; // token id -> string
+> int nvocab;
+>
+> // GPT-2 byte encoder: maps byte to unicode char
+> static unsigned char b2u[256];
+> static int u2b_map[512]; // unicode -> byte
+>
+> void init_byte_encoder() {
+>     int n=0;
+>     for(int i=0;i<256;i++) {
+>         if((i>=33&&i<=126)||(i>=161&&i<=172)||(i>=174&&i<=255)) {
+>             b2u[i]=i;
+>         } else {
+>             b2u[i]=256+n;
+>             n++;
+>         }
+>     }
+> }
+>
+> // Simple UTF-8 decode
+> int utf8_decode(const char **s) {
+>     unsigned char c=**s; (*s)++;
+>     if(c<0x80) return c;
+>     if(c<0xe0) { int r=(c&0x1f)<<6; r|=(**s)&0x3f; (*s)++; return r; }
+>     if(c<0xf0) { int r=(c&0xf)<<12; r|=((**s)&0x3f)<<6; (*s)++; r|=(**s)&0x3f; (*s)++; return r; }
+>     return 0;
+> }
+>
+> void load_bpe(const char *path) {
+>     // Build vocab: first 256 entries are single byte tokens
+>     init_byte_encoder();
+>     nvocab=256;
+>     for(int i=0;i<256;i++) {
+>         vocab[i]=malloc(8);
+>         // Store as the UTF-8 encoding of b2u[i]
+>         int u=b2u[i];
+>         if(u<0x80) { vocab[i][0]=u; vocab[i][1]=0; }
+>         else if(u<0x800) { vocab[i][0]=0xc0|(u>>6); vocab[i][1]=0x80|(u&0x3f); vocab[i][2]=0; }
+>         else { vocab[i][0]=0xe0|(u>>12); vocab[i][1]=0x80|((u>>6)&0x3f); vocab[i][2]=0x80|(u&0x3f); vocab[i][3]=0; }
+>     }
+>
+>     FILE *f=fopen(path,"r");
+>     char line[1024];
+>     fgets(line,sizeof(line),f); // skip header
+>     nmerge=0;
+>     while(fgets(line,sizeof(line),f)) {
+>         line[strcspn(line,"\n")]=0;
+>         char *sp=strchr(line,' ');
+>         if(!sp) continue;
+>         *sp=0;
+>         merges[nmerge][0]=strdup(line);
+>         merges[nmerge][1]=strdup(sp+1);
+>         // New vocab entry = concat of the two
+>         char *s=malloc(strlen(line)+strlen(sp+1)+1);
+>         strcpy(s,line); strcat(s,sp+1);
+>         vocab[nvocab++]=s;
+>         nmerge++;
+>     }
+>     fclose(f);
+>     // token 50256 = <|endoftext|>
+>     vocab[nvocab++]=strdup("<|endoftext|>");
+> }
+>
+> // Encode text to token IDs
+> int encode(const char *text, int *tokens) {
+>     // Convert text bytes to GPT-2 unicode chars (as UTF-8 strings)
+>     // Then apply BPE merges
+>     int len=strlen(text);
+>     // Build list of single-char tokens (as UTF-8 strings)
+>     typedef struct { char s[8]; } Tok;
+>     Tok *tl=malloc((len+1)*sizeof(Tok));
+>     int nt=0;
+>     for(int i=0;i<len;i++) {
+>         unsigned char c=text[i];
+>         int u=b2u[c];
+>         if(u<0x80) { tl[nt].s[0]=u; tl[nt].s[1]=0; }
+>         else if(u<0x800) { tl[nt].s[0]=0xc0|(u>>6); tl[nt].s[1]=0x80|(u&0x3f); tl[nt].s[2]=0; }
+>         else { tl[nt].s[0]=0xe0|(u>>12); tl[nt].s[1]=0x80|((u>>6)&0x3f); tl[nt].s[2]=0x80|(u&0x3f); tl[nt].s[3]=0; }
+>         nt++;
+>     }
+>
+>     // Apply BPE merges
+>     for(int m=0;m<nmerge;m++) {
+>         for(int i=0;i<nt-1;i++) {
+>             if(strcmp(tl[i].s, merges[m][0])==0 && strcmp(tl[i+1].s, merges[m][1])==0) {
+>                 // Merge
+>                 char tmp[16];
+>                 strcpy(tmp, tl[i].s);
+>                 strcat(tmp, tl[i+1].s);
+>                 strcpy(tl[i].s, tmp);
+>                 memmove(&tl[i+1], &tl[i+2], (nt-i-2)*sizeof(Tok));
+>                 nt--;
+>                 i--; // recheck this position
+>             }
+>         }
+>     }
+>
+>     // Map to token IDs
+>     int ntokens=0;
+>     for(int i=0;i<nt;i++) {
+>         for(int v=0;v<nvocab;v++) {
+>             if(strcmp(tl[i].s, vocab[v])==0) {
+>                 tokens[ntokens++]=v;
+>                 break;
+>             }
+>         }
+>     }
+>     free(tl);
+>     return ntokens;
+> }
+>
+> // Decode token to string (print bytes)
+> void decode_token(int tok) {
+>     const char *s=vocab[tok];
+>     while(*s) {
+>         int u=utf8_decode(&s);
+>         // Find byte that maps to this unicode
+>         for(int i=0;i<256;i++) {
+>             if(b2u[i]==u) { putchar(i); break; }
+>         }
+>     }
+> }
+>
+> int main(int argc, char **argv) {
+>     if(argc<4) return 1;
+>
+>     // Load weights via mmap
+>     int fd=open(argv[1],O_RDONLY);
+>     struct stat st; fstat(fd,&st);
+>     W=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>
+>     load_bpe(argv[2]);
+>
+>     int tokens[T];
+>     int ntok=encode(argv[3], tokens);
+>
+>     for(int g=0;g<20;g++) {
+>         int next=forward(tokens, ntok);
+>         tokens[ntok++]=next;
+>         decode_token(next);
+>         fflush(stdout);
+>     }
+>     printf("\n");
+>     return 0;
+> }
+> CEOF
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app#

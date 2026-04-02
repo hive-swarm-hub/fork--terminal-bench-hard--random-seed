@@ -1,0 +1,145 @@
+New Terminal Output:
+
+root@eef99810-3032-441e-a45a-659ddbee9360:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def rc(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+>
+> insert = 'tagattagaagaagaattaagaagaagattaacagaaag'
+> insert_pos = 215
+>
+> # The insertion ends with 'ag' and template at 213-214 is 'ag'
+> # So any fwd primer starting at 215 will have a 2-nt overlap
+> # The "extended" annealing is always 2 nt longer than designed
+>
+> print("Forward primer options (annealing at pos 215):")
+> print(f"{'Designed_len':>12} {'Designed_Tm':>11} {'Extended_len':>12} {'Extended_Tm':>11} {'Designed_seq':>20}")
+> for fwd_len in range(15, 37):
+>     designed_anneal = inp[215:215+fwd_len]
+>     extended_anneal = inp[213:215+fwd_len]  # 2 extra bases from overlap
+>     try:
+>         d_tm = get_tm(designed_anneal)
+>         e_tm = get_tm(extended_anneal)
+>         if 58 <= d_tm <= 72 and 58 <= e_tm <= 72:
+>             print(f"{fwd_len:>12} {d_tm:>11.2f} {fwd_len+2:>12} {e_tm:>11.2f} {designed_anneal:>20}")
+>     except:
+>         pass
+>
+> print()
+> print("Reverse primer options (annealing ending at pos 215):")
+> for rev_len in range(15, 37):
+>     rev_anneal_template = inp[215-rev_len:215]
+>     rev_seq = rc(rev_anneal_template)
+>     try:
+>         r_tm = get_tm(rev_seq)
+>         if 58 <= r_tm <= 72:
+>             print(f"  len={rev_len}, Tm={r_tm:.2f}, seq={rev_seq}")
+>     except:
+>         pass
+>
+> print()
+> print("\n=== Finding best pair that works under BOTH interpretations ===")
+> print("(Fwd designed Tm vs Rev Tm <= 5, AND Fwd extended Tm vs Rev Tm <= 5)")
+> best = []
+> for fwd_len in range(15, 37):
+>     designed_anneal = inp[215:215+fwd_len]
+>     extended_anneal = inp[213:215+fwd_len]
+>     try:
+>         d_tm = get_tm(designed_anneal)
+>         e_tm = get_tm(extended_anneal)
+>     except:
+>         continue
+>     if not (58 <= d_tm <= 72 and 58 <= e_tm <= 72):
+>         continue
+>     # Also check extended length is 15-45
+>     if not (15 <= fwd_len+2 <= 45):
+>         continue
+>
+>     for rev_len in range(15, 37):
+>         rev_anneal_template = inp[215-rev_len:215]
+>         rev_seq = rc(rev_anneal_template)
+>         try:
+>             r_tm = get_tm(rev_seq)
+>         except:
+>             continue
+>         if not (58 <= r_tm <= 72):
+>             continue
+>         if not (15 <= rev_len <= 45):
+>             continue
+>
+>         d_diff = abs(d_tm - r_tm)
+>         e_diff = abs(e_tm - r_tm)
+>         max_diff = max(d_diff, e_diff)
+>
+>         if d_diff <= 5 and e_diff <= 5:
+>             best.append((max_diff, fwd_len, d_tm, e_tm, rev_len, r_tm, rev_seq, designed_anneal))
+>
+> best.sort()
+> print(f"Found {len(best)} valid pairs")
+> for max_diff, fl, dtm, etm, rl, rtm, rs, fa in best[:10]:
+>     print(f"  Fwd: len={fl}(+2={fl+2}) dTm={dtm:.2f} eTm={etm:.2f} | Rev: len={rl} Tm={rtm:.2f} | max_diff={max_diff:.2f}")
+>
+> PYEOF
+Forward primer options (annealing at pos 215):
+Designed_len Designed_Tm Extended_len Extended_Tm         Designed_seq
+          15       59.54           17       65.14      caagggcgaggagct
+          16       61.24           18       66.27     caagggcgaggagctg
+          17       63.28           19       67.95    caagggcgaggagctgt
+          18       63.81           20       68.19   caagggcgaggagctgtt
+          19       64.67           21       68.71  caagggcgaggagctgttc
+          20       66.29           22       70.07 caagggcgaggagctgttca
+          21       67.18           23       70.69 caagggcgaggagctgttcac
+
+Reverse primer options (annealing ending at pos 215):
+  len=28, Tm=58.04, seq=ctcatatgtatatctccttcttaaagtt
+  len=30, Tm=58.45, seq=ctcatatgtatatctccttcttaaagttaa
+  len=31, Tm=58.93, seq=ctcatatgtatatctccttcttaaagttaaa
+  len=32, Tm=59.84, seq=ctcatatgtatatctccttcttaaagttaaac
+  len=33, Tm=60.95, seq=ctcatatgtatatctccttcttaaagttaaaca
+  len=34, Tm=61.31, seq=ctcatatgtatatctccttcttaaagttaaacaa
+  len=35, Tm=61.65, seq=ctcatatgtatatctccttcttaaagttaaacaaa
+  len=36, Tm=61.96, seq=ctcatatgtatatctccttcttaaagttaaacaaaa
+
+
+=== Finding best pair that works under BOTH interpretations ===
+(Fwd designed Tm vs Rev Tm <= 5, AND Fwd extended Tm vs Rev Tm <= 5)
+Found 7 valid pairs
+  Fwd: len=15(+2=17) dTm=59.54 eTm=65.14 | Rev: len=36 Tm=61.96 | max_diff=3.18
+  Fwd: len=15(+2=17) dTm=59.54 eTm=65.14 | Rev: len=35 Tm=61.65 | max_diff=3.49
+  Fwd: len=15(+2=17) dTm=59.54 eTm=65.14 | Rev: len=34 Tm=61.31 | max_diff=3.83
+  Fwd: len=15(+2=17) dTm=59.54 eTm=65.14 | Rev: len=33 Tm=60.95 | max_diff=4.19
+  Fwd: len=16(+2=18) dTm=61.24 eTm=66.27 | Rev: len=36 Tm=61.96 | max_diff=4.31
+  Fwd: len=16(+2=18) dTm=61.24 eTm=66.27 | Rev: len=35 Tm=61.65 | max_diff=4.63
+  Fwd: len=16(+2=18) dTm=61.24 eTm=66.27 | Rev: len=34 Tm=61.31 | max_diff=4.96
+root@eef99810-3032-441e-a45a-659ddbee9360:/app#

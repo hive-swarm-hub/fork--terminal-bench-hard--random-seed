@@ -1,0 +1,134 @@
+New Terminal Output:
+
+root@eef99810-3032-441e-a45a-659ddbee9360:/app# python3 << 'PYEOF'
+> import subprocess
+>
+d> def rc(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # Design: fwd anneals at 213, rev anneals ending at 213
+> fwd_anneal_start = 213
+> fwd_anneal_len = 15
+> rev_anneal_len = 32
+>
+> fwd_anneal = inp[fwd_anneal_start:fwd_anneal_start+fwd_anneal_len]
+> rev_anneal_template = inp[fwd_anneal_start-rev_anneal_len:fwd_anneal_start]
+> rev_primer = rc(rev_anneal_template)
+>
+> print(f"Fwd annealing: {fwd_anneal} (pos {fwd_anneal_start}-{fwd_anneal_start+fwd_anneal_len-1})")
+> print(f"Rev primer: {rev_primer} (anneals at pos {fwd_anneal_start-rev_anneal_len}-{fwd_anneal_start-1})")
+>
+> # The linear PCR product (without tail) would be:
+> # fwd_anneal + inp[228:] + inp[:181] + rc(rev_primer)
+> # = fwd_anneal + inp[228:] + inp[:181] + rev_anneal_template
+>
+> fwd_end = fwd_anneal_start + fwd_anneal_len
+> rev_start = fwd_anneal_start - rev_anneal_len
+> copied = inp[fwd_end:] + inp[:rev_start]
+>
+> # Without any tail, the product would be:
+> product_no_tail = fwd_anneal + copied + rev_anneal_template
+> print(f"Product without tail length: {len(product_no_tail)}")
+> print(f"Output length: {len(out)}")
+> print(f"Difference: {len(out) - len(product_no_tail)} (this is how long the tail should be)")
+>
+> # The tail needs to be inserted between rc(rev) and fwd_anneal in the circular product
+> # Circular product = ...rev_anneal_template | TAIL | fwd_anneal | copied_template...
+> # This should match output = ...inp[181:213] | insertion | inp[213:]...
+> # Note: rev_anneal_template = inp[181:213], fwd_anneal = inp[213:228]
+> # So we need TAIL such that:
+> # rev_anneal_template + TAIL + fwd_anneal = inp[181:213] + insertion + inp[213:228]
+> # = inp[181:213] + insertion + inp[213:228]
+> # Since rev_anneal_template = inp[181:213] and fwd_anneal = inp[213:228]:
+> # TAIL = insertion = 'tagattagaagaagaattaagaagaagattaacagaaag'
+>
+> tail = 'tagattagaagaagaattaagaagaagattaacagaaag'
+> fwd_full = tail + fwd_anneal
+>
+> # Verify
+> linear = fwd_full + copied + rc(rev_primer)
+> print(f"\nLinear product length: {len(linear)}")
+>
+> doubled_out = out + out
+> if linear in doubled_out:
+>     print("Product matches output: YES")
+> else:
+>     # Try rotation
+>     found = False
+>     for i in range(len(linear)):
+>         if (linear[i:] + linear[:i]) == out:
+>             print(f"Product matches output at rotation {i}: YES")
+>             found = True
+>             break
+>     if not found:
+>         print("Product matches output: NO")
+>         # Debug: find the junction
+>         junction_in_linear = fwd_full
+>         print(f"Junction in linear: {junction_in_linear[:60]}")
+>         # Find where this appears in output
+>         if junction_in_linear[:40] in out:
+>             pos = out.index(junction_in_linear[:40])
+>             print(f"Found at output pos {pos}: {out[pos:pos+60]}")
+>
+> # But wait - does the fwd_anneal overlap with the insertion?
+> # The fwd_anneal starts at pos 213: 'agcaagggcgaggag'
+> # The insertion is: 'tagattagaagaagaattaagaagaagattaacagaaag'
+> # The insertion ends with 'ag' and the template at 213 starts with 'ag'
+> # So the tail 'tagattagaagaagaattaagaagaagattaacagaaag' + annealing 'agcaagggcgaggag'
+> # = 'tagattagaagaagaattaagaagaagattaacagaaagagcaagggcgaggag'
+> # But the output has: '...tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggag...'
+> # Note: 'agaaag' + 'agcaag' vs 'agaaag' + 'caaggg'
+> # These are different! 'agaaagag' vs 'agaaagca'
+>
+> print(f"\nFwd full primer: {fwd_full}")
+> print(f"Output at junction: {out[213:213+55]}")
+> # The output at pos 215 (where insertion starts in output):
+> print(f"Output[215:254]: {out[215:254]}")
+> print(f"Output[254:270]: {out[254:270]}")
+>
+> PYEOF
+Fwd annealing: agcaagggcgaggag (pos 213-227)
+Rev primer: catatgtatatctccttcttaaagttaaacaa (anneals at pos 181-212)
+Product without tail length: 3591
+Output length: 3630
+Difference: 39 (this is how long the tail should be)
+
+Linear product length: 3630
+Product matches output: NO
+Junction in linear: tagattagaagaagaattaagaagaagattaacagaaagagcaagggcgaggag
+
+Fwd full primer: tagattagaagaagaattaagaagaagattaacagaaagagcaagggcgaggag
+Output at junction: agtagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagc
+Output[215:254]: tagattagaagaagaattaagaagaagattaacagaaag
+Output[254:270]: caagggcgaggagctg
+root@eef99810-3032-441e-a45a-659ddbee9360:/app#

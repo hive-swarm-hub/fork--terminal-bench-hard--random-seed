@@ -1,0 +1,176 @@
+New Terminal Output:
+
+root@ca0ee558-9aed-4cdf-9ed7-3bbebf3e3681:/app# cat > /app/filter.py << 'PYTHON_EOF'
+> import sys
+> import re
+>
+>
+> def decode_html_entities(s):
+>     """Decode HTML entities for comparison purposes."""
+>     # Decode numeric entities: &#xHH; and &#DDD;
+>     def replace_entity(m):
+>         full = m.group(0)
+>         try:
+>             if m.group(1):  # hex
+>                 return chr(int(m.group(1), 16))
+>             elif m.group(2):  # decimal
+>                 return chr(int(m.group(2)))
+>         except (ValueError, OverflowError):
+>             return full
+>         return full
+>     s = re.sub(r'&#x([0-9a-fA-F]+);?|&#(\d+);?', replace_entity, s)
+>     # Decode named entities we care about
+>     s = s.replace('&tab;', '\t').replace('&Tab;', '\t')
+>     s = s.replace('&newline;', '\n').replace('&NewLine;', '\n')
+>     return s
+>
+>
+> def is_dangerous_uri(value):
+>     """Check if a URI value is dangerous (javascript:, vbscript:, etc)."""
+>     # Decode HTML entities and strip whitespace/control chars for checking
+>     decoded = decode_html_entities(value)
+>     # Remove whitespace, tabs, newlines, null bytes that browsers ignore
+>     cleaned = re.sub(r'[\s\x00-\x1f\x7f]+', '', decoded).lower().strip()
+>     return cleaned.startswith('javascript:') or cleaned.startswith('vbscript:')
+>
+>
+> def remove_javascript(html):
+>     # 1. Remove <script> tags and their contents (case-insensitive, dotall)
+>     html = re.sub(
+>         r'<script\b[^>]*>[\s\S]*?</script\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Also remove self-closing script tags
+>     html = re.sub(
+>         r'<script\b[^>]*/\s*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>     # Remove standalone opening script tags with no closing tag
+>     html = re.sub(
+>         r'<script\b[^>]*>',
+>         '',
+>         html,
+>         flags=re.IGNORECASE
+>     )
+>
+>     # 2. Remove event handler attributes and dangerous URIs from tags
+>     def clean_tag(match):
+>         tag = match.group(0)
+>         original = tag
+>
+>         # Remove on* attributes with double quotes
+>         tag = re.sub(
+>             r'\s+on\w+\s*=\s*"[^"]*"',
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with single quotes
+>         tag = re.sub(
+>             r"\s+on\w+\s*=\s*'[^']*'",
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes without quotes
+>         tag = re.sub(
+>             r"""\s+on\w+\s*=\s*(?:[^\s'">]|'[^']*'|"[^"]*")*(?=\s|/?>|$)""",
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>         # Remove on* attributes with no value
+>         tag = re.sub(
+>             r'\s+on\w+(?=\s|/?>)',
+>             '',
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Remove dangerous URIs from any attribute that can hold a URL
+>         # We check ALL attributes for javascript:/vbscript: URIs
+>         # Handle double-quoted attributes
+>         def check_dq_attr(m):
+>             attr_name = m.group(1).lower().strip()
+>             prefix = m.group(0)[:m.group(0).index('"') + 1]  # up to and including opening quote
+>             value = m.group(2)
+>             if is_dangerous_uri(value):
+>                 return m.group(1) + '""'
+>             return m.group(0)
+>
+>         # More surgical approach: find each attribute with a URL-like value
+>         # and neutralize dangerous URIs
+>         def neutralize_dangerous_uris_dq(m):
+>             attr_name_part = m.group(1)  # e.g., ' href="'
+>             value = m.group(2)
+>             if is_dangerous_uri(value):
+>                 return attr_name_part + '"'
+>             return m.group(0)
+>
+>         def neutralize_dangerous_uris_sq(m):
+>             attr_name_part = m.group(1)  # e.g., " href='"
+>             value = m.group(2)
+>             if is_dangerous_uri(value):
+>                 return attr_name_part + "'"
+>             return m.group(0)
+>
+>         # Match any attribute with double-quoted value
+>         tag = re.sub(
+>             r'(\s+[a-zA-Z][\w:.-]*\s*=\s*")([^"]*)(")',
+>             lambda m: m.group(1) + m.group(3) if is_dangerous_uri(m.group(2)) else m.group(0),
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Match any attribute with single-quoted value
+>         tag = re.sub(
+>             r"(\s+[a-zA-Z][\w:.-]*\s*=\s*')([^']*)(')" ,
+>             lambda m: m.group(1) + m.group(3) if is_dangerous_uri(m.group(2)) else m.group(0),
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         # Match any attribute with unquoted value
+>         tag = re.sub(
+>             r'(\s+[a-zA-Z][\w:.-]*\s*=\s*)([^\s"\'>`]+)',
+>             lambda m: m.group(1) + '""' if is_dangerous_uri(m.group(2)) else m.group(0),
+>             tag,
+>             flags=re.IGNORECASE
+>         )
+>
+>         return tag
+>
+>     # Match opening HTML tags
+>     html = re.sub(
+>         r'<[a-zA-Z][a-zA-Z0-9]*\b[^>]*>',
+>         clean_tag,
+>         html
+>     )
+>
+>     return html
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python filter.py <html_file>", file=sys.stderr)
+>         sys.exit(1)
+>
+>     filepath = sys.argv[1]
+>
+>     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+>         content = f.read()
+>
+>     cleaned = remove_javascript(content)
+>
+>     with open(filepath, 'w', encoding='utf-8') as f:
+>         f.write(cleaned)
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYTHON_EOF
+root@ca0ee558-9aed-4cdf-9ed7-3bbebf3e3681:/app#

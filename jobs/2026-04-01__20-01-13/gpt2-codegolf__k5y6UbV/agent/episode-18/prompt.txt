@@ -1,0 +1,150 @@
+New Terminal Output:
+
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app# python3 << 'PYEOF'
+> import array, math, struct
+>
+> # Load model
+> f = open('gpt2-124M.ckpt', 'rb')
+> data = array.array('f')
+> data.fromfile(f, 124439808)
+> f.close()
+>
+> V, T, C, L, H = 50257, 1024, 768, 12, 12
+> HS = C // H  # 64
+>
+> # Parse layout
+> PL = 7087872  # per layer
+> layer_offsets = []
+> for l in range(L):
+>     base = l * PL
+>     layer_offsets.append({
+>         'c_attn_b': base,
+>         'c_attn_w': base + 3*C,
+>         'c_proj_b': base + 3*C + C*3*C,
+>         'c_proj_w': base + 3*C + C*3*C + C,
+>         'ln1_b': base + 3*C + C*3*C + C + C*C,
+>         'ln1_g': base + 3*C + C*3*C + C + C*C + C,
+>         'ln2_b': base + 3*C + C*3*C + C + C*C + C + C,
+>         'ln2_g': base + 3*C + C*3*C + C + C*C + C + C + C,
+>         'fc_b': base + 3*C + C*3*C + C + C*C + C + C + C + C,
+>         'fc_w': base + 3*C + C*3*C + C + C*C + C + C + C + C + 4*C,
+>         'fc_proj_b': base + 3*C + C*3*C + C + C*C + C + C + C + C + 4*C + C*4*C,
+>         'fc_proj_w': base + 3*C + C*3*C + C + C*C + C + C + C + C + 4*C + C*4*C + C,
+>     })
+>
+> lnf_b_off = L * PL
+> lnf_g_off = lnf_b_off + C
+> wpe_off = lnf_g_off + C
+> wte_off = wpe_off + T*C
+>
+> def get(off, n):
+>     return data[off:off+n]
+>
+> def layer_norm(x, g_off, b_off):
+>     g = get(g_off, C)
+>     b = get(b_off, C)
+>     mean = sum(x) / C
+>     var = sum((xi - mean)**2 for xi in x) / C
+>     std = (var + 1e-5) ** 0.5
+>     return [(x[i] - mean) / std * g[i] + b[i] for i in range(C)]
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + math.tanh(math.sqrt(2/math.pi) * (x + 0.044715 * x**3)))
+>
+> def matmul(x, w_off, rows, cols):
+>     # w is stored as [rows, cols] (row-major)
+>     w = get(w_off, rows * cols)
+>     out = [0.0] * cols
+>     for j in range(cols):
+>         s = 0.0
+>         for i in range(rows):
+>             s += x[i] * w[i * cols + j]
+>         out[j] = s
+>     return out
+>
+> def add_bias(x, b_off, n):
+>     b = get(b_off, n)
+>     return [x[i] + b[i] for i in range(n)]
+>
+> def softmax(x):
+>     m = max(x)
+>     e = [math.exp(xi - m) for xi in x]
+>     s = sum(e)
+>     return [ei / s for ei in e]
+>
+> def forward(tokens):
+>     seq_len = len(tokens)
+>     # Build initial hidden states: wte + wpe
+>     wte = get(wte_off, V * C)
+>     wpe = get(wpe_off, T * C)
+>
+>     # x[t] = wte[token[t]] + wpe[t]
+>     x = []
+>     for t in range(seq_len):
+>         row = [wte[tokens[t]*C + i] + wpe[t*C + i] for i in range(C)]
+>         x.append(row)
+>
+>     for l in range(L):
+>         lo = layer_offsets[l]
+>         new_x = []
+>         for t in range(seq_len):
+>             # Pre-norm (ln_1)
+>             h = layer_norm(x[t], lo['ln1_g'], lo['ln1_b'])
+>
+>             # c_attn: project to qkv
+>             qkv = matmul(h, lo['c_attn_w'], C, 3*C)
+>             qkv = add_bias(qkv, lo['c_attn_b'], 3*C)
+>
+>             q = qkv[:C]
+>             k = qkv[C:2*C]
+>             v = qkv[2*C:3*C]
+>
+>             # Multi-head attention (only need last position for generation)
+>             out = [0.0] * C
+>             for head in range(H):
+>                 # Compute attention scores for this head
+>                 scores = []
+>                 for t2 in range(t + 1):  # causal mask
+>                     # Compute q[t] . k[t2] for this head
+>                     # But we need k for all positions... this is expensive
+>                     # For simplicity, recompute k for each position
+>                     h2 = layer_norm(x[t2], lo['ln1_g'], lo['ln1_b'])
+>                     qkv2 = matmul(h2, lo['c_attn_w'], C, 3*C)
+>                     qkv2 = add_bias(qkv2, lo['c_attn_b'], 3*C)
+>                     k2 = qkv2[C:2*C]
+>                     v2 = qkv2[2*C:3*C]
+>
+>                     score = sum(q[head*HS+i] * k2[head*HS+i] for i in range(HS)) / (HS**0.5)
+>                     scores.append((score, v2))
+>
+>                 # This is getting too complex and slow for Python
+>                 # Let me just test with a single token
+>                 pass
+>             break
+>         break
+>
+>     print('Forward pass too slow in Python, switching to C directly')
+>
+> # Instead, let me just verify the BPE tokenizer
+> print('Verifying BPE tokenizer...')
+>
+> # Read vocab.bpe
+> with open('vocab.bpe') as f:
+>     lines = f.readlines()
+> print(f'BPE file: {len(lines)} lines')
+> print(f'Header: {lines[0].strip()}')
+> print(f'First merge: {lines[1].strip()}')
+> print(f'Last merge: {lines[-1].strip()}')
+>
+> # 50000 merges (lines 1-50000) + header = 50001 lines
+> # Token IDs: 0-255 are byte tokens, 256-50255 are merge tokens, 50256 is <|endoftext|>
+> print(f'Number of merges: {len(lines) - 1}')
+>
+> PYEOF
+Verifying BPE tokenizer...
+BPE file: 50001 lines
+Header: #version: 0.2
+First merge: Ġ t
+Last merge: Ġg azed
+Number of merges: 50000
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app#

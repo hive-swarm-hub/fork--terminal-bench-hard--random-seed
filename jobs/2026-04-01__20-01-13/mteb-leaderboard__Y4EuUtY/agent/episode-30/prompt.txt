@@ -1,0 +1,121 @@
+New Terminal Output:
+
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app# cat > /tmp/fetch_scand.py << 'PYEOF'
+> import requests
+> import json
+> from concurrent.futures import ThreadPoolExecutor, as_completed
+> import sys
+>
+> # Get paths.json
+> url = 'https://huggingface.co/datasets/mteb/results/resolve/main/paths.json'
+> resp = requests.get(url, timeout=30)
+> paths = resp.json()
+>
+> # Scandinavian task names
+> scand_tasks = [
+>     'BornholmBitextMining', 'NorwegianCourtsBitextMining',
+>     'AngryTweetsClassification', 'DanishPoliticalCommentsClassification',
+>     'DalajClassification', 'DKHateClassification', 'LccSentimentClassification',
+>     'MassiveIntentClassification', 'MassiveScenarioClassification',
+>     'NordicLangClassification', 'NoRecClassification', 'NorwegianParliamentClassification',
+>     'ScalaClassification', 'SwedishSentimentClassification', 'SweRecClassification',
+>     'DanFeverRetrieval', 'NorQuadRetrieval', 'SNLRetrieval',
+>     'SwednRetrieval', 'SweFaqRetrieval', 'TV2Nordretrieval', 'TwitterHjerneRetrieval',
+>     'SNLHierarchicalClusteringS2S', 'SNLHierarchicalClusteringP2P',
+>     'SwednClusteringP2P', 'SwednClusteringS2S',
+>     'VGHierarchicalClusteringS2S', 'VGHierarchicalClusteringP2P'
+> ]
+>
+> # For each model, find matching result files
+> model_task_files = {}
+> for model_key, files in paths.items():
+>     matching = {}
+>     for f in files:
+>         for task in scand_tasks:
+>             if task + '.json' in f:
+>                 matching[task] = f
+>     if len(matching) >= 20:  # Only consider models with at least 20 tasks
+>         model_name = model_key.replace('__', '/')
+>         model_task_files[model_name] = matching
+>
+> print(f'Models with >= 20 Scandinavian tasks: {len(model_task_files)}', flush=True)
+>
+> BASE_URL = 'https://huggingface.co/datasets/mteb/results/resolve/main/'
+>
+> def fetch_result(model_name, task_name, file_path):
+>     """Fetch a single result file and extract the main score."""
+>     try:
+>         url = BASE_URL + file_path
+>         resp = requests.get(url, timeout=30)
+>         if resp.status_code != 200:
+>             return (model_name, task_name, None)
+>         data = resp.json()
+>         # Extract main score - the structure has scores with main_score
+>         if 'scores' in data:
+>             scores = data['scores']
+>             # Get test split scores, or first available split
+>             for split in ['test', 'validation', 'dev']:
+>                 if split in scores:
+>                     split_scores = scores[split]
+>                     if isinstance(split_scores, list) and len(split_scores) > 0:
+>                         main_score = split_scores[0].get('main_score')
+>                         if main_score is not None:
+>                             return (model_name, task_name, main_score)
+>         return (model_name, task_name, None)
+>     except Exception as e:
+>         return (model_name, task_name, None)
+>
+> # Collect all fetch tasks
+> fetch_tasks = []
+> for model_name, task_files in model_task_files.items():
+>     for task_name, file_path in task_files.items():
+>         fetch_tasks.append((model_name, task_name, file_path))
+>
+> print(f'Total files to fetch: {len(fetch_tasks)}', flush=True)
+>
+> # Fetch in parallel
+> model_scores = {}  # model -> {task: score}
+> with ThreadPoolExecutor(max_workers=20) as executor:
+>     futures = {executor.submit(fetch_result, m, t, f): (m, t) for m, t, f in fetch_tasks}
+>     done = 0
+>     for future in as_completed(futures):
+>         model_name, task_name, score = future.result()
+>         if score is not None:
+>             if model_name not in model_scores:
+>                 model_scores[model_name] = {}
+>             model_scores[model_name][task_name] = score
+>         done += 1
+>         if done % 100 == 0:
+>             print(f'  Fetched {done}/{len(fetch_tasks)}...', flush=True)
+>
+> print(f'\nModels with scores: {len(model_scores)}', flush=True)
+>
+> # Compute mean score per model
+> model_means = {}
+> for model, task_scores in model_scores.items():
+>     scores = list(task_scores.values())
+>     if scores:
+>         model_means[model] = {
+>             'mean': sum(scores) / len(scores),
+>             'num_tasks': len(scores)
+>         }
+>
+> # Sort by mean score (only models with all 28 tasks first, then by mean)
+> sorted_models = sorted(model_means.items(), key=lambda x: (-x[1]['num_tasks'], -x[1]['mean']))
+>
+> print(f'\nTop 30 models by coverage then mean score on Scandinavian benchmark:')
+> for i, (model, info) in enumerate(sorted_models[:30]):
+>     print(f'{i+1}. {model}: mean={info["mean"]:.4f} (tasks={info["num_tasks"]})')
+>
+> # Also sort purely by mean for models with >= 25 tasks
+> print(f'\nTop 30 models by mean score (>= 25 tasks):')
+> filtered = [(m, i) for m, i in model_means.items() if i['num_tasks'] >= 25]
+> sorted_by_mean = sorted(filtered, key=lambda x: -x[1]['mean'])
+> for i, (model, info) in enumerate(sorted_by_mean[:30]):
+>     print(f'{i+1}. {model}: mean={info["mean"]:.4f} (tasks={info["num_tasks"]})')
+> PYEOF
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app# python3 /tmp/fetch_scand.py > /tmp/fetch_output.log 2>&1 &
+[1] 2716
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app# echo "PID: $!"
+PID: 2716
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app#

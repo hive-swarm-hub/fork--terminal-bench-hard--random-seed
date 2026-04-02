@@ -1,0 +1,211 @@
+New Terminal Output:
+
+root@eef99810-3032-441e-a45a-659ddbee9360:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+5> def rc(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+> primers = parse_fasta('primers.fasta')
+>
+> print("=== FINAL VERIFICATION ===")
+> print()
+>
+> # List all primers
+> primer_names = list(primers.keys())
+> print(f"Number of primers: {len(primer_names)}")
+> print(f"Number of primer pairs: {len(primer_names)//2}")
+> for name in primer_names:
+>     print(f"  {name}: {primers[name]}")
+> print()
+>
+> fwd = primers[primer_names[0]]
+> rev = primers[primer_names[1]]
+>
+> # Determine annealing portions
+> # Forward: find longest 3' suffix matching template
+> fwd_anneal = None
+> fwd_anneal_pos = None
+> for i in range(len(fwd)):
+>     candidate = fwd[i:]
+>     if candidate in inp:
+>         fwd_anneal = candidate
+>         fwd_anneal_pos = inp.index(candidate)
+>         fwd_tail = fwd[:i]
+>         break
+>     # Also check circular
+>     doubled = inp + inp
+>     if candidate in doubled:
+>         fwd_anneal = candidate
+>         fwd_anneal_pos = doubled.index(candidate) % len(inp)
+>         fwd_tail = fwd[:i]
+>         break
+>
+> print(f"Forward primer:")
+> print(f"  Full sequence: {fwd} ({len(fwd)} nt)")
+> print(f"  5' tail (non-annealing): {fwd_tail} ({len(fwd_tail)} nt)")
+> print(f"  3' annealing region: {fwd_anneal} ({len(fwd_anneal)} nt)")
+> print(f"  Annealing position on template: {fwd_anneal_pos}-{fwd_anneal_pos+len(fwd_anneal)-1}")
+> fwd_tm = get_tm(fwd_anneal)
+> print(f"  Tm of annealing region: {fwd_tm:.2f}°C")
+> print(f"  Annealing length 15-45? {15 <= len(fwd_anneal) <= 45}")
+> print(f"  Tm 58-72? {58 <= fwd_tm <= 72}")
+> print()
+>
+> # Reverse: the entire primer should anneal (it's RC of template region)
+> rev_template = rc(rev)
+> if rev_template in inp:
+>     rev_anneal_pos = inp.index(rev_template)
+>     rev_anneal = rev
+>     rev_tail = ''
+> else:
+>     doubled = inp + inp
+>     if rev_template in doubled:
+>         rev_anneal_pos = doubled.index(rev_template) % len(inp)
+>         rev_anneal = rev
+>         rev_tail = ''
+>     else:
+>         # Find longest 3' suffix of rev that anneals
+>         for i in range(len(rev)):
+>             candidate_rc = rc(rev[i:])
+>             if candidate_rc in inp:
+>                 rev_anneal = rev[i:]
+>                 rev_anneal_pos = inp.index(candidate_rc)
+>                 rev_tail = rev[:i]
+>                 break
+>
+> print(f"Reverse primer:")
+> print(f"  Full sequence: {rev} ({len(rev)} nt)")
+> if rev_tail:
+>     print(f"  5' tail (non-annealing): {rev_tail} ({len(rev_tail)} nt)")
+> print(f"  Annealing region: {rev_anneal} ({len(rev_anneal)} nt)")
+> rev_template_region = rc(rev_anneal)
+> rev_pos = inp.index(rev_template_region) if rev_template_region in inp else -1
+> print(f"  Annealing position on template: {rev_pos}-{rev_pos+len(rev_anneal)-1}")
+> rev_tm = get_tm(rev_anneal)
+> print(f"  Tm of annealing region: {rev_tm:.2f}°C")
+> print(f"  Annealing length 15-45? {15 <= len(rev_anneal) <= 45}")
+> print(f"  Tm 58-72? {58 <= rev_tm <= 72}")
+> print()
+>
+> tm_diff = abs(fwd_tm - rev_tm)
+> print(f"Tm difference: {tm_diff:.2f}°C (max 5°C allowed): {'PASS' if tm_diff <= 5 else 'FAIL'}")
+> print()
+>
+> # Verify product
+> fwd_end = fwd_anneal_pos + len(fwd_anneal)
+> rev_start = rev_pos
+> copied = inp[fwd_end:] + inp[:rev_start]
+> linear = fwd + copied + rc(rev)
+>
+> print(f"Product verification:")
+> print(f"  Linear product length: {len(linear)}")
+> print(f"  Output sequence length: {len(out)}")
+>
+> doubled_out = out + out
+> if linear in doubled_out:
+>     print(f"  Product matches output: PASS")
+> else:
+>     found = False
+>     for i in range(len(linear)):
+>         rotated = linear[i:] + linear[:i]
+>         if rotated == out:
+>             print(f"  Product matches output at rotation {i}: PASS")
+>             found = True
+>             break
+>     if not found:
+>         print(f"  Product matches output: FAIL")
+>
+> print()
+> print("=== ALL CHECKS ===")
+> all_pass = True
+> checks = [
+>     ("Fwd annealing length 15-45", 15 <= len(fwd_anneal) <= 45),
+>     ("Rev annealing length 15-45", 15 <= len(rev_anneal) <= 45),
+>     ("Fwd Tm 58-72", 58 <= fwd_tm <= 72),
+>     ("Rev Tm 58-72", 58 <= rev_tm <= 72),
+>     ("Tm diff <= 5", tm_diff <= 5),
+>     ("Minimum primer pairs (1)", len(primer_names) == 2),
+>     ("Forward listed first", 'forward' in primer_names[0].lower() or 'fwd' in primer_names[0].lower()),
+>     ("Product matches output", linear in doubled_out),
+> ]
+> for name, result in checks:
+>     status = 'PASS' if result else 'FAIL'
+>     print(f"  {name}: {status}")
+>     if not result:
+>         all_pass = False
+>
+> print(f"\nOverall: {'ALL PASS' if all_pass else 'SOME FAILED'}")
+> PYEOF
+=== FINAL VERIFICATION ===
+
+Number of primers: 2
+Number of primer pairs: 1
+  primer_forward: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg
+  primer_reverse: ctcatatgtatatctccttcttaaagttaaacaa
+
+Forward primer:
+  Full sequence: tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg (55 nt)
+  5' tail (non-annealing): tagattagaagaagaattaagaagaagattaacagaa (37 nt)
+  3' annealing region: agcaagggcgaggagctg (18 nt)
+  Annealing position on template: 213-230
+  Tm of annealing region: 66.27°C
+  Annealing length 15-45? True
+  Tm 58-72? True
+
+Reverse primer:
+  Full sequence: ctcatatgtatatctccttcttaaagttaaacaa (34 nt)
+  Annealing region: ctcatatgtatatctccttcttaaagttaaacaa (34 nt)
+  Annealing position on template: 181-214
+  Tm of annealing region: 61.31°C
+  Annealing length 15-45? True
+  Tm 58-72? True
+
+Tm difference: 4.96°C (max 5°C allowed): PASS
+
+Product verification:
+  Linear product length: 3630
+  Output sequence length: 3630
+  Product matches output: PASS
+
+=== ALL CHECKS ===
+  Fwd annealing length 15-45: PASS
+  Rev annealing length 15-45: PASS
+  Fwd Tm 58-72: PASS
+  Rev Tm 58-72: PASS
+  Tm diff <= 5: PASS
+  Minimum primer pairs (1): PASS
+  Forward listed first: PASS
+  Product matches output: PASS
+
+Overall: ALL PASS
+root@eef99810-3032-441e-a45a-659ddbee9360:/app#

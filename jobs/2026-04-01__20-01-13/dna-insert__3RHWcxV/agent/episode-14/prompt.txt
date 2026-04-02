@@ -1,0 +1,128 @@
+New Terminal Output:
+
+root@eef99810-3032-441e-a45a-659ddbee9360:/app# python3 << 'PYEOF'
+> def parse_fasta(filename):
+>     seqs = {}
+>     name = None
+>     seq = []
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 if name:
+>                     seqs[name] = ''.join(seq)
+>                 name = line[1:]
+>                 seq = []
+>             else:
+>                 seq.append(line)
+>     if name:
+>         seqs[name] = ''.join(seq)
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'a': 't', 't': 'a', 'g': 'c', 'c': 'g'}
+>     return ''.join(comp[b] for b in reversed(seq))
+>
+> seqs = parse_fasta('sequences.fasta')
+> inp = seqs['input']
+> out = seqs['output']
+>
+> # The insertion
+> insert = 'tagattagaagaagaattaagaagaagattaacagaaag'
+> insert_pos = 215  # between inp[214] and inp[215]
+>
+> # Verify: output = inp[:215] + insert + inp[215:]
+> reconstructed = inp[:215] + insert + inp[215:]
+> print(f"Reconstruction check: {reconstructed == out}")
+> print(f"Reconstructed len: {len(reconstructed)}, Output len: {len(out)}")
+>
+> # Now let's think about the Q5 SDM product properly.
+> # For Q5 SDM with back-to-back primers on a circular template:
+> # - Forward primer: 5'-[tail]-[annealing]->  binds at position A on template
+> # - Reverse primer: <-[annealing]-[tail]-5'  binds at position B on template
+> # - The primers face AWAY from each other (back-to-back)
+> # - PCR amplifies the entire plasmid
+> # - The linear product is: fwd_full + template(A_end to B_start, going around) + rc(rev_full)
+> # - KLD ligates to circularize
+>
+> # For a pure insertion at position 215:
+> # Forward primer anneals starting at pos 215, with insertion as 5' tail
+> # Reverse primer anneals ending at pos 215 (i.e., template[215-L:215]), pointing away
+>
+> # The issue: my forward primer is:
+> # tail = 'tagattagaagaagaattaagaagaagattaacagaaag' (39 nt)
+> # anneal = 'caagggcgaggagctg' (16 nt, pos 215-230)
+> # full = tail + anneal
+>
+> # But 'agcaagggcgaggagctg' (18 nt) also matches at pos 213-230
+> # So the ACTUAL annealing is 18 nt, and the tail is only 36 nt
+>
+> # Let's check: does the designed product still give the correct output?
+> # If annealing is truly at 213-230:
+> #   fwd extends from 231 forward
+> #   rev anneals at 181-214, extends from 180 backward
+> #   Linear product: fwd_full(54) + inp[231:] + inp[:181] + rc(rev)(34)
+> #   = 54 + (3591-231) + 181 + 34 = 54 + 3360 + 181 + 34 = 3629
+> # But wait, the linear product should be 3630 (same as output) since it circularizes
+>
+> # Actually the linear product length = len(fwd_full) + template_between + len(rc(rev))
+> # But after circularization, length = len(fwd_full) + template_between + len(rev_anneal_on_template)
+> # Hmm, let me think again...
+>
+> # The linear PCR product top strand is:
+> # 5'- fwd_primer_sequence - [copied template from fwd_end to rev_start] - RC(rev_primer_sequence) -3'
+> # After KLD ligation, the 5' end joins to the 3' end to form a circle.
+>
+> # Let's compute this:
+> fwd_full = 'tagattagaagaagaattaagaagaagattaacagaaagcaagggcgaggagctg'
+> rev_full = 'ctcatatgtatatctccttcttaaagttaaacaa'
+>
+> # If fwd anneals at 215-230 (designed):
+> fwd_anneal_start = 215
+> fwd_anneal_end = 231  # exclusive
+> # Rev anneals at 181-214 (template), so rev_anneal_on_template = inp[181:215]
+> rev_anneal_start = 181
+> rev_anneal_end = 215  # exclusive
+>
+> # Template copied between primers (going forward from fwd_end, around circle, to rev_start):
+> # From pos 231 to pos 181 (wrapping around)
+> copied = inp[fwd_anneal_end:] + inp[:rev_anneal_start]
+> print(f"Copied template length: {len(copied)}")
+>
+> # Linear PCR product:
+> linear = fwd_full + copied + rc(rev_full)
+> print(f"Linear product length: {len(linear)}")
+>
+> # After circularization, this linear product IS the circular plasmid
+> # Check if it matches output as circular sequence
+> doubled_out = out + out
+> if linear.lower() in doubled_out.lower():
+>     print("MATCH with designed annealing (215-230)!")
+> else:
+>     # Try rotating
+>     found = False
+>     for i in range(len(linear)):
+>         rotated = linear[i:] + linear[:i]
+>         if rotated == out:
+>             print(f"MATCH at rotation {i}!")
+>             found = True
+>             break
+>     if not found:
+>         print("NO MATCH with designed annealing")
+>         print(f"Linear[:80]: {linear[:80]}")
+>         print(f"Output[:80]: {out[:80]}")
+>         # Find first difference
+>         for i in range(min(len(linear), len(doubled_out))):
+>             if linear[i] != doubled_out[i]:
+>                 print(f"First diff at pos {i}: linear='{linear[i]}' vs out='{doubled_out[i]}'")
+>                 print(f"Context linear: ...{linear[max(0,i-10):i+10]}...")
+>                 print(f"Context output: ...{doubled_out[max(0,i-10):i+10]}...")
+>                 break
+>
+> PYEOF
+Reconstruction check: True
+Reconstructed len: 3630, Output len: 3630
+Copied template length: 3541
+Linear product length: 3630
+MATCH with designed annealing (215-230)!
+root@eef99810-3032-441e-a45a-659ddbee9360:/app#

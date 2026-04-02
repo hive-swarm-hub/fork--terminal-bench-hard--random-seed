@@ -1,0 +1,159 @@
+New Terminal Output:
+
+[1]+  Done                    python3 <<'PYEOF' > /tmp/pyref.log 2>&1
+import array, math
+
+f = open('gpt2-124M.ckpt', 'rb')
+W = array.array('f')
+W.fromfile(f, 124439808)
+f.close()
+
+V, T, C, L, H, S = 50257, 1024, 768, 12, 12, 64
+PL = 7087872
+fb = L*PL; fg = fb+C; wp = fg+C; wt = wp+T*C
+
+def ln(x, g_off, b_off):
+    m = sum(x)/C
+    v = sum((xi-m)**2 for xi in x)/C
+    s = 1.0/math.sqrt(v+1e-5)
+    return [(x[i]-m)*s*W[g_off+i]+W[b_off+i] for i in range(C)]
+
+def mm(inp, w_off, n, m):
+    o = [0.0]*m
+    for j in range(m):
+        s = 0.0
+        for i in range(n):
+            s += inp[i]*W[w_off+i*m+j]
+        o[j] = s
+    return o
+
+def gelu(x):
+    return 0.5*x*(1+math.tanh(0.7978845608*(x+0.044715*x*x*x)))
+
+tok = 15496  # "Hello"
+x = [W[wt+tok*C+i]+W[wp+i] for i in range(C)]
+
+for l in range(L):
+    base = l*PL
+    cab=base; caw=base+3*C; cpb=caw+C*3*C; cpw=cpb+C
+    l1b=cpw+C*C; l1g=l1b+C; l2b=l1g+C; l2g=l2b+C
+    fcb=l2g+C; fcw=fcb+4*C; fpb=fcw+C*4*C; fpw=fpb+C
+
+    h = ln(x, l1g, l1b)
+    qkv = mm(h, caw, C, 3*C)
+    for i in range(3*C): qkv[i] += W[cab+i]
+
+    # Single token: attention output = V
+    v = qkv[2*C:3*C]
+
+    proj = mm(v, cpw, C, C)
+    for i in range(C): x[i] += proj[i] + W[cpb+i]
+
+    h2 = ln(x, l2g, l2b)
+    fc = mm(h2, fcw, C, 4*C)
+    fc = [gelu(fc[i]+W[fcb+i]) for i in range(4*C)]
+    fp = mm(fc, fpw, 4*C, C)
+    for i in range(C): x[i] += fp[i] + W[fpb+i]
+
+    print(f'Layer {l} done: x[:3]={x[:3]}')
+
+# Final layer norm
+h = ln(x, fg, fb)
+
+# Logits
+mx = -1e30; mi = 0
+for v in range(V):
+    s = sum(h[i]*W[wt+v*C+i] for i in range(C))
+    if s > mx: mx = s; mi = v
+    if v % 10000 == 0: print(f'Checked {v}/{V} tokens, best so far: {mi} (score {mx:.4f})')
+
+print(f'Predicted token: {mi}, score: {mx:.4f}')
+
+# Also print top-5
+scores = []
+for v in range(V):
+    s = sum(h[i]*W[wt+v*C+i] for i in range(C))
+    scores.append((s, v))
+scores.sort(reverse=True)
+print('Top 5 predictions:')
+for s, v in scores[:5]:
+    print(f'  Token {v}: score {s:.4f}')
+
+PYEOF
+
+Layer 0 done: x[:3]=[0.678365907144068, -1.4596385414088044, 0.8340051357957451]
+Layer 1 done: x[:3]=[1.0966867471849078, -1.879201965798916, 1.0121009114059]
+Layer 2 done: x[:3]=[-5.814986668201476, -3.433808645739199, -1.3663881913220552]
+Layer 3 done: x[:3]=[-6.49364607234023, -0.8692543511209072, -2.6202224122892694]
+Layer 4 done: x[:3]=[-6.876999647374291, -1.2329842478318933, -2.5439330651054353]
+Layer 5 done: x[:3]=[-7.486617535249846, -2.318014694341899, -0.8189918606922653]
+Layer 6 done: x[:3]=[-8.846568804826658, 0.7989363813939758, -2.8656055943478336]
+Layer 7 done: x[:3]=[-8.026167287628185, 2.575926441005155, 0.2748425286889322]
+Layer 8 done: x[:3]=[-5.371658690645785, 6.240606046866026, 4.077095944199123]
+Layer 9 done: x[:3]=[-5.470314770326166, 5.290663025326776, 5.117564659584352]
+Layer 10 done: x[:3]=[-5.522863422159785, 3.4584082078083194, 2.3528749633145494]
+Layer 11 done: x[:3]=[-8.517849564681118, 3.7168678580205627, -3.154803543459935]
+Checked 0/50257 tokens, best so far: 0 (score -10.4127)
+Checked 10000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 20000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 30000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 40000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 50000/50257 tokens, best so far: 11 (score -7.9665)
+Predicted token: 11, score: -7.9665
+Top 5 predictions:
+  Token 11: score -7.9665
+  Token 262: score -8.1248
+  Token 13: score -8.2366
+  Token 290: score -8.3507
+  Token 198: score -8.3854
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app#
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app# cat /tmp/pyref.log
+Layer 0 done: x[:3]=[0.678365907144068, -1.4596385414088044, 0.8340051357957451]
+Layer 1 done: x[:3]=[1.0966867471849078, -1.879201965798916, 1.0121009114059]
+Layer 2 done: x[:3]=[-5.814986668201476, -3.433808645739199, -1.3663881913220552]
+Layer 3 done: x[:3]=[-6.49364607234023, -0.8692543511209072, -2.6202224122892694]
+Layer 4 done: x[:3]=[-6.876999647374291, -1.2329842478318933, -2.5439330651054353]
+Layer 5 done: x[:3]=[-7.486617535249846, -2.318014694341899, -0.8189918606922653]
+Layer 6 done: x[:3]=[-8.846568804826658, 0.7989363813939758, -2.8656055943478336]
+Layer 7 done: x[:3]=[-8.026167287628185, 2.575926441005155, 0.2748425286889322]
+Layer 8 done: x[:3]=[-5.371658690645785, 6.240606046866026, 4.077095944199123]
+Layer 9 done: x[:3]=[-5.470314770326166, 5.290663025326776, 5.117564659584352]
+Layer 10 done: x[:3]=[-5.522863422159785, 3.4584082078083194, 2.3528749633145494]
+Layer 11 done: x[:3]=[-8.517849564681118, 3.7168678580205627, -3.154803543459935]
+Checked 0/50257 tokens, best so far: 0 (score -10.4127)
+Checked 10000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 20000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 30000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 40000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 50000/50257 tokens, best so far: 11 (score -7.9665)
+Predicted token: 11, score: -7.9665
+Top 5 predictions:
+  Token 11: score -7.9665
+  Token 262: score -8.1248
+  Token 13: score -8.2366
+  Token 290: score -8.3507
+  Token 198: score -8.3854
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app#
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app# wc -l /tmp/pyref.log && head -20 /tmp/pyref.log
+25 /tmp/pyref.log
+Layer 0 done: x[:3]=[0.678365907144068, -1.4596385414088044, 0.8340051357957451]
+Layer 1 done: x[:3]=[1.0966867471849078, -1.879201965798916, 1.0121009114059]
+Layer 2 done: x[:3]=[-5.814986668201476, -3.433808645739199, -1.3663881913220552]
+Layer 3 done: x[:3]=[-6.49364607234023, -0.8692543511209072, -2.6202224122892694]
+Layer 4 done: x[:3]=[-6.876999647374291, -1.2329842478318933, -2.5439330651054353]
+Layer 5 done: x[:3]=[-7.486617535249846, -2.318014694341899, -0.8189918606922653]
+Layer 6 done: x[:3]=[-8.846568804826658, 0.7989363813939758, -2.8656055943478336]
+Layer 7 done: x[:3]=[-8.026167287628185, 2.575926441005155, 0.2748425286889322]
+Layer 8 done: x[:3]=[-5.371658690645785, 6.240606046866026, 4.077095944199123]
+Layer 9 done: x[:3]=[-5.470314770326166, 5.290663025326776, 5.117564659584352]
+Layer 10 done: x[:3]=[-5.522863422159785, 3.4584082078083194, 2.3528749633145494]
+Layer 11 done: x[:3]=[-8.517849564681118, 3.7168678580205627, -3.154803543459935]
+Checked 0/50257 tokens, best so far: 0 (score -10.4127)
+Checked 10000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 20000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 30000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 40000/50257 tokens, best so far: 11 (score -7.9665)
+Checked 50000/50257 tokens, best so far: 11 (score -7.9665)
+Predicted token: 11, score: -7.9665
+Top 5 predictions:
+root@b8d73c9a-5c8c-4e6c-bd35-977ecc56c8c7:/app#

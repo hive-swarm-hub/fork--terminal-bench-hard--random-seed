@@ -1,0 +1,155 @@
+New Terminal Output:
+
+root@acdadb09-31de-4914-86ec-459ba2361240:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         print(f"Error: Could not open video {video_path}")
+>         sys.exit(1)
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Read first few frames for background model (no runner present)
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     bg_frames = []
+>     for i in range(min(5, total_frames)):
+>         ret, f = cap.read()
+>         if ret:
+>             bg_frames.append(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32))
+>     bg_gray = np.median(np.array(bg_frames), axis=0)
+>
+>     # Process all frames
+>     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+>     frame_data = []  # (frame_idx, bottom_y, top_y, cx, area)
+>
+>     frame_idx = 0
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+>         diff = np.abs(gray - bg_gray)
+>
+>         # Threshold to find moving object
+>         mask = (diff > 40).astype(np.uint8) * 255
+>
+>         # Morphological operations to clean up
+>         kernel = np.ones((5, 5), np.uint8)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+>         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+>         mask = cv2.dilate(mask, kernel, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter by area
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 200]
+>
+>         if big_contours:
+>             # Find the largest contour (likely the runner)
+>             # But also consider merging nearby contours
+>             all_points = np.vstack(big_contours)
+>             x, y, w, h = cv2.boundingRect(all_points)
+>             total_area = sum(cv2.contourArea(c) for c in big_contours)
+>             bottom_y = y + h
+>             top_y = y
+>             cx = x + w // 2
+>             frame_data.append((frame_idx, bottom_y, top_y, cx, total_area))
+>         else:
+>             frame_data.append((frame_idx, -1, -1, -1, 0))
+>
+>         frame_idx += 1
+>
+>     cap.release()
+>
+>     # Now analyze the frame data to find the jump
+>     # Strategy:
+>     # 1. Find frames where the runner is detected with significant area
+>     # 2. Among those, find the ground level (typical bottom_y when running)
+>     # 3. Find the jump as a dip in bottom_y (runner rises then comes back down)
+>
+>     # Filter to frames with significant runner detection
+>     runner_frames = [(f, bot, top, cx, area) for f, bot, top, cx, area in frame_data
+>                      if area > 1000 and bot > 0]
+>
+>     if not runner_frames:
+>         print("Error: No runner detected")
+>         sys.exit(1)
+>
+>     # Find ground level - the typical bottom_y when runner is on the ground
+>     # This should be the maximum bottom_y values (feet on track)
+>     bot_values = [bot for _, bot, _, _, _ in runner_frames]
+>     ground_level = np.percentile(bot_values, 85)  # Use high percentile as ground level
+>
+>     # Find the jump: a sequence where bottom_y drops significantly below ground level
+>     # The jump is characterized by bottom_y going well below ground_level
+>     threshold = ground_level - 30  # Must rise at least 30 pixels
+>
+>     # Find frames where runner is significantly above ground
+>     airborne_frames = [(f, bot, top, cx, area) for f, bot, top, cx, area in runner_frames
+>                        if bot < threshold]
+>
+>     if not airborne_frames:
+>         # Try with a smaller threshold
+>         threshold = ground_level - 15
+>         airborne_frames = [(f, bot, top, cx, area) for f, bot, top, cx, area in runner_frames
+>                            if bot < threshold]
+>
+>     if not airborne_frames:
+>         print("Error: No jump detected")
+>         sys.exit(1)
+>
+>     # The jump region
+>     first_airborne = airborne_frames[0][0]
+>     last_airborne = airborne_frames[-1][0]
+>
+>     # Takeoff frame: the last frame at/near ground level before the first airborne frame
+>     # Look backwards from first_airborne
+>     takeoff_frame = first_airborne  # default
+>     for f, bot, top, cx, area in reversed(runner_frames):
+>         if f < first_airborne and bot >= ground_level - 10:
+>             takeoff_frame = f
+>             break
+>
+>     # Landing frame: the first frame at/near ground level after the last airborne frame
+>     # Look forwards from last_airborne
+>     land_frame = last_airborne  # default
+>     for f, bot, top, cx, area in runner_frames:
+>         if f > last_airborne and bot >= ground_level - 10:
+>             land_frame = f
+>             break
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@acdadb09-31de-4914-86ec-459ba2361240:/app#

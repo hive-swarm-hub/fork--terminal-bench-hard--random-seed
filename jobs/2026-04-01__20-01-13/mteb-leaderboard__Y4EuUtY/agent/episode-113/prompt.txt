@@ -1,0 +1,132 @@
+New Terminal Output:
+
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app# python3 << 'PYEOF'
+> import requests
+>
+> url = 'https://raw.githubusercontent.com/embeddings-benchmark/mteb/main/mteb/benchmarks/_create_table.py'
+> resp = requests.get(url, timeout=30)
+> text = resp.text
+>
+> # Find the function and go backwards to get the full definition
+> idx = text.find('_create_summary_table_mean_subset')
+> # Find the 'def' keyword before this
+> start = text.rfind('def ', 0, idx)
+> print(text[start:start+4000])
+> PYEOF
+def _create_summary_table_mean_subset(
+    benchmark_results: BenchmarkResults,
+) -> pd.DataFrame:
+    """Create summary table from BenchmarkResults.
+
+    Returns a DataFrame with one row per model containing summary statistics
+    and task type averages. Calculates means where each task-language subset
+    is weighted equally.
+
+    Args:
+        benchmark_results: BenchmarkResults object containing model results
+
+    Returns:
+        DataFrame with model summaries, ready for styling in the leaderboard
+    """
+    data = benchmark_results.to_dataframe(format="long")
+
+    if data.empty:
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return no_results_frame
+
+    # Convert to DataFrame and pivot
+    per_task = data.pivot(index="model_name", columns="task_name", values="score")
+
+    # Remove models with no scores
+    to_remove = per_task.isna().all(axis="columns")
+    if to_remove.all():
+        no_results_frame = pd.DataFrame(
+            {"No results": ["You can try relaxing your criteria"]}
+        )
+        return no_results_frame
+
+    models_to_remove = list(per_task[to_remove].index)
+    per_task = per_task.drop(models_to_remove, axis=0)
+
+    # Calculate means by task type
+    mean_per_type = _get_means_per_types(per_task)
+    mean_per_type = mean_per_type.pivot(
+        index="model_name", columns="task_type", values="score"
+    )
+    mean_per_type.columns = [
+        _split_on_capital(column) for column in mean_per_type.columns
+    ]
+
+    # Calculate subset means (each task-language combination weighted equally)
+    detailed_data = benchmark_results.to_dataframe(
+        aggregation_level="subset", format="long"
+    )
+    overall_subset_mean = detailed_data.groupby("model_name")["score"].mean()
+
+    per_subset = detailed_data.pivot(
+        index="model_name", columns=["task_name", "subset"], values="score"
+    )
+
+    # Build joint table
+    joint_table = mean_per_type.copy()
+    joint_table.insert(0, "mean(subset)", overall_subset_mean)
+    joint_table["borda_rank"] = _get_borda_rank(per_subset)
+    joint_table = joint_table.sort_values("mean(subset)", ascending=False)
+    joint_table = joint_table.reset_index()
+
+    # Add model metadata
+    model_metas = joint_table["model_name"].map(get_model_meta)
+    joint_table = joint_table[model_metas.notna()]
+    joint_table["model_link"] = model_metas.map(lambda m: m.reference)
+
+    # Insert model metadata columns
+    joint_table.insert(
+        1,
+        "Max Tokens",
+        model_metas.map(lambda m: _format_max_tokens(m.max_tokens)),
+    )
+    joint_table.insert(
+        1,
+        "Embedding Dimensions",
+        model_metas.map(lambda m: _get_embedding_size(m.embed_dim)),
+    )
+    joint_table.insert(
+        1,
+        "Total Parameters (B)",
+        model_metas.map(lambda m: _format_n_parameters(m.n_parameters)),
+    )
+    joint_table.insert(
+        1,
+        "Active Parameters (B)",
+        model_metas.map(lambda m: _format_n_active_parameters(m.n_active_parameters)),
+    )
+    # Add zero-shot percentage
+    tasks = get_tasks(tasks=list(data["task_name"].unique()))
+    joint_table.insert(
+        1, "Zero-shot", model_metas.map(lambda m: m.zero_shot_percentage(tasks))
+    )
+    joint_table["Zero-shot"] = joint_table["Zero-shot"].fillna(-1)
+
+    # Add release date from model metadata
+    joint_table["Release Date"] = model_metas.map(
+        lambda m: str(m.release_date) if m.release_date else None
+    )
+
+    # Clean up model names (remove HF organization)
+    joint_table["model_name"] = joint_table["model_name"].map(
+        lambda name: name.split("/")[-1]
+    )
+
+    # Add markdown links to model names
+    name_w_link = (
+        "[" + joint_table["model_name"] + "](" + joint_table["model_link"] + ")"
+    )
+    joint_table["model_name"] = joint_table["model_name"].mask(
+        joint_table["model_link"].notna(), name_w_link
+    )
+    joint_table = joint_table.drop(columns=["model_link"])
+
+
+root@0b83c88d-c81f-476e-b0cf-26d6c24deabb:/app#
