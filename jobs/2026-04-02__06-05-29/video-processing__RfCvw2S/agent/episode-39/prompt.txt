@@ -1,0 +1,173 @@
+New Terminal Output:
+
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app# python3 << 'PYEOF'
+> import cv2
+ np.copy(foot_ys)
+for i in range(1, n - 1):
+    smoothed[i] = (foot_ys[i-1] + foot_ys[i] + foot_ys[i+1]) / 3.0
+
+ground_level = np.percentile(smoothed, 80)
+min_idx = np.argmin(smoothed)
+jump_height = ground_level - smoothed[min_idx]
+ground_threshold = ground_level - jump_height * 0.10
+
+print(f"\nGround level: {ground_level:.1f}")
+print(f"Peak: frame {frames_arr[min_idx]}, smoothed={smoothed[min_idx]:.1f}")
+print(f"Jump height: {jump_height:.1f}")
+print(f"Ground threshold (10%): {ground_threshold:.1f}")
+print(f"Ground threshold (5%): {ground_level - jump_height * 0.05:.1f}")
+print()
+
+for i in range(n):
+    marker = ''
+    if smoothed[i] >= ground_threshold:
+        marker = ' [GROUND]'
+    else:
+        marker = ' [AIR]'
+    if i == min_idx:
+        marker += ' [PEAK]'
+    print(f"  Frame {frames_arr[i]:3d}: raw={foot_ys[i]:6.1f}, smoothed={smoothed[i]:6.1f}, cx={interior[i]['cx']:3d}{marker}")
+
+PYEOF
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> all_frames = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     all_frames.append(frame)
+> cap.release()
+>
+> bg_gray = cv2.cvtColor(all_frames[0], cv2.COLOR_BGR2GRAY)
+> bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+> frame_height, frame_width = bg_gray.shape
+> track_y_start = frame_height // 3
+>
+> # Step 1: Find athlete frames using contour analysis
+> athlete_present = set()
+> for frame_idx in range(1, len(all_frames)):
+>     gray = cv2.cvtColor(all_frames[frame_idx], cv2.COLOR_BGR2GRAY)
+>     blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>     diff = cv2.absdiff(blur, bg_blur)
+>     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     if not contours:
+>         continue
+>     largest = max(contours, key=cv2.contourArea)
+>     area = cv2.contourArea(largest)
+>     x, y, w, h = cv2.boundingRect(largest)
+>     if area >= 500 and h >= 40 and w < frame_width * 0.4:
+>         athlete_present.add(frame_idx)
+>
+> sorted_af = sorted(athlete_present)
+> sequences = []
+> current_seq = [sorted_af[0]]
+> for i in range(1, len(sorted_af)):
+>     if sorted_af[i] - sorted_af[i-1] <= 3:
+>         current_seq.append(sorted_af[i])
+>     else:
+>         sequences.append(current_seq)
+>         current_seq = [sorted_af[i]]
+> sequences.append(current_seq)
+> main_pass = set(max(sequences, key=len))
+> print("Main pass frames:", sorted(main_pass))
+>
+> # Step 2: Compute foot_y for main pass frames
+> frame_data = []
+> for frame_idx in sorted(main_pass):
+>     gray = cv2.cvtColor(all_frames[frame_idx], cv2.COLOR_BGR2GRAY)
+>     blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>     diff = cv2.absdiff(blur, bg_blur)
+>     _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
+>     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>     track_region = thresh[track_y_start:, :]
+>     coords = np.where(track_region > 0)
+>     if len(coords[0]) < 100:
+>         continue
+>     y_coords = coords[0] + track_y_start
+>     x_coords = coords[1]
+>     cx = int(np.mean(x_coords))
+>     x_range = 100
+>     narrow_mask = (x_coords >= cx - x_range) & (x_coords <= cx + x_range)
+>     narrow_count = int(np.sum(narrow_mask))
+>     if narrow_count >= 50:
+>         narrow_y = y_coords[narrow_mask]
+>         foot_y = int(np.percentile(narrow_y, 95))
+>     else:
+>         foot_y = int(np.percentile(y_coords, 95))
+>     near_edge = cx < 60 or cx > frame_width - 60
+>     frame_data.append({'frame': frame_idx, 'foot_y': foot_y, 'cx': cx, 'near_edge': near_edge})
+>
+> interior = [d for d in frame_data if not d['near_edge']]
+> if len(interior) < 5:
+>     interior = frame_data
+>
+> frames_arr = np.array([d['frame'] for d in interior])
+> foot_ys = np.array([d['foot_y'] for d in interior], dtype=float)
+> n = len(foot_ys)
+>
+> smoothed = np.copy(foot_ys)
+> for i in range(1, n - 1):
+>     smoothed[i] = (foot_ys[i-1] + foot_ys[i] + foot_ys[i+1]) / 3.0
+>
+> ground_level = np.percentile(smoothed, 80)
+> min_idx = np.argmin(smoothed)
+> jump_height = ground_level - smoothed[min_idx]
+> ground_threshold = ground_level - jump_height * 0.10
+>
+> print(f"\nGround level: {ground_level:.1f}")
+> print(f"Peak: frame {frames_arr[min_idx]}, smoothed={smoothed[min_idx]:.1f}")
+> print(f"Jump height: {jump_height:.1f}")
+> print(f"Ground threshold (10%): {ground_threshold:.1f}")
+> print(f"Ground threshold (5%): {ground_level - jump_height * 0.05:.1f}")
+> print()
+>
+> for i in range(n):
+>     marker = ''
+>     if smoothed[i] >= ground_threshold:
+>         marker = ' [GROUND]'
+>     else:
+>         marker = ' [AIR]'
+>     if i == min_idx:
+>         marker += ' [PEAK]'
+>     print(f"  Frame {frames_arr[i]:3d}: raw={foot_ys[i]:6.1f}, smoothed={smoothed[i]:6.1f}, cx={interior[i]['cx']:3d}{marker}")
+>
+> PYEOF
+Main pass frames: [47, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]
+
+Ground level: 351.9
+Peak: frame 57, smoothed=227.3
+Jump height: 124.6
+Ground threshold (10%): 339.5
+Ground threshold (5%): 345.7
+
+  Frame  49: raw= 346.0, smoothed= 346.0, cx=900 [GROUND]
+  Frame  50: raw= 352.0, smoothed= 350.7, cx=884 [GROUND]
+  Frame  51: raw= 354.0, smoothed= 352.3, cx=851 [GROUND]
+  Frame  52: raw= 351.0, smoothed= 348.7, cx=806 [GROUND]
+  Frame  53: raw= 341.0, smoothed= 325.7, cx=761 [AIR]
+  Frame  54: raw= 285.0, smoothed= 293.7, cx=707 [AIR]
+  Frame  55: raw= 255.0, smoothed= 260.0, cx=652 [AIR]
+  Frame  56: raw= 240.0, smoothed= 235.7, cx=597 [AIR]
+  Frame  57: raw= 212.0, smoothed= 227.3, cx=528 [AIR] [PEAK]
+  Frame  58: raw= 230.0, smoothed= 235.3, cx=478 [AIR]
+  Frame  59: raw= 264.0, smoothed= 265.3, cx=436 [AIR]
+  Frame  60: raw= 302.0, smoothed= 301.0, cx=404 [AIR]
+  Frame  61: raw= 337.0, smoothed= 332.3, cx=371 [AIR]
+  Frame  62: raw= 358.0, smoothed= 351.3, cx=347 [GROUND]
+  Frame  63: raw= 359.0, smoothed= 355.3, cx=320 [GROUND]
+  Frame  64: raw= 349.0, smoothed= 344.7, cx=284 [GROUND]
+  Frame  65: raw= 326.0, smoothed= 329.0, cx=241 [AIR]
+  Frame  66: raw= 312.0, smoothed= 323.3, cx=203 [AIR]
+  Frame  67: raw= 332.0, smoothed= 333.0, cx=168 [AIR]
+  Frame  68: raw= 355.0, smoothed= 347.3, cx=134 [GROUND]
+  Frame  69: raw= 355.0, smoothed= 354.0, cx= 97 [GROUND]
+  Frame  70: raw= 352.0, smoothed= 353.3, cx= 71 [GROUND]
+  Frame  71: raw= 353.0, smoothed= 353.0, cx= 65 [GROUND]
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app#

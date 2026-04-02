@@ -1,0 +1,153 @@
+New Terminal Output:
+
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# cat > /app/design_primers2.py << 'PYEOF'
+> import subprocess
+>
+o> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # The mutation: insert 39nt at position 215 in the input
+> # input:  ...ATGAG | CAAGGGCGAGGAG...
+> # output: ...ATGAG | TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG | CAAGGGCGAGGAG...
+> # But we can also split the insertion differently since the tail can include
+> # some of the annealing region.
+>
+> # For Q5 SDM insertion:
+> # The insertion can be split between the forward primer tail and part of the overlap.
+> # The key constraint is that the 5' non-annealing tail of the forward primer
+> # contains the insertion sequence.
+>
+> # Let's try different insertion points within the ambiguous region
+> # The insertion is effectively: replace nothing at some position with some sequence
+> # Due to the AG overlap, we can place the insertion at positions 213, 214, or 215
+>
+> # For each possible insertion point, try different annealing lengths
+> best_pair = None
+> best_score = float('inf')  # minimize tm_diff
+>
+> for ins_pos in range(213, 216):  # Try insertion at 213, 214, 215
+>     # Calculate the insertion sequence for this position
+>     # output = input[:ins_pos] + insertion + input[ins_pos:]
+>     # So insertion = output[ins_pos : ins_pos + (len(output) - len(input))]
+>     ins_len = len(output_seq) - len(input_seq)  # 39
+>     insertion = output_seq[ins_pos:ins_pos + ins_len]
+>
+>     # Verify
+>     recon = input_seq[:ins_pos] + insertion + input_seq[ins_pos:]
+>     if recon != output_seq:
+>         print(f"  Insertion at {ins_pos} doesn't reconstruct correctly, skipping")
+>         continue
+>
+>     print(f"Trying insertion point {ins_pos}, insertion: {insertion}")
+>
+>     for fwd_len in range(15, 37):  # annealing portion length (max 36 for oligotm)
+>         fwd_anneal = input_seq[ins_pos:ins_pos + fwd_len]
+>         if len(fwd_anneal) < fwd_len:
+>             continue
+>
+>         try:
+>             fwd_tm = get_tm(fwd_anneal)
+>         except:
+>             continue
+>
+>         if fwd_tm < 58 or fwd_tm > 72:
+>             continue
+>
+>         for rev_len in range(15, 37):  # annealing portion length (max 36 for oligotm)
+>             rev_start = ins_pos - rev_len
+>             if rev_start < 0:
+>                 continue
+>             rev_anneal_template = input_seq[rev_start:ins_pos]
+>             rev_anneal = reverse_complement(rev_anneal_template)
+>
+>             try:
+>                 rev_tm = get_tm(rev_anneal)
+>             except:
+>                 continue
+>
+>             if rev_tm < 58 or rev_tm > 72:
+>                 continue
+>
+>             tm_diff = abs(fwd_tm - rev_tm)
+>             if tm_diff > 5:
+>                 continue
+>
+>             if tm_diff < best_score:
+>                 best_score = tm_diff
+>                 fwd_full = insertion + fwd_anneal
+>                 best_pair = {
+>                     'ins_pos': ins_pos,
+>                     'insertion': insertion,
+>                     'fwd_anneal': fwd_anneal,
+>                     'fwd_full': fwd_full,
+>                     'fwd_tm': fwd_tm,
+>                     'fwd_len': fwd_len,
+>                     'rev_anneal': rev_anneal,
+>                     'rev_full': rev_anneal,
+>                     'rev_tm': rev_tm,
+>                     'rev_len': rev_len,
+>                     'tm_diff': tm_diff
+>                 }
+>
+> if best_pair:
+>     print(f"\nBest primer pair found:")
+>     print(f"  Insertion point: {best_pair['ins_pos']}")
+>     print(f"  Insertion: {best_pair['insertion']}")
+>     print(f"  Forward primer (full): {best_pair['fwd_full']} (total len={len(best_pair['fwd_full'])})")
+>     print(f"  Forward annealing: {best_pair['fwd_anneal']} (len={best_pair['fwd_len']}, Tm={best_pair['fwd_tm']:.2f})")
+>     print(f"  Reverse primer: {best_pair['rev_full']} (len={best_pair['rev_len']}, Tm={best_pair['rev_tm']:.2f})")
+>     print(f"  Tm difference: {best_pair['tm_diff']:.2f}")
+>
+>     # Verify the PCR product would give the output
+>     # The PCR amplifies the whole plasmid with the insertion in the forward primer tail
+>     # After ligation, the product should be the output plasmid
+>
+>     # Write output
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">forward_primer\n{best_pair['fwd_full']}\n")
+>         f.write(f">reverse_primer\n{best_pair['rev_full']}\n")
+>     print("\nPrimers written to primers.fasta")
+> else:
+>     print("No valid primer pair found!")
+>
+> PYEOF
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# python3 /app/design_primers2.py
+Trying insertion point 213, insertion: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+Trying insertion point 214, insertion: GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAA
+Trying insertion point 215, insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+
+Best primer pair found:
+  Insertion point: 215
+  Insertion: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+  Forward primer (full): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG (total len=55)
+  Forward annealing: CAAGGGCGAGGAGCTG (len=16, Tm=61.24)
+  Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (len=34, Tm=61.31)
+  Tm difference: 0.07
+
+Primers written to primers.fasta
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app#

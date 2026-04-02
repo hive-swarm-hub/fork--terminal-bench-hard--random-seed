@@ -1,0 +1,221 @@
+New Terminal Output:
+
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# cat > /tmp/verify2.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # For Q5 SDM with back-to-back primers on a circular template:
+> # Linear PCR product (top strand, 5'->3'):
+> #   fwd_primer_full + template[fwd_anneal_end ... going around ... to rev_anneal_start]
+> #
+> # Bottom strand (5'->3'):
+> #   rev_primer_full + template_complement[rev_anneal_end ... going around ... to fwd_anneal_start]
+> #
+> # After KLD (blunt-end ligation), the 5' end of fwd joins to 5' end of rev (via their complements)
+> # The circular product (top strand) reading from fwd primer start:
+> #   fwd_full + template[fwd_anneal_end to rev_anneal_start] + RC(rev_full)
+> #   which circularizes
+>
+> # So the circular product sequence is:
+> # fwd_tail + fwd_anneal_seq + template_between + RC(rev_anneal) + RC(rev_tail)
+> # where template_between = going from fwd_anneal_end clockwise to just before rev_anneal_start_on_template
+>
+> # For our primers:
+> # fwd_primer = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG
+> # rev_primer = CTCATATGTATATCTCCTTCTTAAAGTTAAACAA
+>
+> # The designed annealing:
+> # fwd_anneal = CAAGGGCGAGGAGCTG (16nt) at input[215:231]
+> # rev_anneal = CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (34nt), RC = TTGTTTAACTTTAAGAAGGAGATATACATATGAG at input[181:215]
+>
+> # fwd_anneal_end = 231
+> # rev_anneal_start_on_template = 181
+> # Since this is circular and fwd_anneal_end(231) > rev_anneal_start(181):
+> # template_between = input[231:] + input[:181]
+>
+> fwd_full = "TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG"
+> rev_full = "CTCATATGTATATCTCCTTCTTAAAGTTAAACAA"
+>
+> # Designed annealing positions
+> fwd_anneal_start = 215  # where fwd annealing starts on template
+> fwd_anneal_len = 16     # CAAGGGCGAGGAGCTG
+> fwd_anneal_end = fwd_anneal_start + fwd_anneal_len  # 231
+>
+> rev_rc = reverse_complement(rev_full)  # This is the template strand the rev primer binds
+> rev_anneal_start = 181  # where RC(rev) starts on template
+> rev_anneal_end = 215    # where RC(rev) ends on template
+>
+> print(f"Template region fwd anneals to: input[{fwd_anneal_start}:{fwd_anneal_end}] = {input_seq[fwd_anneal_start:fwd_anneal_end]}")
+> print(f"Template region rev anneals to: input[{rev_anneal_start}:{rev_anneal_end}] = {input_seq[rev_anneal_start:rev_anneal_end]}")
+> print(f"RC(rev) = {reverse_complement(rev_full)}")
+> print(f"Expected: {input_seq[rev_anneal_start:rev_anneal_end]}")
+> print(f"Match: {reverse_complement(rev_full) == input_seq[rev_anneal_start:rev_anneal_end]}")
+>
+> # Linear PCR product (top strand):
+> # fwd_full + template[fwd_anneal_end:] + template[:rev_anneal_start]
+> template_between = input_seq[fwd_anneal_end:] + input_seq[:rev_anneal_start]
+> linear_product = fwd_full + template_between
+>
+> print(f"\nLinear product length: {len(linear_product)}")
+>
+> # After KLD circularization, the linear product becomes circular
+> # The circular sequence = linear_product (it's already the full circle)
+> # But we need to compare with the output which starts at a specific position
+>
+> # The circular product starting from position 0 of the original input:
+> # We need to find where position 0 of the input maps in the product
+> # The product is: fwd_tail + input[215:231] + input[231:] + input[:181]
+> # = fwd_tail + input[215:] + input[:181]
+> # Hmm, that's not the full circle. We're missing input[181:215].
+> # That's because the rev primer covers input[181:215] - this region is part of the primer, not the template extension.
+> # After KLD, the rev primer's sequence (which is RC of input[181:215]) forms the bottom strand,
+> # so the top strand has input[181:215] from the RC of the rev primer.
+>
+> # Actually, the linear PCR product top strand is:
+> # fwd_full + template[231:end] + template[0:181]
+> # And the bottom strand is:
+> # rev_full + RC(template[180:end]) + RC(template[0:215])  -- wait, this isn't right either
+>
+> # Let me think about it more carefully.
+> # PCR amplification of circular template with back-to-back primers:
+> # Fwd primer (5'->3'): binds to + strand at positions 215-231
+> # Rev primer (5'->3'): binds to - strand at positions 181-215 (i.e., RC of input[181:215])
+> #
+> # Extension from fwd primer goes: 231 -> 232 -> ... -> end -> 0 -> 1 -> ... -> 180
+> #   (stops when it reaches the rev primer on the other strand)
+> # Extension from rev primer goes: 180 -> 179 -> ... -> 0 -> end -> ... -> 232 -> 231
+> #   (on the - strand, going backwards on + strand)
+> #
+> # The linear PCR product top strand (5'->3'):
+> #   fwd_primer_full + input[231:] + input[:181]
+> # The linear PCR product bottom strand (5'->3'):
+> #   rev_primer_full + RC(input[231:]) + RC(input[:181])  -- NO
+> #   Actually the bottom strand (3'->5' reading) is:
+> #   RC(input[:181]) + RC(input[231:]) + RC(fwd_primer_full)
+> #   Or reading 5'->3': the bottom strand = complement of top strand, reversed
+>
+> # After KLD, the blunt ends are ligated:
+> # 5' end of top strand (start of fwd_primer) joins to 3' end of top strand (end of template[:181])
+> # This creates a circle.
+>
+> # The circular product = fwd_tail + input[215:231] + input[231:] + input[:181] + RC_of_rev_primer_on_top_strand
+> # Wait, the top strand already includes fwd_full + input[231:] + input[:181]
+> # The bottom strand at the other end has rev_full which is RC of input[181:215]
+> # So the top strand at that end has input[181:215]
+>
+> # Actually I think the full circular product top strand is:
+> # fwd_full + input[231:] + input[:181] + RC(rev_full_reversed)
+> # No... Let me just think about what KLD does.
+>
+> # The linear product is a double-stranded DNA:
+> # Top:    5'- fwd_full - input[231:] - input[:181] -3'
+> # Bottom: 3'- RC(fwd_full) - RC(input[231:]) - RC(input[:181]) -5'
+> # But wait, the bottom strand was synthesized from the rev primer:
+> # Bottom: 5'- rev_full - RC(input[214:231]) - RC(input[231:]) - ... actually this gets complicated.
+>
+> # Let me just think about it simply:
+> # The linear blunt-ended PCR product has:
+> # Top strand 5'->3': fwd_primer + [template from fwd_anneal_end going around to rev_anneal_start]
+> # = fwd_tail + fwd_anneal + input[231:3591] + input[0:181]
+> #
+> # The bottom strand 5'->3' is:
+> # rev_primer + [template_complement from rev_anneal_end going around to fwd_anneal_start]
+> # = rev_tail(empty) + rev_anneal + RC(input[181:215]) ... no wait.
+> # rev primer anneals to - strand. The - strand at positions 181-215 is RC(input[181:215]).
+> # So rev_primer = RC(input[181:215]) reading 5'->3' on the - strand.
+> # Extension from rev primer on - strand goes: position 180 -> 179 -> ... -> 0 -> 3590 -> ... -> 231
+> # So the bottom strand 5'->3' is:
+> # rev_primer + RC(input[0:181]) + RC(input[231:3591])
+> # = CTCATATGTATATCTCCTTCTTAAAGTTAAACAA + RC(input[0:181]) + RC(input[231:3591])
+>
+> # Now the linear product:
+> # Top:    5'- fwd_tail + input[215:231] + input[231:3591] + input[0:181] -3'
+> #       = 5'- fwd_tail + input[215:3591] + input[0:181] -3'
+> # Bottom: 5'- rev_primer + RC(input[0:181]) + RC(input[231:3591]) -3'
+> #       = 5'- RC(input[181:215]) + RC(input[0:181]) + RC(input[231:3591]) -3'
+>
+> # These should be complementary:
+> # RC of top = RC(input[0:181]) + RC(input[215:3591]) + RC(fwd_tail)
+> # Bottom =   RC(input[181:215]) + RC(input[0:181]) + RC(input[231:3591])
+> # These aren't the same... something's wrong with my reasoning.
+>
+> # Let me just do it empirically. The circular product after KLD should be:
+> # Take the top strand of the linear product and circularize it.
+> # Circle = fwd_tail + input[215:3591] + input[0:181]
+> # Linearized starting at what was position 0 of input:
+> # input[0:181] + fwd_tail + input[215:3591]
+>
+> circle_from_0 = input_seq[0:181] + fwd_full[:39] + input_seq[215:]
+> print(f"\nCircle from pos 0: length = {len(circle_from_0)}")
+> print(f"Output length: {len(output_seq)}")
+>
+> # Wait, fwd_full[:39] is the tail. Let me be more careful.
+> fwd_tail = fwd_full[:39]  # TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+> print(f"fwd_tail = {fwd_tail}")
+>
+> circle = input_seq[:215] + fwd_tail + input_seq[215:]
+> print(f"Circle (insert at 215): length = {len(circle)}")
+> print(f"Match output: {circle == output_seq}")
+>
+> if circle != output_seq:
+>     for i in range(min(len(circle), len(output_seq))):
+>         if circle[i] != output_seq[i]:
+>             print(f"Mismatch at {i}: circle={circle[i]}, output={output_seq[i]}")
+>             print(f"  Circle:  {circle[max(0,i-10):i+10]}")
+>             print(f"  Output:  {output_seq[max(0,i-10):i+10]}")
+>             break
+>
+> # Alternative: maybe the product inserts the tail between rev_anneal_end and fwd_anneal_start
+> # The rev primer anneals up to position 215 (exclusive), fwd anneals starting at 215
+> # They are exactly back-to-back. The tail goes between them.
+> # So the product = input[:215] + fwd_tail + input[215:]
+> circle2 = input_seq[:rev_anneal_end] + fwd_tail + input_seq[fwd_anneal_start:]
+> print(f"\nCircle2 (between rev_end and fwd_start): length = {len(circle2)}")
+> print(f"Match output: {circle2 == output_seq}")
+>
+> PYEOF
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# python3 /tmp/verify2.py
+Template region fwd anneals to: input[215:231] = CAAGGGCGAGGAGCTG
+Template region rev anneals to: input[181:215] = TTGTTTAACTTTAAGAAGGAGATATACATATGAG
+RC(rev) = TTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Expected: TTGTTTAACTTTAAGAAGGAGATATACATATGAG
+Match: True
+
+Linear product length: 3596
+
+Circle from pos 0: length = 3596
+Output length: 3630
+fwd_tail = TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+Circle (insert at 215): length = 3630
+Match output: True
+
+Circle2 (between rev_end and fwd_start): length = 3630
+Match output: True
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app#

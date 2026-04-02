@@ -1,0 +1,144 @@
+New Terminal Output:
+
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app# cat > /app/fit_final3.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         data.append((x, y))
+>
+> data = np.array(data)
+> x = data[:, 0]
+> y = data[:, 1]
+> idx = np.argsort(x)
+> x = x[idx]
+> y = y[idx]
+>
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # Calibration: raman_shift = (x + b) / a
+> # Determined from two known peaks: G at 1580 cm^-1 (x~19140) and 2D at 2700 cm^-1 (x~33245)
+> a_cal = (33245.0 - 19140.0) / (2700.0 - 1580.0)  # 12.5938
+> b_cal = 1580.0 * a_cal - 19140.0  # 758.125 (but negative in the formula)
+> # raman_shift = (x - (19140 - 1580*a)) / a = (x + 758.125) / 12.5938
+>
+> def raw_to_shift(x_raw):
+>     return (x_raw - 19140.0) / a_cal + 1580.0
+>
+> # ===== FIT G PEAK in raw x-space =====
+> g_mask = (x > 17500) & (x < 21000)
+> g_x = x[g_mask]
+> g_y = y[g_mask]
+>
+> # Subtract linear baseline from edges
+> g_left = np.mean(g_y[:3])
+> g_right = np.mean(g_y[-3:])
+> g_left_x = np.mean(g_x[:3])
+> g_right_x = np.mean(g_x[-3:])
+> g_slope = (g_right - g_left) / (g_right_x - g_left_x)
+> g_intercept = g_left - g_slope * g_left_x
+> g_baseline = g_slope * g_x + g_intercept
+> g_y_sub = g_y - g_baseline
+>
+> peak_idx = np.argmax(g_y_sub)
+> print(f"G peak in raw space: x={g_x[peak_idx]:.1f}, height above baseline={g_y_sub[peak_idx]:.1f}")
+>
+> popt_g, _ = curve_fit(lorentzian, g_x, g_y_sub,
+>                       p0=[g_x[peak_idx], 300, g_y_sub[peak_idx], 0],
+>                       maxfev=100000)
+> print(f"G raw fit: x0={popt_g[0]:.2f}, gamma={popt_g[1]:.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+> g_offset_total = popt_g[3] + g_slope * popt_g[0] + g_intercept
+>
+> # Convert to Raman shift
+> g_x0_shift = raw_to_shift(popt_g[0])
+> g_gamma_shift = abs(popt_g[1]) / a_cal
+> print(f"G in Raman shift: x0={g_x0_shift:.2f} cm^-1, gamma={g_gamma_shift:.2f} cm^-1")
+>
+> # ===== FIT 2D PEAK in raw x-space =====
+> d_mask = (x > 29000) & (x < 38000)
+> d_x = x[d_mask]
+> d_y = y[d_mask]
+>
+> # Subtract linear baseline
+> d_left = np.mean(d_y[:3])
+> d_right = np.mean(d_y[-3:])
+> d_left_x = np.mean(d_x[:3])
+> d_right_x = np.mean(d_x[-3:])
+> d_slope = (d_right - d_left) / (d_right_x - d_left_x)
+> d_intercept = d_left - d_slope * d_left_x
+> d_baseline = d_slope * d_x + d_intercept
+> d_y_sub = d_y - d_baseline
+>
+> peak_idx_d = np.argmax(d_y_sub)
+> print(f"\n2D peak in raw space: x={d_x[peak_idx_d]:.1f}, height above baseline={d_y_sub[peak_idx_d]:.1f}")
+>
+> popt_d, _ = curve_fit(lorentzian, d_x, d_y_sub,
+>                       p0=[d_x[peak_idx_d], 1500, d_y_sub[peak_idx_d], 0],
+>                       maxfev=100000)
+> print(f"2D raw fit: x0={popt_d[0]:.2f}, gamma={popt_d[1]:.2f}, amp={popt_d[2]:.2f}, offset={popt_d[3]:.2f}")
+> d_offset_total = popt_d[3] + d_slope * popt_d[0] + d_intercept
+>
+> # Convert to Raman shift
+> d_x0_shift = raw_to_shift(popt_d[0])
+> d_gamma_shift = abs(popt_d[1]) / a_cal
+> print(f"2D in Raman shift: x0={d_x0_shift:.2f} cm^-1, gamma={d_gamma_shift:.2f} cm^-1")
+>
+> # Write results in Raman shift units
+> results = {
+>     "G": {
+>         "x0": round(float(g_x0_shift), 4),
+>         "gamma": round(float(g_gamma_shift), 4),
+>         "amplitude": round(float(popt_g[2]), 4),
+>         "offset": round(float(g_offset_total), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(d_x0_shift), 4),
+>         "gamma": round(float(d_gamma_shift), 4),
+>         "amplitude": round(float(popt_d[2]), 4),
+>         "offset": round(float(d_offset_total), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print("\nFinal Results (Raman shift):")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app# python3 /app/fit_final3.py
+G peak in raw space: x=19429.9, height above baseline=62850.6
+G raw fit: x0=19212.79, gamma=419.02, amp=75454.53, offset=-6461.98
+G in Raman shift: x0=1585.78 cm^-1, gamma=33.27 cm^-1
+
+2D peak in raw space: x=33245.0, height above baseline=2782.2
+2D raw fit: x0=33112.79, gamma=1422.30, amp=2880.96, offset=-218.56
+2D in Raman shift: x0=2689.50 cm^-1, gamma=112.94 cm^-1
+
+Final Results (Raman shift):
+{
+  "G": {
+    "x0": 1585.7798,
+    "gamma": 33.272,
+    "amplitude": 75454.5264,
+    "offset": 10061.7315
+  },
+  "2D": {
+    "x0": 2689.5021,
+    "gamma": 112.9371,
+    "amplitude": 2880.9551,
+    "offset": 18218.4738
+  }
+}
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app#

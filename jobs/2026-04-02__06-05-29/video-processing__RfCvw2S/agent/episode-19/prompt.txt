@@ -1,0 +1,158 @@
+New Terminal Output:
+
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app# cat > /app/jump_analyzer.py << 'SCRIPTEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+> import os
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+>
+>     # Read first frame as background (assumption: no runner in first frame)
+>     ret, bg = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>
+>     bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
+>     bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+>
+>     frame_height, frame_width = bg_gray.shape
+>
+>     # Data collection: for each frame, track the athlete's foot position
+>     frame_foot_positions = {}  # frame_number -> foot_y position
+>     frame_areas = {}  # frame_number -> area of athlete contour
+>     frame_centers = {}  # frame_number -> (cx, cy)
+>
+>     for frame_idx in range(1, total_frames):
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>         diff = cv2.absdiff(bg_blur, blur)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>
+>         # Clean up noise
+>         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         if not contours:
+>             continue
+>
+>         # Filter to significant contours (athlete-sized)
+>         sig_contours = [c for c in contours if cv2.contourArea(c) > 300]
+>         if not sig_contours:
+>             continue
+>
+>         # Get the largest contour
+>         largest = max(sig_contours, key=cv2.contourArea)
+>         area = cv2.contourArea(largest)
+>
+>         if area < 500:
+>             continue
+>
+>         x, y, w, h = cv2.boundingRect(largest)
+>         cx = x + w // 2
+>         cy = y + h // 2
+>         bottom = y + h  # Bottom of bounding box = approximate feet position
+>
+>         frame_foot_positions[frame_idx] = bottom
+>         frame_areas[frame_idx] = area
+>         frame_centers[frame_idx] = (cx, cy)
+>
+>     cap.release()
+>
+>     if not frame_foot_positions:
+>         raise ValueError("No athlete detected in video")
+>
+>     # Find the frames where the athlete is actually present (significant area)
+>     # Sort by frame number
+>     sorted_frames = sorted(frame_foot_positions.keys())
+>
+>     # Filter to frames with substantial athlete presence
+>     areas = [frame_areas[f] for f in sorted_frames]
+>     median_area = np.median(areas)
+>     active_frames = [f for f in sorted_frames if frame_areas[f] > median_area * 0.3]
+>
+>     if len(active_frames) < 5:
+>         raise ValueError("Not enough frames with athlete detected")
+>
+>     # Get foot positions for active frames
+>     foot_positions = np.array([frame_foot_positions[f] for f in active_frames])
+>
+>     # Establish ground level: the typical foot position when running
+>     # Use the maximum foot_y values (highest y = lowest point = on ground)
+>     ground_level = np.percentile(foot_positions, 85)
+>
+>     # Find the frame with the minimum foot_y (highest point = peak of jump)
+>     # The peak of the jump is where foot_y is minimum
+>     min_foot_idx = np.argmin(foot_positions)
+>     peak_frame = active_frames[min_foot_idx]
+>     peak_foot_y = foot_positions[min_foot_idx]
+>
+>     # The jump threshold: foot must be significantly above ground level
+>     jump_height = ground_level - peak_foot_y
+>
+>     if jump_height < 20:
+>         raise ValueError("No significant jump detected")
+>
+>     # Threshold for being "in the air": foot position is at least 30% of jump height above ground
+>     air_threshold = ground_level - jump_height * 0.15
+>
+>     # Find takeoff frame: scan backwards from peak to find where foot leaves ground
+>     # Takeoff is the last frame before the foot rises above the air threshold
+>     takeoff_frame = active_frames[0]  # default
+>     for i in range(min_foot_idx, -1, -1):
+>         if foot_positions[i] >= air_threshold:
+>             takeoff_frame = active_frames[i]
+>             break
+>
+>     # Find landing frame: scan forwards from peak to find where foot returns to ground
+>     # Landing is the first frame where foot drops back below the air threshold
+>     land_frame = active_frames[-1]  # default
+>     for i in range(min_foot_idx, len(active_frames)):
+>         if foot_positions[i] >= air_threshold:
+>             land_frame = active_frames[i]
+>             break
+>
+>     return takeoff_frame, land_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     output_path = '/app/output.toml'
+>     with open(output_path, 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print(f"Output written to {output_path}")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> SCRIPTEOF
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app#

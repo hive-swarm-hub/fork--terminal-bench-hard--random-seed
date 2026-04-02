@@ -1,0 +1,117 @@
+New Terminal Output:
+
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app# python3 << 'PYEOF'
+> import cv2
+> import numpy as np
+>
+> cap = cv2.VideoCapture('/app/example_video.mp4')
+> all_frames = []
+> while True:
+>     ret, frame = cap.read()
+>     if not ret:
+>         break
+>     all_frames.append(frame)
+> cap.release()
+>
+> bg_gray = cv2.cvtColor(all_frames[0], cv2.COLOR_BGR2GRAY)
+> bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+> frame_height, frame_width = bg_gray.shape
+>
+> frame_data = []
+> for frame_idx in range(1, len(all_frames)):
+>     gray = cv2.cvtColor(all_frames[frame_idx], cv2.COLOR_BGR2GRAY)
+>     blur = cv2.GaussianBlur(gray, (5, 5), 0)
+>     diff = cv2.absdiff(blur, bg_blur)
+>     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+>     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>     if not contours:
+>         continue
+>     largest = max(contours, key=cv2.contourArea)
+>     area = cv2.contourArea(largest)
+>     x, y, w, h = cv2.boundingRect(largest)
+>     if area < 500 or h < 40 or w > frame_width * 0.5:
+>         continue
+>     bottom = y + h
+>     cx = x + w // 2
+>     near_left = cx < 80
+>     near_right = cx > frame_width - 80
+>     frame_data.append({'frame': frame_idx, 'area': area, 'bottom': bottom, 'cx': cx, 'near_left': near_left, 'near_right': near_right})
+>
+> # Group into sequences
+> sequences = []
+> current_seq = [frame_data[0]]
+> for i in range(1, len(frame_data)):
+>     if frame_data[i]['frame'] - frame_data[i-1]['frame'] <= 3:
+>         current_seq.append(frame_data[i])
+>     else:
+>         sequences.append(current_seq)
+>         current_seq = [frame_data[i]]
+> sequences.append(current_seq)
+> main_seq = max(sequences, key=len)
+>
+> print("Main sequence frames:", [d['frame'] for d in main_seq])
+>
+> # Filter interior
+> interior_seq = [d for d in main_seq if not d['near_left'] and not d['near_right']]
+> print("Interior frames:", [d['frame'] for d in interior_seq])
+>
+> frames_arr = np.array([d['frame'] for d in interior_seq])
+> bottoms = np.array([d['bottom'] for d in interior_seq], dtype=float)
+> n = len(bottoms)
+>
+> smoothed = np.copy(bottoms)
+> for i in range(1, n - 1):
+>     smoothed[i] = (bottoms[i-1] + bottoms[i] + bottoms[i+1]) / 3.0
+>
+> ground_level = np.percentile(smoothed, 80)
+> min_idx = np.argmin(smoothed)
+> jump_height = ground_level - smoothed[min_idx]
+> ground_threshold = ground_level - jump_height * 0.10
+>
+> print(f"\nGround level: {ground_level:.1f}")
+> print(f"Peak: frame {frames_arr[min_idx]}, smoothed={smoothed[min_idx]:.1f}")
+> print(f"Jump height: {jump_height:.1f}")
+> print(f"Ground threshold: {ground_threshold:.1f}")
+> print()
+>
+> for i in range(n):
+>     marker = ''
+>     if smoothed[i] >= ground_threshold:
+>         marker = ' [GROUND]'
+>     else:
+>         marker = ' [AIR]'
+>     if i == min_idx:
+>         marker += ' [PEAK]'
+>     print(f"  Frame {frames_arr[i]:3d}: raw={bottoms[i]:6.1f}, smoothed={smoothed[i]:6.1f}{marker}")
+>
+> PYEOF
+Main sequence frames: [47, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73]
+Interior frames: [51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68]
+
+Ground level: 308.1
+Peak: frame 58, smoothed=195.0
+Jump height: 113.1
+Ground threshold: 296.8
+
+  Frame  51: raw= 363.0, smoothed= 363.0 [GROUND]
+  Frame  52: raw= 229.0, smoothed= 276.7 [AIR]
+  Frame  53: raw= 238.0, smoothed= 235.7 [AIR]
+  Frame  54: raw= 240.0, smoothed= 237.3 [AIR]
+  Frame  55: raw= 234.0, smoothed= 229.0 [AIR]
+  Frame  56: raw= 213.0, smoothed= 206.3 [AIR]
+  Frame  57: raw= 172.0, smoothed= 197.3 [AIR]
+  Frame  58: raw= 207.0, smoothed= 195.0 [AIR] [PEAK]
+  Frame  59: raw= 206.0, smoothed= 209.3 [AIR]
+  Frame  60: raw= 215.0, smoothed= 218.7 [AIR]
+  Frame  61: raw= 235.0, smoothed= 273.3 [AIR]
+  Frame  62: raw= 370.0, smoothed= 280.7 [AIR]
+  Frame  63: raw= 237.0, smoothed= 325.7 [GROUND]
+  Frame  64: raw= 370.0, smoothed= 314.7 [GROUND]
+  Frame  65: raw= 337.0, smoothed= 298.3 [GROUND]
+  Frame  66: raw= 188.0, smoothed= 289.7 [AIR]
+  Frame  67: raw= 344.0, smoothed= 291.7 [AIR]
+  Frame  68: raw= 343.0, smoothed= 343.0 [GROUND]
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app#

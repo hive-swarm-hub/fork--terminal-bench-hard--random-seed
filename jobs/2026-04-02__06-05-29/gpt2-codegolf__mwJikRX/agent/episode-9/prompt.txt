@@ -1,0 +1,193 @@
+New Terminal Output:
+
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# cat > /app/gpt2.c << 'CEOF'
+> #include<stdio.h>
+> #include<stdlib.h>
+> #include<string.h>
+> #include<math.h>
+> #include<sys/mman.h>
+> #include<fcntl.h>
+> #include<sys/stat.h>
+> #define V 50257
+> #define E 768
+> #define H 12
+> #define L 12
+> #define E4 3072
+> float*W,*wte,*wpe,*lnfw,*lnfb;
+> int P;
+> float*gw(int n){float*p=W+P;P+=n;return p;}
+> typedef struct{float*a[12];}Ly;
+> Ly ly[L];
+> char*tk[V];int ml[50000],mr[50000];
+> void ld(char*wp,char*bp){
+>     int fd=open(wp,O_RDONLY);struct stat st;fstat(fd,&st);
+>     W=mmap(0,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+>     wte=gw(V*E);wpe=gw(1024*E);
+>     for(int i=0;i<L;i++){for(int j=0;j<12;j++){
+>         int sz[]={E,E,E*3*E,3*E,E*E,E,E,E,E*E4,E4,E4*E,E};
+>         ly[i].a[j]=gw(sz[j]);
+>     }}
+>     lnfw=gw(E);lnfb=gw(E);
+>     // Build byte-to-unicode table
+>     int cp[256],n=0;
+>     for(int i=0;i<256;i++){
+>         int f=0;
+>         if(i>=0x21&&i<=0x7e)f=1;
+>         if(i>=0xa1&&i<=0xac)f=1;
+>         if(i>=0xae&&i<=0xff)f=1;
+>         cp[i]=f?i:-1;
+>     }
+>     for(int i=0;i<256;i++)if(cp[i]<0)cp[i]=256+n++;
+>     for(int i=0;i<256;i++){
+>         tk[i]=malloc(4);int c=cp[i];
+>         if(c<0x80){tk[i][0]=c;tk[i][1]=0;}
+>         else{tk[i][0]=0xc0|(c>>6);tk[i][1]=0x80|(c&0x3f);tk[i][2]=0;}
+>     }
+>     FILE*f=fopen(bp,"r");char buf[256];
+>     fgets(buf,256,f);
+>     for(int i=0;i<50000&&fgets(buf,256,f);i++){
+>         char*nl=strchr(buf,'\n');if(nl)*nl=0;
+>         char*sp=strchr(buf,' ');*sp=0;
+>         int ai=-1,bi=-1;
+>         for(int j=0;j<256+i;j++){
+>             if(ai<0&&!strcmp(tk[j],buf))ai=j;
+>             if(bi<0&&!strcmp(tk[j],sp+1))bi=j;
+>             if(ai>=0&&bi>=0)break;
+>         }
+>         ml[i]=ai;mr[i]=bi;
+>         int la=strlen(buf),lb=strlen(sp+1);
+>         tk[256+i]=malloc(la+lb+1);
+>         memcpy(tk[256+i],buf,la);memcpy(tk[256+i]+la,sp+1,lb+1);
+>     }
+>     fclose(f);
+> }
+> int enc(char*s,int*t){
+>     // Convert bytes to initial tokens
+>     int n=0,cp[256],nn=0;
+>     for(int i=0;i<256;i++){int f=(i>=0x21&&i<=0x7e)||(i>=0xa1&&i<=0xac)||(i>=0xae&&i<=0xff);cp[i]=f?i:-1;}
+>     for(int i=0;i<256;i++)if(cp[i]<0)cp[i]=256+nn++;
+>     while(*s){
+>         unsigned char c=*s++;
+>         // Find token for this byte
+>         for(int i=0;i<256;i++)if(cp[i]==(int)c||0){/* wrong */}
+>         // Actually find by matching the UTF-8 string
+>         char tmp[4];int u=cp[c];
+>         if(u<0x80){tmp[0]=u;tmp[1]=0;}
+>         else{tmp[0]=0xc0|(u>>6);tmp[1]=0x80|(u&0x3f);tmp[2]=0;}
+>         for(int i=0;i<256;i++)if(!strcmp(tk[i],tmp)){t[n++]=i;break;}
+>     }
+>     // Apply BPE merges
+>     for(int m=0;m<50000;m++){
+>         for(int i=0;i<n-1;i++){
+>             if(t[i]==ml[m]&&t[i+1]==mr[m]){
+>                 t[i]=256+m;
+>                 memmove(t+i+1,t+i+2,(n-i-2)*sizeof(int));
+>                 n--;i--;
+>             }
+>         }
+>     }
+>     return n;
+> }
+> void ln(float*o,float*x,float*w,float*b,int n){
+>     float m=0,v=0;
+>     for(int i=0;i<n;i++)m+=x[i];
+>     m/=n;
+>     for(int i=0;i<n;i++)v+=(x[i]-m)*(x[i]-m);
+>     v=1.0f/sqrtf(v/n+1e-5f);
+>     for(int i=0;i<n;i++)o[i]=(x[i]-m)*v*w[i]+b[i];
+> }
+> float ge(float x){return 0.5f*x*(1+tanhf(0.7978845608f*(x+0.044715f*x*x*x)));}
+> void fwd(int*tok,int T,float*logits){
+>     float*x=calloc(T*E,4),*h=malloc(T*E*4),*q=malloc(T*3*E*4);
+>     float*att=malloc(H*T*T*4),*ao=malloc(T*E*4),*ff=malloc(T*E4*4);
+>     for(int i=0;i<T;i++)for(int j=0;j<E;j++)x[i*E+j]=wte[tok[i]*E+j]+wpe[i*E+j];
+>     for(int l=0;l<L;l++){
+>         Ly*la=&ly[l];
+>         // LN1
+>         for(int i=0;i<T;i++)ln(h+i*E,x+i*E,la->a[0],la->a[1],E);
+>         // QKV
+>         for(int i=0;i<T;i++)for(int j=0;j<3*E;j++){
+>             float s=la->a[3][j];
+>             for(int k=0;k<E;k++)s+=h[i*E+k]*la->a[2][k*3*E+j];
+>             q[i*3*E+j]=s;
+>         }
+>         // Attention per head
+>         for(int hi=0;hi<H;hi++)for(int i=0;i<T;i++){
+>             float mx=-1e30f;
+>             for(int j=0;j<=i;j++){
+>                 float s=0;
+>                 for(int k=0;k<64;k++)s+=q[i*3*E+hi*64+k]*q[j*3*E+E+hi*64+k];
+>                 s/=8.0f;if(s>mx)mx=s;
+>                 att[hi*T*T+i*T+j]=s;
+>             }
+>             float sum=0;
+>             for(int j=0;j<=i;j++){att[hi*T*T+i*T+j]=expf(att[hi*T*T+i*T+j]-mx);sum+=att[hi*T*T+i*T+j];}
+>             for(int j=0;j<=i;j++)att[hi*T*T+i*T+j]/=sum;
+>             for(int k=0;k<64;k++){
+>                 float s=0;
+>                 for(int j=0;j<=i;j++)s+=att[hi*T*T+i*T+j]*q[j*3*E+2*E+hi*64+k];
+>                 ao[i*E+hi*64+k]=s;
+>             }
+>         }
+>         // Proj + residual
+>         for(int i=0;i<T;i++)for(int j=0;j<E;j++){
+>             float s=la->a[5][j];
+>             for(int k=0;k<E;k++)s+=ao[i*E+k]*la->a[4][k*E+j];
+>             x[i*E+j]+=s;
+>         }
+>         // LN2
+>         for(int i=0;i<T;i++)ln(h+i*E,x+i*E,la->a[6],la->a[7],E);
+>         // MLP
+>         for(int i=0;i<T;i++)for(int j=0;j<E4;j++){
+>             float s=la->a[9][j];
+>             for(int k=0;k<E;k++)s+=h[i*E+k]*la->a[8][k*E4+j];
+>             ff[i*E4+j]=ge(s);
+>         }
+>         for(int i=0;i<T;i++)for(int j=0;j<E;j++){
+>             float s=la->a[11][j];
+>             for(int k=0;k<E4;k++)s+=ff[i*E4+k]*la->a[10][k*E+j];
+>             x[i*E+j]+=s;
+>         }
+>     }
+>     // Final LN + logits (only last position)
+>     ln(h,x+(T-1)*E,lnfw,lnfb,E);
+>     for(int j=0;j<V;j++){
+>         float s=0;
+>         for(int k=0;k<E;k++)s+=h[k]*wte[j*E+k];
+>         logits[j]=s;
+>     }
+>     free(x);free(h);free(q);free(att);free(ao);free(ff);
+> }
+> void dec(int id){// decode token to stdout
+>     char*s=tk[id];
+>     int cp[256],n=0;
+>     for(int i=0;i<256;i++){int f=(i>=0x21&&i<=0x7e)||(i>=0xa1&&i<=0xac)||(i>=0xae&&i<=0xff);cp[i]=f?i:-1;}
+>     for(int i=0;i<256;i++)if(cp[i]<0)cp[i]=256+n++;
+>     // Reverse: unicode codepoint -> byte
+>     unsigned char u2b[512];
+>     for(int i=0;i<256;i++)u2b[cp[i]]=i;
+>     while(*s){
+>         int c;
+>         unsigned char b=*s++;
+>         if(b<0x80)c=b;
+>         else{c=((b&0x1f)<<6)|(*s++&0x3f);}
+>         putchar(u2b[c]);
+>     }
+> }
+> int main(int ac,char**av){
+>     ld(av[1],av[2]);
+>     int tok[1024],T=enc(av[3],tok);
+>     float*logits=malloc(V*4);
+>     for(int i=0;i<20;i++){
+>         fwd(tok,T,logits);
+>         int best=0;
+>         for(int j=1;j<V;j++)if(logits[j]>logits[best])best=j;
+>         tok[T++]=best;
+>         dec(best);
+>     }
+>     fflush(stdout);
+> }
+> CEOF
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# wc -c /app/gpt2.c
+6090 /app/gpt2.c
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app#

@@ -1,0 +1,98 @@
+New Terminal Output:
+
+V[0][0..3]: 0.088116 0.377536 -0.390196 0.114864
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# cat > /tmp/pyref2.py << 'PYEOF'
+> import struct, math
+>
+> V,E,L,E4,H = 50257,768,12,3072,12
+> HS = 64
+>
+> f = open('gpt2-124M.ckpt','rb')
+> def read(n):
+>     data = f.read(n*4)
+>     return list(struct.unpack(f'{n}f', data))
+>
+> wte = read(V*E)
+> wpe = read(1024*E)
+> ln1w = read(E)
+> ln1b = read(E)
+> attnw = read(E*3*E)
+> attnb = read(3*E)
+> projw = read(E*E)
+> projb = read(E)
+> f.close()
+>
+> tok = [15496, 995]
+> T = 2
+>
+> # Embedding
+> x = [0.0]*(T*E)
+> for i in range(T):
+>     for j in range(E):
+>         x[i*E+j] = wte[tok[i]*E+j] + wpe[i*E+j]
+>
+> def layernorm(x_in, w, b, n):
+>     m = sum(x_in)/n
+>     v = sum((xi-m)**2 for xi in x_in)/n
+>     v = 1.0/math.sqrt(v + 1e-5)
+>     return [(xi-m)*v*wi+bi for xi,wi,bi in zip(x_in,w,b)]
+>
+> # LN1 for both positions
+> h = [0.0]*(T*E)
+> for i in range(T):
+>     res = layernorm(x[i*E:(i+1)*E], ln1w, ln1b, E)
+>     for j in range(E): h[i*E+j] = res[j]
+>
+> # QKV
+> q = [0.0]*(T*3*E)
+> for i in range(T):
+>     for j in range(3*E):
+>         s = attnb[j]
+>         for k in range(E):
+>             s += h[i*E+k] * attnw[k*3*E+j]
+>         q[i*3*E+j] = s
+>
+> # Attention
+> ao = [0.0]*(T*E)
+> for hi in range(H):
+>     for i in range(T):
+>         # Compute attention scores
+>         scores = []
+>         mx = -1e30
+>         for j in range(i+1):
+>             s = 0
+>             for k in range(HS):
+>                 s += q[i*3*E+hi*HS+k] * q[j*3*E+E+hi*HS+k]
+>             s /= 8.0
+>             scores.append(s)
+>             if s > mx: mx = s
+>         # Softmax
+>         sm = 0
+>         for j in range(len(scores)):
+>             scores[j] = math.exp(scores[j] - mx)
+>             sm += scores[j]
+>         for j in range(len(scores)):
+>             scores[j] /= sm
+>         # Weighted sum of values
+>         for k in range(HS):
+>             s = 0
+>             for j in range(i+1):
+>                 s += scores[j] * q[j*3*E+2*E+hi*HS+k]
+>             ao[i*E+hi*HS+k] = s
+>
+> print(f"ao[1][0..3]: {ao[E]:.6f} {ao[E+1]:.6f} {ao[E+2]:.6f} {ao[E+3]:.6f}")
+>
+> # Projection + residual
+> for i in range(T):
+>     for j in range(E):
+>         s = projb[j]
+>         for k in range(E):
+>             s += ao[i*E+k] * projw[k*E+j]
+>         x[i*E+j] += s
+>
+> print(f"After attn L0 x[1][0..3]: {x[E]:.6f} {x[E+1]:.6f} {x[E+2]:.6f} {x[E+3]:.6f}")
+> PYEOF
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# python3 /tmp/pyref2.py
+ao[1][0..3]: 0.191660 0.260201 -0.580018 -0.129467
+After attn L0 x[1][0..3]: -1.707508 -0.504019 -1.109629 -1.429610
+

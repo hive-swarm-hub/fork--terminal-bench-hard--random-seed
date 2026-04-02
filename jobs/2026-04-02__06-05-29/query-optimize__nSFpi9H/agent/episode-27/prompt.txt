@@ -1,0 +1,63 @@
+New Terminal Output:
+
+root@e72fdeb1-5f83-4adc-8686-c1826093251d:/app# sqlite3 /app/oewn.sqlite < /app/my-sql-query.sql > /tmp/orig_out.txt 2>&1 &
+[1] 2537
+root@e72fdeb1-5f83-4adc-8686-c1826093251d:/app# python3 -c "
+> import sqlite3
+> import time
+>
+> conn = sqlite3.connect('/app/oewn.sqlite')
+> c = conn.cursor()
+>
+> # Read optimized output
+> with open('/tmp/opt_out.txt') as f:
+>     opt_lines = f.readlines()
+>
+> print(f'Optimized output: {len(opt_lines)} rows')
+>
+> # Verify a sample of rows by running original subquery logic
+> import random
+> random.seed(42)
+> sample_indices = sorted(random.sample(range(len(opt_lines)), min(50, len(opt_lines))))
+>
+> errors = 0
+> for idx in sample_indices:
+>     parts = opt_lines[idx].strip().split('|')
+>     wordid = int(parts[0])
+>     word = parts[1]
+>     total_synsets = int(parts[2])
+>     total_senses = int(parts[3])
+>     distinct_domains = int(parts[4])
+>     distinct_posids = int(parts[5])
+>     top_synsetid = int(parts[6])
+>     top_synset_sense_count = int(parts[7])
+>
+>     # Verify word_stats
+>     c.execute('''SELECT COUNT(DISTINCT s.synsetid), COUNT(*), COUNT(DISTINCT syn.domainid), COUNT(DISTINCT syn.posid)
+>                  FROM senses s JOIN synsets syn ON s.synsetid = syn.synsetid
+>                  WHERE s.wordid = ?''', (wordid,))
+>     row = c.fetchone()
+>     if row != (total_synsets, total_senses, distinct_domains, distinct_posids):
+>         print(f'MISMATCH stats for wordid {wordid}: expected {row}, got {(total_synsets, total_senses, distinct_domains, distinct_posids)}')
+>         errors += 1
+>
+>     # Verify top_synsetid
+>     c.execute('''SELECT s.synsetid FROM senses s WHERE s.wordid = ?
+>                  GROUP BY s.synsetid ORDER BY COUNT(*) DESC, s.synsetid ASC LIMIT 1''', (wordid,))
+>     row = c.fetchone()
+>     if row[0] != top_synsetid:
+>         print(f'MISMATCH top_synsetid for wordid {wordid}: expected {row[0]}, got {top_synsetid}')
+>         errors += 1
+>
+>     # Verify top_synset_sense_count
+>     c.execute('''SELECT COUNT(*) FROM senses s WHERE s.wordid = ? AND s.synsetid = ?''', (wordid, top_synsetid))
+>     row = c.fetchone()
+>     if row[0] != top_synset_sense_count:
+>         print(f'MISMATCH top_synset_sense_count for wordid {wordid}: expected {row[0]}, got {top_synset_sense_count}')
+>         errors += 1
+>
+> print(f'Verified {len(sample_indices)} rows, {errors} errors')
+> conn.close()
+> " 2>&1
+Optimized output: 17834 rows
+

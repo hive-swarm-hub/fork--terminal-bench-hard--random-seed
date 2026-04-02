@@ -1,0 +1,142 @@
+New Terminal Output:
+
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app# cat > /app/fit_final.py << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> import json
+>
+> # Read data
+> data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         data.append((x, y))
+>
+> data = np.array(data)
+> x = data[:, 0]
+> y = data[:, 1]
+> idx = np.argsort(x)
+> x = x[idx]
+> y = y[idx]
+>
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # ===== FIT G PEAK =====
+> # The G peak is around x=19140, use a window that captures the wings
+> # Exclude the flat-top saturated region
+> g_mask = (x > 17500) & (x < 21000)
+> g_x = x[g_mask]
+> g_y = y[g_mask]
+>
+> # Initial guess
+> g_peak_idx = np.argmax(g_y)
+> g_x0 = g_x[g_peak_idx]
+> g_amp = g_y.max() - g_y.min()
+> g_offset = g_y.min()
+> g_gamma = 300  # rough half-width
+>
+> print(f"G peak data: {len(g_x)} points")
+> print(f"G initial: x0={g_x0:.1f}, gamma={g_gamma}, amp={g_amp:.1f}, offset={g_offset:.1f}")
+>
+> popt_g, pcov_g = curve_fit(lorentzian, g_x, g_y,
+>                            p0=[g_x0, g_gamma, g_amp, g_offset],
+>                            maxfev=100000)
+> print(f"G fit: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amp={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+>
+> # Verify fit quality
+> g_residuals = g_y - lorentzian(g_x, *popt_g)
+> print(f"G fit residuals: RMS={np.sqrt(np.mean(g_residuals**2)):.1f}")
+>
+> # ===== FIT 2D PEAK =====
+> # The 2D peak is around x=33245
+> d_mask = (x > 29000) & (x < 38000)
+> d_x = x[d_mask]
+> d_y = y[d_mask]
+>
+> d_peak_idx = np.argmax(d_y)
+> d_x0 = d_x[d_peak_idx]
+> d_amp = d_y.max() - d_y.min()
+> d_offset = d_y.min()
+> d_gamma = 1500  # broader peak
+>
+> print(f"\n2D peak data: {len(d_x)} points")
+> print(f"2D initial: x0={d_x0:.1f}, gamma={d_gamma}, amp={d_amp:.1f}, offset={d_offset:.1f}")
+>
+> popt_d, pcov_d = curve_fit(lorentzian, d_x, d_y,
+>                            p0=[d_x0, d_gamma, d_amp, d_offset],
+>                            maxfev=100000)
+> print(f"2D fit: x0={popt_d[0]:.4f}, gamma={popt_d[1]:.4f}, amp={popt_d[2]:.4f}, offset={popt_d[3]:.4f}")
+>
+> # Verify fit quality
+> d_residuals = d_y - lorentzian(d_x, *popt_d)
+> print(f"2D fit residuals: RMS={np.sqrt(np.mean(d_residuals**2)):.1f}")
+>
+> # Convert to Raman shift for sanity check
+> # Using linear calibration: shift = (x + 758.125) / 12.5938
+> def to_shift(val):
+>     return (val + 758.125) / 12.5938
+>
+> print(f"\nSanity check (Raman shift):")
+> print(f"  G x0 in cm^-1: {to_shift(popt_g[0]):.1f} (expected ~1580)")
+> print(f"  2D x0 in cm^-1: {to_shift(popt_d[0]):.1f} (expected ~2700)")
+>
+> # Write results
+> results = {
+>     "G": {
+>         "x0": round(float(popt_g[0]), 4),
+>         "gamma": round(float(abs(popt_g[1])), 4),
+>         "amplitude": round(float(popt_g[2]), 4),
+>         "offset": round(float(popt_g[3]), 4)
+>     },
+>     "2D": {
+>         "x0": round(float(popt_d[0]), 4),
+>         "gamma": round(float(abs(popt_d[1])), 4),
+>         "amplitude": round(float(popt_d[2]), 4),
+>         "offset": round(float(popt_d[3]), 4)
+>     }
+> }
+>
+> with open('/app/results.json', 'w') as f:
+>     json.dump(results, f, indent=2)
+>
+> print("\nResults:")
+> print(json.dumps(results, indent=2))
+> PYEOF
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app# python3 /app/fit_final.py
+G peak data: 36 points
+G initial: x0=19139.5, gamma=300, amp=66842.8, offset=12557.3
+G fit: x0=19195.5360, gamma=424.8876, amp=75101.4241, offset=10023.4368
+G fit residuals: RMS=5249.7
+
+2D peak data: 31 points
+2D initial: x0=33245.0, gamma=1500, amp=3818.3, offset=17434.5
+2D fit: x0=34442.1472, gamma=13071.8016, amp=22717.6970, offset=-2298.9372
+2D fit residuals: RMS=448.2
+
+Sanity check (Raman shift):
+  G x0 in cm^-1: 1584.4 (expected ~1580)
+  2D x0 in cm^-1: 2795.0 (expected ~2700)
+
+Results:
+{
+  "G": {
+    "x0": 19195.536,
+    "gamma": 424.8876,
+    "amplitude": 75101.4241,
+    "offset": 10023.4368
+  },
+  "2D": {
+    "x0": 34442.1472,
+    "gamma": 13071.8016,
+    "amplitude": 22717.697,
+    "offset": -2298.9372
+  }
+}
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app#

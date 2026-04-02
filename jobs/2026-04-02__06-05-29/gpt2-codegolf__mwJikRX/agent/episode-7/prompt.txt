@@ -1,0 +1,142 @@
+New Terminal Output:
+
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# cat > /tmp/ref.py << 'PYEOF'
+> import struct, numpy as np, sys
+>
+> # GPT-2 124M config
+> V,C,E,H,L = 50257,1024,768,12,12
+>
+> # Load weights
+> f = open('gpt2-124M.ckpt','rb')
+> W = np.frombuffer(f.read(), dtype=np.float32)
+> f.close()
+>
+> # Parse weights
+> off = 0
+> def get(shape):
+>     global off
+>     n = 1
+>     for s in shape: n *= s
+>     t = W[off:off+n].reshape(shape)
+>     off += n
+>     return t
+>
+> wte = get((V,E))
+> wpe = get((C,E))
+> layers = []
+> for i in range(L):
+>     ln1w = get((E,))
+>     ln1b = get((E,))
+>     attnw = get((E,3*E))
+>     attnb = get((3*E,))
+>     projw = get((E,E))
+>     projb = get((E,))
+>     ln2w = get((E,))
+>     ln2b = get((E,))
+>     fcw = get((E,4*E))
+>     fcb = get((4*E,))
+>     fc2w = get((4*E,E))
+>     fc2b = get((E,))
+>     layers.append((ln1w,ln1b,attnw,attnb,projw,projb,ln2w,ln2b,fcw,fcb,fc2w,fc2b))
+> lnfw = get((E,))
+> lnfb = get((E,))
+> print(f'Loaded {off} params')
+>
+> def layernorm(x, w, b):
+>     mu = x.mean(-1, keepdims=True)
+>     var = x.var(-1, keepdims=True)
+>     return (x - mu) / np.sqrt(var + 1e-5) * w + b
+>
+> def gelu(x):
+>     return 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3)))
+>
+> def softmax(x):
+>     x = x - x.max(-1, keepdims=True)
+>     e = np.exp(x)
+>     return e / e.sum(-1, keepdims=True)
+>
+> def forward(tokens):
+>     T = len(tokens)
+>     x = wte[tokens] + wpe[:T]
+>     for ln1w,ln1b,attnw,attnb,projw,projb,ln2w,ln2b,fcw,fcb,fc2w,fc2b in layers:
+>         # Self-attention
+>         h = layernorm(x, ln1w, ln1b)
+>         qkv = h @ attnw + attnb  # (T, 3E)
+>         q,k,v = np.split(qkv, 3, axis=-1)  # each (T, E)
+>         # Split heads
+>         hs = E // H
+>         q = q.reshape(T, H, hs).transpose(1,0,2)  # (H, T, hs)
+>         k = k.reshape(T, H, hs).transpose(1,0,2)
+>         v = v.reshape(T, H, hs).transpose(1,0,2)
+>         # Attention
+>         att = q @ k.transpose(0,2,1) / np.sqrt(hs)  # (H, T, T)
+>         # Causal mask
+>         mask = np.triu(np.ones((T,T)), k=1) * -1e10
+>         att = att + mask
+>         att = softmax(att)
+>         out = att @ v  # (H, T, hs)
+>         out = out.transpose(1,0,2).reshape(T, E)  # (T, E)
+>         x = x + out @ projw + projb
+>         # MLP
+>         h = layernorm(x, ln2w, ln2b)
+>         x = x + gelu(h @ fcw + fcb) @ fc2w + fc2b
+>     x = layernorm(x, lnfw, lnfb)
+>     logits = x @ wte.T  # weight tying
+>     return logits
+>
+> # Quick test with token [15496] = "Hello"
+> tokens = [15496, 995]  # "Hello world"
+> logits = forward(tokens)
+> next_token = np.argmax(logits[-1])
+> print(f'Next token after "Hello world": {next_token}')
+>
+> # Build reverse vocab for decoding
+> def bytes_to_unicode():
+>     bs = list(range(ord('!'), ord('~')+1)) + list(range(0xa1, 0xac+1)) + list(range(0xae, 0xff+1))
+>     cs = bs[:]
+>     n = 0
+>     for b in range(256):
+>         if b not in bs:
+>             bs.append(b)
+>             cs.append(256+n)
+>             n += 1
+>     return dict(zip(bs, [chr(c) for c in cs]))
+>
+> b2u = bytes_to_unicode()
+> u2b = {v:k for k,v in b2u.items()}
+>
+> with open('vocab.bpe','r',encoding='utf-8') as f:
+>     lines = f.read().strip().split('\n')
+> merges = [tuple(l.split()) for l in lines[1:]]
+> vocab = {b2u[i]:i for i in range(256)}
+> for i,(a,b) in enumerate(merges):
+>     vocab[a+b] = 256+i
+> id2tok = {v:k for k,v in vocab.items()}
+>
+> def decode(token_ids):
+>     text = ''
+>     for tid in token_ids:
+>         tok_str = id2tok[tid]
+>         for c in tok_str:
+>             text += chr(u2b[c])
+>     return text
+>
+> print(f'Decoded next token: {repr(decode([next_token]))}')
+>
+> # Generate 20 tokens
+> tokens = [15496, 995]  # Hello world
+> for _ in range(20):
+>     logits = forward(tokens)
+>     nt = int(np.argmax(logits[-1]))
+>     tokens.append(nt)
+>     print(f'Token {nt}: {repr(decode([nt]))}')
+> print(f'Full output: {repr(decode(tokens))}')
+> PYEOF
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# python3 /tmp/ref.py 2>&1 | tee /tmp/ref_output.txt &
+[1] 1288
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app# Traceback (most recent call last):
+  File "/tmp/ref.py", line 1, in <module>
+    import struct, numpy as np, sys
+ModuleNotFoundError: No module named 'numpy'
+[1]+  Done                    python3 /tmp/ref.py 2>&1 | tee /tmp/ref_output.txt
+root@021b3445-cc56-418d-ab4d-fa77d09ebfe1:/app#

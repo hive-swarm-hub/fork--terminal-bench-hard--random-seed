@@ -1,0 +1,136 @@
+New Terminal Output:
+
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app# python3 << 'PYEOF'
+> import numpy as np
+> from scipy.optimize import curve_fit
+> from scipy.signal import find_peaks
+> import json
+>
+> # Read data
+> data = []
+> with open('/app/graphene.dat', 'r') as f:
+>     for line in f:
+>         line = line.strip()
+>         if not line:
+>             continue
+>         parts = line.split()
+>         x = float(parts[0].replace(',', '.'))
+>         y = float(parts[1].replace(',', '.'))
+>         data.append((x, y))
+>
+> data = np.array(data)
+> x_raw = data[:, 0]  # These are absolute wavenumber in cm^-1
+> y = data[:, 1]
+>
+> # Sort ascending
+> idx = np.argsort(x_raw)
+> x_raw = x_raw[idx]
+> y = y[idx]
+>
+> # Convert to wavelength (uniformly spaced)
+> wavelength = 1e7 / x_raw  # nm, sorted descending (since x_raw ascending)
+> # Reverse to make wavelength ascending
+> wavelength = wavelength[::-1]
+> y_wl = y[::-1]
+>
+> # Find the laser peak in wavelength space
+> laser_wl_approx = 1e7 / 19139.54  # ~522.48 nm
+> print(f"Laser wavelength: {laser_wl_approx:.2f} nm")
+>
+> # Stokes side: wavelength > laser wavelength
+> stokes_mask = wavelength > laser_wl_approx + 2  # slight offset to avoid laser
+> stokes_wl = wavelength[stokes_mask]
+> stokes_y = y_wl[stokes_mask]
+>
+> # Convert to Raman shift
+> stokes_shift = 1e7/laser_wl_approx - 1e7/stokes_wl
+>
+> print(f"Stokes data: {len(stokes_wl)} points")
+> print(f"Raman shift range: {stokes_shift.min():.1f} to {stokes_shift.max():.1f}")
+>
+> # The data IS uniformly spaced in wavelength, so let's work in wavelength
+> # and convert the fit results to Raman shift afterward
+>
+> # For the G peak (~1580 cm^-1 shift):
+> # lambda_G = 1 / (1/522.48 - 1580/1e7) nm
+> lambda_G = 1e7 / (1e7/laser_wl_approx - 1580)
+> print(f"\nExpected G peak wavelength: {lambda_G:.2f} nm")
+>
+> # For the 2D peak (~2700 cm^-1 shift):
+> lambda_2D = 1e7 / (1e7/laser_wl_approx - 2700)
+> print(f"Expected 2D peak wavelength: {lambda_2D:.2f} nm")
+>
+> # Let's look at the spectrum around these wavelengths
+> for name, lam_center, width in [("G", lambda_G, 30), ("2D", lambda_2D, 30)]:
+>     mask = (stokes_wl > lam_center - width) & (stokes_wl < lam_center + width)
+>     if np.any(mask):
+>         wl_reg = stokes_wl[mask]
+>         y_reg = stokes_y[mask]
+>         shift_reg = stokes_shift[mask]
+>         print(f"\n{name} peak region (wl={lam_center-width:.0f}-{lam_center+width:.0f} nm): {np.sum(mask)} points")
+>         peak_idx = np.argmax(y_reg)
+>         print(f"  Peak at wl={wl_reg[peak_idx]:.2f} nm, shift={shift_reg[peak_idx]:.1f} cm^-1, intensity={y_reg[peak_idx]:.1f}")
+>         print(f"  Min intensity: {y_reg.min():.1f}")
+>     else:
+>         print(f"\nNo data around {name} peak!")
+>
+> # Now let's fit in Raman shift space
+> # Lorentzian: amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+> def lorentzian(x, x0, gamma, amplitude, offset):
+>     return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+>
+> # G peak fit
+> g_mask = (stokes_shift > 1500) & (stokes_shift < 1680)
+> g_shift = stokes_shift[g_mask]
+> g_y = stokes_y[g_mask]
+> print(f"\nG peak fitting region: {len(g_shift)} points")
+> if len(g_shift) > 4:
+>     g_peak_idx = np.argmax(g_y)
+>     p0_g = [g_shift[g_peak_idx], 10, g_y[g_peak_idx] - np.median(g_y), np.median(g_y)]
+>     print(f"G initial guess: x0={p0_g[0]:.1f}, gamma={p0_g[1]}, amp={p0_g[2]:.1f}, offset={p0_g[3]:.1f}")
+>     try:
+>         popt_g, _ = curve_fit(lorentzian, g_shift, g_y, p0=p0_g, maxfev=50000)
+>         print(f"G fit result: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amp={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+>     except Exception as e:
+>         print(f"G fit failed: {e}")
+> else:
+>     print(f"Not enough points for G peak fit!")
+>
+> # 2D peak fit
+> d_mask = (stokes_shift > 2550) & (stokes_shift < 2850)
+> d_shift = stokes_shift[d_mask]
+> d_y = stokes_y[d_mask]
+> print(f"\n2D peak fitting region: {len(d_shift)} points")
+> if len(d_shift) > 4:
+>     d_peak_idx = np.argmax(d_y)
+>     p0_d = [d_shift[d_peak_idx], 15, d_y[d_peak_idx] - np.median(d_y), np.median(d_y)]
+>     print(f"2D initial guess: x0={p0_d[0]:.1f}, gamma={p0_d[1]}, amp={p0_d[2]:.1f}, offset={p0_d[3]:.1f}")
+>     try:
+>         popt_d, _ = curve_fit(lorentzian, d_shift, d_y, p0=p0_d, maxfev=50000)
+>         print(f"2D fit result: x0={popt_d[0]:.4f}, gamma={popt_d[1]:.4f}, amp={popt_d[2]:.4f}, offset={popt_d[3]:.4f}")
+>     except Exception as e:
+>         print(f"2D fit failed: {e}")
+> else:
+>     print(f"Not enough points for 2D peak fit!")
+> PYEOF
+Laser wavelength: 522.48 nm
+Stokes data: 3447 points
+Raman shift range: 94.8 to 17490.8
+
+Expected G peak wavelength: 569.49 nm
+Expected 2D peak wavelength: 608.29 nm
+
+G peak region (wl=539-599 nm): 23 points
+  Peak at wl=540.67 nm, shift=643.8 cm^-1, intensity=32580.5
+  Min intensity: 16592.6
+
+2D peak region (wl=578-638 nm): 23 points
+  Peak at wl=579.49 nm, shift=1883.1 cm^-1, intensity=18199.4
+  Min intensity: 16191.2
+
+G peak fitting region: 2 points
+Not enough points for G peak fit!
+
+2D peak fitting region: 4 points
+Not enough points for 2D peak fit!
+root@6e38894d-6712-489e-b061-cfd3a37a6ac5:/app#

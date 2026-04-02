@@ -1,0 +1,84 @@
+New Terminal Output:
+
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app# head -n 80 /app/jump_analyzer.py
+import cv2
+import numpy as np
+import toml
+import sys
+
+
+def analyze_jump(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    # Read all frames
+    all_frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        all_frames.append(frame)
+    cap.release()
+
+    if len(all_frames) < 2:
+        raise ValueError("Video too short")
+
+    # Background: first frame
+    bg_gray = cv2.cvtColor(all_frames[0], cv2.COLOR_BGR2GRAY)
+    bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+    frame_height, frame_width = bg_gray.shape
+    track_y_start = frame_height // 3
+
+    # STEP 1: Identify athlete frames using contour analysis
+    athlete_present = set()
+    for frame_idx in range(1, len(all_frames)):
+        gray = cv2.cvtColor(all_frames[frame_idx], cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        diff = cv2.absdiff(blur, bg_blur)
+        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        x, y, w, h = cv2.boundingRect(largest)
+        if area >= 500 and h >= 40 and w < frame_width * 0.4:
+            athlete_present.add(frame_idx)
+
+    if len(athlete_present) < 5:
+        raise ValueError("Not enough athlete frames")
+
+    # Find main pass (longest consecutive sequence)
+    sorted_af = sorted(athlete_present)
+    sequences = []
+    current_seq = [sorted_af[0]]
+    for i in range(1, len(sorted_af)):
+        if sorted_af[i] - sorted_af[i-1] <= 3:
+            current_seq.append(sorted_af[i])
+        else:
+            sequences.append(current_seq)
+            current_seq = [sorted_af[i]]
+    sequences.append(current_seq)
+    main_pass = set(max(sequences, key=len))
+
+    # STEP 2: Compute foot_y for main pass frames
+    frame_data = []
+    for frame_idx in sorted(main_pass):
+        gray = cv2.cvtColor(all_frames[frame_idx], cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        diff = cv2.absdiff(blur, bg_blur)
+        _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        track_region = thresh[track_y_start:, :]
+        coords = np.where(track_region > 0)
+        if len(coords[0]) < 100:
+            continue
+        y_coords = coords[0] + track_y_start
+        x_coords = coords[1]
+        cx = int(np.mean(x_coords))
+root@d2b3fb64-9a73-4775-8bf4-ec6f1224f025:/app#

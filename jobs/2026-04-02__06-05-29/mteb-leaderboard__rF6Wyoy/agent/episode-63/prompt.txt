@@ -1,0 +1,109 @@
+New Terminal Output:
+
+root@7144444d-7567-42eb-877f-7944a48af5ca:/app# cat > /tmp/fast_score.py << 'PYEOF'
+> import requests
+> import json
+> from concurrent.futures import ThreadPoolExecutor, as_completed
+> import sys
+> import time
+>
+> # Load paths.json
+> print("Loading paths.json...", flush=True)
+> resp = requests.get("https://huggingface.co/datasets/mteb/results/resolve/main/paths.json", timeout=30)
+> paths = resp.json()
+>
+> scand_tasks = set(["BornholmBitextMining", "NorwegianCourtsBitextMining", "AngryTweetsClassification",
+>     "DanishPoliticalCommentsClassification", "DalajClassification", "DKHateClassification",
+>     "LccSentimentClassification", "MassiveIntentClassification", "MassiveScenarioClassification",
+>     "NordicLangClassification", "NoRecClassification", "NorwegianParliamentClassification",
+>     "ScalaClassification", "SwedishSentimentClassification", "SweRecClassification",
+>     "DanFeverRetrieval", "NorQuadRetrieval", "SNLRetrieval", "SwednRetrieval",
+>     "SweFaqRetrieval", "TV2Nordretrieval", "TwitterHjerneRetrieval",
+>     "SNLHierarchicalClusteringS2S", "SNLHierarchicalClusteringP2P",
+>     "SwednClusteringP2P", "SwednClusteringS2S", "VGHierarchicalClusteringS2S", "VGHierarchicalClusteringP2P"])
+>
+> base_url = "https://huggingface.co/datasets/mteb/results/resolve/main/"
+>
+> # Build list of ALL URLs to fetch (model, task, url)
+> all_requests = []
+> model_files = {}
+> for model_key, result_files in paths.items():
+>     scand_files = {}
+>     for rf in result_files:
+>         task_name = rf.split('/')[-1].replace('.json', '')
+>         if task_name in scand_tasks:
+>             scand_files[task_name] = rf
+>     if len(scand_files) >= 26:
+>         model_files[model_key] = scand_files
+>         for task, path in scand_files.items():
+>             all_requests.append((model_key, task, base_url + path))
+>
+> print(f"Models: {len(model_files)}, Total requests: {len(all_requests)}", flush=True)
+>
+> # Use a session with connection pooling for speed
+> session = requests.Session()
+> adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+> session.mount('https://', adapter)
+>
+> def fetch_one(args):
+>     model_key, task, url = args
+>     try:
+>         resp = session.get(url, timeout=15)
+>         if resp.status_code == 200:
+>             data = resp.json()
+>             scores = data.get('scores', {})
+>             for split in ['test', 'validation', 'dev']:
+>                 if split in scores:
+>                     split_scores = scores[split]
+>                     if isinstance(split_scores, list):
+>                         main_scores = [s.get('main_score', 0) for s in split_scores if 'main_score' in s]
+>                         if main_scores:
+>                             return (model_key, task, sum(main_scores) / len(main_scores))
+>     except:
+>         pass
+>     return (model_key, task, None)
+>
+> print("Fetching all results with 50 threads...", flush=True)
+> start = time.time()
+>
+> results = {}
+> with ThreadPoolExecutor(max_workers=50) as executor:
+>     futures = [executor.submit(fetch_one, args) for args in all_requests]
+>     done = 0
+>     for future in as_completed(futures):
+>         model_key, task, score = future.result()
+>         if score is not None:
+>             if model_key not in results:
+>                 results[model_key] = {}
+>             results[model_key][task] = score
+>         done += 1
+>         if done % 100 == 0:
+>             print(f"  {done}/{len(all_requests)} done...", flush=True)
+>
+> print(f"Done in {time.time()-start:.1f}s", flush=True)
+>
+> # Compute means
+> model_scores = []
+> for model_key, task_scores in results.items():
+>     model_name = model_key.replace('__', '/')
+>     mean = sum(task_scores.values()) / len(task_scores)
+>     model_scores.append((model_name, mean, len(task_scores)))
+>
+> model_scores.sort(key=lambda x: x[1], reverse=True)
+>
+> print("\n=== TOP 20 MODELS (Scandinavian MTEB) ===")
+> for i, (model, mean, ntasks) in enumerate(model_scores[:20]):
+>     print(f"{i+1}. {model}: {mean:.4f} ({ntasks} tasks)")
+>
+> print(f"\nBest model: {model_scores[0][0]}")
+> with open('/tmp/best_model.txt', 'w') as f:
+>     f.write(model_scores[0][0])
+> PYEOF
+root@7144444d-7567-42eb-877f-7944a48af5ca:/app# python3 /tmp/fast_score.py 2>&1 | tee /tmp/fast_score_out.txt &
+[1] 4838
+root@7144444d-7567-42eb-877f-7944a48af5ca:/app# echo "Started PID: $!"
+Started PID: 4838
+root@7144444d-7567-42eb-877f-7944a48af5ca:/app# Loading paths.json...
+Models: 133, Total requests: 3477
+Fetching all results with 50 threads...
+root@7144444d-7567-42eb-877f-7944a48af5ca:/app#

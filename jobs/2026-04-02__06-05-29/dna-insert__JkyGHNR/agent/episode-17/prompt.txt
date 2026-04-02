@@ -1,0 +1,236 @@
+New Terminal Output:
+
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# cat > /tmp/verify_final.py << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def reverse_complement(seq):
+>     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Parse sequences
+> seqs = parse_fasta('/app/sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Parse primers
+> primers = parse_fasta('/app/primers.fasta')
+> primer_names = list(primers.keys())
+> print(f"Primer names: {primer_names}")
+> print(f"Number of primer pairs: {len(primer_names) // 2}")
+>
+> fwd_primer = primers[primer_names[0]].upper()
+> rev_primer = primers[primer_names[1]].upper()
+>
+> print(f"\nForward primer: {fwd_primer} (len={len(fwd_primer)})")
+> print(f"Reverse primer: {rev_primer} (len={len(rev_primer)})")
+>
+> # Find where the forward primer anneals to the input
+> # The 3' end of the forward primer should anneal to the input template
+> # Try all possible annealing lengths from the 3' end
+> fwd_anneal_found = False
+> for anneal_len in range(15, min(46, len(fwd_primer) + 1)):
+>     anneal_region = fwd_primer[-anneal_len:]
+>     # Check if this anneals to the input (forward strand)
+>     pos = input_seq.find(anneal_region)
+>     if pos >= 0:
+>         fwd_tail = fwd_primer[:-anneal_len]
+>         fwd_anneal = anneal_region
+>         fwd_anneal_pos = pos
+>         fwd_anneal_found = True
+>         # Keep looking for longer annealing
+>
+> if fwd_anneal_found:
+>     print(f"\nForward primer annealing region: {fwd_anneal} (len={len(fwd_anneal)})")
+>     print(f"  Anneals at input position: {fwd_anneal_pos}")
+>     print(f"  5' tail (non-annealing): {fwd_tail} (len={len(fwd_tail)})")
+>     fwd_tm = get_tm(fwd_anneal)
+>     print(f"  Tm of annealing region: {fwd_tm:.2f}")
+> else:
+>     print("ERROR: Forward primer annealing region not found in input!")
+>
+> # Find where the reverse primer anneals
+> # The reverse primer anneals to the reverse complement of the input
+> rev_anneal_found = False
+> for anneal_len in range(15, min(46, len(rev_primer) + 1)):
+>     anneal_region = rev_primer[-anneal_len:]
+>     # Check if this anneals to the reverse complement (i.e., the complement of the anneal region matches the input)
+>     rc_anneal = reverse_complement(anneal_region)
+>     pos = input_seq.find(rc_anneal)
+>     if pos >= 0:
+>         rev_tail = rev_primer[:-anneal_len]
+>         rev_anneal = anneal_region
+>         rev_anneal_pos = pos
+>         rev_anneal_found = True
+>
+> if rev_anneal_found:
+>     print(f"\nReverse primer annealing region: {rev_anneal} (len={len(rev_anneal)})")
+>     print(f"  RC of annealing anneals at input position: {rev_anneal_pos}")
+>     print(f"  5' tail (non-annealing): {rev_tail} (len={len(rev_tail)})")
+>     rev_tm = get_tm(rev_anneal)
+>     print(f"  Tm of annealing region: {rev_tm:.2f}")
+> else:
+>     print("ERROR: Reverse primer annealing region not found in input!")
+>
+> # Verify constraints
+> print("\n=== CONSTRAINT CHECKS ===")
+> if fwd_anneal_found:
+>     print(f"Fwd anneal length {len(fwd_anneal)}: {'PASS' if 15 <= len(fwd_anneal) <= 45 else 'FAIL'}")
+>     print(f"Fwd Tm {fwd_tm:.2f}: {'PASS' if 58 <= fwd_tm <= 72 else 'FAIL'}")
+> if rev_anneal_found:
+>     print(f"Rev anneal length {len(rev_anneal)}: {'PASS' if 15 <= len(rev_anneal) <= 45 else 'FAIL'}")
+>     print(f"Rev Tm {rev_tm:.2f}: {'PASS' if 58 <= rev_tm <= 72 else 'FAIL'}")
+> if fwd_anneal_found and rev_anneal_found:
+>     tm_diff = abs(fwd_tm - rev_tm)
+>     print(f"Tm difference {tm_diff:.2f}: {'PASS' if tm_diff <= 5 else 'FAIL'}")
+>
+> # Simulate Q5 SDM PCR product
+> # The forward primer anneals at fwd_anneal_pos on the + strand
+> # The reverse primer anneals at rev_anneal_pos on the - strand
+> # In Q5 SDM, primers are back-to-back, amplifying the whole circular plasmid
+> # The product = rev_primer_RC + template_between + fwd_primer
+> # But for circular: the product after KLD treatment should be:
+> # fwd_tail + fwd_anneal_region_on_template ... going around ... rev_anneal_region_on_template
+>
+> if fwd_anneal_found and rev_anneal_found:
+>     # Forward primer anneals at fwd_anneal_pos (+ strand)
+>     # Reverse primer anneals to - strand, RC maps to input[rev_anneal_pos:rev_anneal_pos+len(rc)]
+>     rc_rev = reverse_complement(rev_anneal)
+>     rev_end_on_template = rev_anneal_pos + len(rc_rev)  # end of reverse primer annealing on template
+>
+>     print(f"\n=== PCR PRODUCT SIMULATION ===")
+>     print(f"Fwd anneals at input[{fwd_anneal_pos}:{fwd_anneal_pos+len(fwd_anneal)}]")
+>     print(f"Rev anneals at input[{rev_anneal_pos}:{rev_end_on_template}] (template strand)")
+>
+>     # For back-to-back primers on a circular template:
+>     # The linear PCR product is:
+>     # 5'-[fwd_tail][fwd_anneal -> ... -> rev_anneal_RC]-3' (top strand)
+>     # After circularization (KLD), the circular product is:
+>     # fwd_tail + template from fwd_anneal_pos going clockwise to rev_end_on_template
+>
+>     if fwd_anneal_pos >= rev_end_on_template:
+>         # Primers are back-to-back, product goes: fwd -> end of template -> start -> rev
+>         template_region = input_seq[fwd_anneal_pos:] + input_seq[:rev_end_on_template]
+>     else:
+>         # fwd is downstream of rev end - they go around the circle
+>         template_region = input_seq[fwd_anneal_pos:] + input_seq[:rev_end_on_template]
+>
+>     # The full circular product (linearized at the junction):
+>     # The top strand of the PCR product = fwd_primer_full + template_between + RC(rev_primer)
+>     # But actually for the circular product after ligation:
+>     # It's: fwd_tail + template[fwd_anneal_pos ... going around ... rev_anneal_end]
+>
+>     # Let me think about this differently.
+>     # After PCR and KLD:
+>     # The circular product = rev_tail(if any) + RC(rev_anneal_template_region) +
+>     #   template_between_primers + fwd_tail + fwd_anneal_template_region
+>     # Wait, let me think step by step.
+>
+>     # The linear PCR product (top strand, 5'->3'):
+>     # = fwd_primer + template_extension + RC(rev_primer)
+>     # = fwd_tail + fwd_anneal + [template from fwd_anneal_end to rev_anneal_start] + RC(rev_anneal) + RC(rev_tail)
+>
+>     # After KLD circularization, the ends join:
+>     # The circle = fwd_tail + template[fwd_anneal_pos to rev_anneal_start_on_template] + RC(rev_tail_if_any)
+>     # Wait, the template between the primers...
+>
+>     # For back-to-back primers pointing away from each other:
+>     # fwd starts at fwd_anneal_pos going right
+>     # rev (on - strand) ends at rev_anneal_pos going left (which means on + strand it covers rev_anneal_pos to rev_end)
+>     # The template amplified is everything NOT between the primer annealing sites
+>     # i.e., from fwd_anneal_pos going clockwise around to rev_end_on_template
+>
+>     # Actually for SDM: primers point AWAY from each other (back-to-back)
+>     # fwd anneals at pos 215, pointing right (toward higher positions)
+>     # rev anneals at region ending at pos 215 (pointing left from there)
+>     # So they amplify the ENTIRE plasmid
+>
+>     # The linear product top strand:
+>     # fwd_full_primer_sequence ... template ... RC(rev_full_primer)
+>     # = fwd_tail + [input from fwd_anneal_pos all the way around to just before rev_anneal_start]
+>     # + RC(rev_tail if any)
+>
+>     # Circular product after KLD:
+>     # Going around: ...rev_tail_RC + fwd_tail + input[fwd_anneal_pos] ... input[rev_end-1]...
+>     # Since rev has no tail, the circular product is:
+>     # fwd_tail + input[fwd_anneal_pos ... going around circle ... rev_end_on_template-1]
+>
+>     # Since rev_end_on_template = rev_anneal_pos + len(RC) and the primers are back-to-back:
+>     # The circular output = fwd_tail + entire_input_starting_from_fwd_anneal_pos
+>     # = fwd_tail inserted at fwd_anneal_pos in the circular input
+>
+>     # For our case:
+>     # fwd_tail = insertion sequence
+>     # insertion point = fwd_anneal_pos = 215
+>     # rev_end_on_template = where reverse primer annealing ends on template
+>
+>     # The circular product linearized at position 0:
+>     circular_product = input_seq[:fwd_anneal_pos] + fwd_tail + input_seq[fwd_anneal_pos:]
+>
+>     print(f"\nCircular product length: {len(circular_product)}")
+>     print(f"Expected output length: {len(output_seq)}")
+>     print(f"Product matches output: {circular_product == output_seq}")
+>
+>     if circular_product != output_seq:
+>         for i in range(min(len(circular_product), len(output_seq))):
+>             if circular_product[i] != output_seq[i]:
+>                 print(f"First mismatch at {i}: product={circular_product[i]}, output={output_seq[i]}")
+>                 print(f"  Product context: {circular_product[max(0,i-15):i+15]}")
+>                 print(f"  Output context:  {output_seq[max(0,i-15):i+15]}")
+>                 break
+>
+> PYEOF
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app# python3 /tmp/verify_final.py
+Primer names: ['forward_primer', 'reverse_primer']
+Number of primer pairs: 1
+
+Forward primer: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAGCTG (len=55)
+Reverse primer: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (len=34)
+
+Forward primer annealing region: AGCAAGGGCGAGGAGCTG (len=18)
+  Anneals at input position: 213
+  5' tail (non-annealing): TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (len=37)
+  Tm of annealing region: 66.27
+
+Reverse primer annealing region: CTCATATGTATATCTCCTTCTTAAAGTTAAACAA (len=34)
+  RC of annealing anneals at input position: 181
+  5' tail (non-annealing):  (len=0)
+  Tm of annealing region: 61.31
+
+=== CONSTRAINT CHECKS ===
+Fwd anneal length 18: PASS
+Fwd Tm 66.27: PASS
+Rev anneal length 34: PASS
+Rev Tm 61.31: PASS
+Tm difference 4.96: PASS
+
+=== PCR PRODUCT SIMULATION ===
+Fwd anneals at input[213:231]
+Rev anneals at input[181:215] (template strand)
+
+Circular product length: 3628
+Expected output length: 3630
+Product matches output: False
+First mismatch at 213: product=T, output=A
+  Product context: GGAGATATACATATGTAGATTAGAAGAAGA
+  Output context:  GGAGATATACATATGAGTAGATTAGAAGAA
+root@2a660775-6551-49e1-be59-4e65de6a99a4:/app#

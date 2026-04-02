@@ -1,0 +1,114 @@
+New Terminal Output:
+
+root@e72fdeb1-5f83-4adc-8686-c1826093251d:/app# cat /app/sol.sql
+WITH word_synset_counts AS (
+  SELECT
+    s.wordid,
+    s.synsetid,
+    COUNT(*) AS sense_count
+  FROM senses s
+  GROUP BY s.wordid, s.synsetid
+),
+ranked AS (
+  SELECT
+    wordid,
+    synsetid,
+    sense_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY wordid
+      ORDER BY sense_count DESC, synsetid ASC
+    ) AS rn
+  FROM word_synset_counts
+),
+top_synset AS (
+  SELECT wordid, synsetid AS top_synsetid, sense_count AS top_synset_sense_count
+  FROM ranked
+  WHERE rn = 1
+),
+word_stats AS (
+  SELECT
+    w.wordid,
+    w.word,
+    COUNT(DISTINCT s.synsetid) AS total_synsets,
+    COUNT(*) AS total_senses,
+    COUNT(DISTINCT syn.domainid) AS distinct_domains,
+    COUNT(DISTINCT syn.posid) AS distinct_posids
+  FROM words w
+  JOIN senses s ON w.wordid = s.wordid
+  JOIN synsets syn ON s.synsetid = syn.synsetid
+  GROUP BY w.wordid, w.word
+  HAVING total_synsets >= 2
+    AND distinct_domains >= 2
+    AND total_senses >= 2
+)
+SELECT
+  ws.wordid AS word_id,
+  ws.word AS word,
+  ws.total_synsets,
+  ws.total_senses,
+  ws.distinct_domains,
+  ws.distinct_posids,
+  ts.top_synsetid,
+  ts.top_synset_sense_count
+FROM word_stats ws
+JOIN top_synset ts ON ws.wordid = ts.wordid
+ORDER BY
+  ws.total_senses DESC,
+  ws.total_synsets DESC,
+  ws.distinct_domains DESC,
+  ws.wordid ASC
+LIMIT 500;
+root@e72fdeb1-5f83-4adc-8686-c1826093251d:/app# python3 << 'EOF'
+> import sqlite3, time
+>
+> # Create a copy with indexes for faster verification
+> conn = sqlite3.connect('/app/oewn.sqlite')
+> c = conn.cursor()
+>
+> # Create temp indexes to speed up verification queries
+> c.execute('CREATE INDEX IF NOT EXISTS idx_senses_wordid ON senses(wordid)')
+> c.execute('CREATE INDEX IF NOT EXISTS idx_senses_wordid_synsetid ON senses(wordid, synsetid)')
+> c.execute('CREATE INDEX IF NOT EXISTS idx_synsets_synsetid ON synsets(synsetid)')
+> conn.commit()
+> print('Indexes created')
+>
+> # Run optimized query
+> with open('/app/sol.sql') as f:
+>     opt_sql = f.read()
+> t0 = time.time()
+> c.execute(opt_sql)
+> opt_rows = c.fetchall()
+> t1 = time.time()
+> print(f'Optimized: {len(opt_rows)} rows in {t1-t0:.3f}s')
+>
+> # Run original query
+> with open('/app/my-sql-query.sql') as f:
+>     orig_sql = f.read()
+> t0 = time.time()
+> c.execute(orig_sql)
+> orig_rows = c.fetchall()
+> t1 = time.time()
+> print(f'Original: {len(orig_rows)} rows in {t1-t0:.3f}s')
+>
+> # Compare
+> if opt_rows == orig_rows:
+>     print('MATCH: Both queries produce identical output!')
+> else:
+>     print(f'MISMATCH: opt={len(opt_rows)} rows, orig={len(orig_rows)} rows')
+>     for i in range(min(len(opt_rows), len(orig_rows))):
+>         if opt_rows[i] != orig_rows[i]:
+>             print(f'First diff at row {i}:')
+>             print(f'  opt:  {opt_rows[i]}')
+>             print(f'  orig: {orig_rows[i]}')
+>             break
+>
+> # Drop the indexes we created
+> c.execute('DROP INDEX IF EXISTS idx_senses_wordid')
+> c.execute('DROP INDEX IF EXISTS idx_senses_wordid_synsetid')
+> c.execute('DROP INDEX IF EXISTS idx_synsets_synsetid')
+> conn.commit()
+> print('Indexes dropped')
+> conn.close()
+> EOF
+Indexes created
+
