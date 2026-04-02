@@ -1,0 +1,95 @@
+New Terminal Output:
+
+root@c63b69a5-97c3-4324-8dd4-0499dd36302a:/app# python3 << 'EOF'
+> import struct, mmap, math
+>
+> E=768; V=50257; C=1024; L=12; H=12; D=64; M=3072
+> PL=7087872
+>
+> f = open('gpt2-124M.ckpt','rb')
+> m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+>
+> def rf(off, n):
+>     return list(struct.unpack(f'{n}f', m[off*4:(off+n)*4]))
+>
+> # Weight offsets for layer 0
+> cab = rf(0, 3*E)
+> caw = rf(3*E, E*3*E)
+> cpb = rf(3*E + E*3*E, E)
+> cpw = rf(3*E + E*3*E + E, E*E)
+> l1b = rf(3*E + E*3*E + E + E*E, E)
+> l1g = rf(3*E + E*3*E + E + E*E + E, E)
+> l2b = rf(3*E + E*3*E + E + E*E + 2*E, E)
+> l2g = rf(3*E + E*3*E + E + E*E + 3*E, E)
+>
+> lfb = rf(L*PL, E)
+> lfg = rf(L*PL + E, E)
+> wpe = rf(L*PL + 2*E, C*E)
+> wte = rf(L*PL + 2*E + C*E, V*E)
+>
+> # Token 15496 at position 0
+> tok = 15496
+> hid = [wte[tok*E+i] + wpe[0*E+i] for i in range(E)]
+> print(f'hid[:5] = {hid[:5]}')
+>
+> # LayerNorm 1
+> mean = sum(hid)/E
+> var = sum((x-mean)**2 for x in hid)/E
+> std = math.sqrt(var + 1e-5)
+> ln1 = [(hid[i]-mean)/std * l1g[i] + l1b[i] for i in range(E)]
+> print(f'ln1[:5] = {ln1[:5]}')
+>
+> # c_attn: QKV = ln1 @ caw + cab
+> # caw is [E, 3*E], so output[j] = sum(ln1[i] * caw[i*3E+j]) + cab[j]
+> qkv = [0.0]*(3*E)
+> for j in range(3*E):
+>     s = cab[j]
+>     for i in range(E):
+>         s += ln1[i] * caw[i*3*E + j]
+>     qkv[j] = s
+>
+> print(f'Q[:5] = {qkv[:5]}')
+> print(f'K[:5] = {qkv[E:E+5]}')
+> print(f'V[:5] = {qkv[2*E:2*E+5]}')
+>
+> # Single position attention: output = V (since softmax of single element = 1)
+> # Then project: out = attn_out @ cpw + cpb
+> attn_out = qkv[:E]  # For single position, attention output = V... wait no
+> # For single position: Q@K^T/sqrt(D) -> softmax -> 1.0, then 1.0 * V = V
+> # So attention output for each head = V values for that head
+>
+> # Actually, for a single position:
+> # score = Q.K / sqrt(D) -> softmax = 1.0
+> # output = 1.0 * V = V
+> attn_out = qkv[2*E:3*E]  # V values
+>
+> print(f'attn_out[:5] = {attn_out[:5]}')
+>
+> # Project: out = attn_out @ cpw + cpb
+> proj = [0.0]*E
+> for j in range(E):
+>     s = cpb[j]
+>     for i in range(E):
+>         s += attn_out[i] * cpw[i*E + j]
+>     proj[j] = s
+>
+> print(f'proj[:5] = {proj[:5]}')
+>
+> # Residual
+> for i in range(E):
+>     hid[i] += proj[i]
+>
+> print(f'hid after attn+res[:5] = {hid[:5]}')
+>
+> m.close()
+> f.close()
+> EOF
+hid[:5] = [-0.087471479550004, -0.33011239767074585, 0.01523002702742815, -0.13531081657856703, -0.12034638226032257]
+ln1[:5] = [-0.052242387042290554, -0.1287420978706303, -0.05589586850010629, -0.07083219264249545, -0.0775979343609251]
+Q[:5] = [0.4700907062842915, -0.07750076448039189, 0.5530714876782664, -0.7012008177838145, -0.25255713538909286]
+K[:5] = [-1.2525948384322716, 2.319984915500475, 0.17218439661930238, -0.23058731237588603, 0.6757848322237523]
+V[:5] = [0.16369692308197337, 0.20416833076192337, -0.04364284065333629, 0.07657921801783824, 0.03815733197480778]
+attn_out[:5] = [0.16369692308197337, 0.20416833076192337, -0.04364284065333629, 0.07657921801783824, 0.03815733197480778]
+proj[:5] = [0.24899856900633097, -0.4000796311192624, -0.23902619704459227, -0.03704451453402217, 0.06059015817017503]
+hid after attn+res[:5] = [0.16152708945632696, -0.7301920287900083, -0.22379617001716412, -0.1723553311125892, -0.05975622409014754]
+root@c63b69a5-97c3-4324-8dd4-0499dd36302a:/app#

@@ -1,0 +1,143 @@
+New Terminal Output:
+
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> # Read all files
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> primers = parse_fasta('primers.fasta')
+> fwd = list(primers.values())[0].upper()
+> rev = list(primers.values())[1].upper()
+>
+> print(f"Forward primer: {fwd}")
+> print(f"Reverse primer: {rev}")
+> print()
+>
+> # Find where fwd anneals on input
+> # The 3' end of fwd must anneal to the input template
+> # Try all possible annealing lengths from the 3' end
+> fwd_anneal = None
+> fwd_tail = None
+> for anneal_len in range(15, min(len(fwd)+1, 46)):
+>     candidate = fwd[-anneal_len:]
+>     if candidate in input_seq or candidate in (input_seq + input_seq):  # circular
+>         fwd_anneal = candidate
+>         fwd_tail = fwd[:-anneal_len]
+>         break
+>
+> if not fwd_anneal:
+>     # Try from longest
+>     for anneal_len in range(min(len(fwd), 45), 14, -1):
+>         candidate = fwd[-anneal_len:]
+>         if candidate in input_seq or candidate in (input_seq + input_seq):
+>             fwd_anneal = candidate
+>             fwd_tail = fwd[:-anneal_len]
+>             break
+>
+> print(f"Forward annealing: {fwd_anneal} ({len(fwd_anneal)} nt)")
+> print(f"Forward tail: {fwd_tail} ({len(fwd_tail)} nt)")
+>
+> # Reverse primer - entire thing should anneal (for insertion, reverse has no tail)
+> # Check if RC of reverse primer is found in input
+> rev_rc = rc(rev)
+> if rev_rc in input_seq or rev_rc in (input_seq + input_seq):
+>     rev_anneal = rev
+>     print(f"Reverse annealing: {rev_anneal} ({len(rev_anneal)} nt) - full primer")
+> else:
+>     print(f"WARNING: RC of reverse primer not found in input!")
+>     print(f"RC: {rev_rc}")
+>
+> print()
+>
+> # Verify Tm constraints
+> fwd_tm = get_tm(fwd_anneal)
+> rev_tm = get_tm(rev_anneal)
+> print(f"Forward Tm: {fwd_tm:.2f}")
+> print(f"Reverse Tm: {rev_tm:.2f}")
+> print(f"Tm difference: {abs(fwd_tm - rev_tm):.2f}")
+> print()
+>
+> # Verify all constraints
+> all_ok = True
+> checks = [
+>     ("Fwd anneal len in [15,45]", 15 <= len(fwd_anneal) <= 45),
+>     ("Rev anneal len in [15,45]", 15 <= len(rev_anneal) <= 45),
+>     ("Fwd Tm in [58,72]", 58 <= fwd_tm <= 72),
+>     ("Rev Tm in [58,72]", 58 <= rev_tm <= 72),
+>     ("Tm diff <= 5", abs(fwd_tm - rev_tm) <= 5),
+> ]
+>
+> for name, ok in checks:
+>     status = "PASS" if ok else "FAIL"
+>     if not ok:
+>         all_ok = False
+>     print(f"  [{status}] {name}")
+>
+> print()
+>
+> # Verify the product
+> fwd_pos = input_seq.find(fwd_anneal)
+> rev_rc_pos = input_seq.find(rev_rc)
+> print(f"Forward anneals at input position: {fwd_pos}")
+> print(f"Reverse RC at input position: {rev_rc_pos}-{rev_rc_pos + len(rev)}")
+>
+> # Reconstruct product
+> product = input_seq[:fwd_pos] + fwd_tail + input_seq[fwd_pos:]
+> print(f"\nProduct == Output: {product == output_seq}")
+>
+> if all_ok and product == output_seq:
+>     print("\n=== ALL CHECKS PASSED ===")
+> else:
+>     print("\n=== SOME CHECKS FAILED ===")
+> PYEOF
+Forward primer: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG
+Reverse primer: CATATGTATATCTCCTTCTTAAAGTTAAACAA
+
+Forward annealing: AGCAAGGGCGAGGAG (15 nt)
+Forward tail: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39 nt)
+Reverse annealing: CATATGTATATCTCCTTCTTAAAGTTAAACAA (32 nt) - full primer
+
+Forward Tm: 59.54
+Reverse Tm: 59.74
+Tm difference: 0.21
+
+  [PASS] Fwd anneal len in [15,45]
+  [PASS] Rev anneal len in [15,45]
+  [PASS] Fwd Tm in [58,72]
+  [PASS] Rev Tm in [58,72]
+  [PASS] Tm diff <= 5
+
+Forward anneals at input position: 213
+Reverse RC at input position: 181-213
+
+Product == Output: True
+
+=== ALL CHECKS PASSED ===
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app#

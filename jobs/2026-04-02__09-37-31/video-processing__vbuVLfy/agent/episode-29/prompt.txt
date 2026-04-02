@@ -1,0 +1,196 @@
+New Terminal Output:
+
+root@d378751b-6e3a-4706-8d9c-f63db41237c5:/app# cat > /app/jump_analyzer.py << 'PYEOF'
+> import cv2
+> import numpy as np
+> import toml
+> import sys
+>
+>
+> def analyze_jump(video_path):
+>     cap = cv2.VideoCapture(video_path)
+>     if not cap.isOpened():
+>         raise ValueError(f"Cannot open video: {video_path}")
+>
+>     # Read first frame as background (no runner present)
+>     ret, bg_frame = cap.read()
+>     if not ret:
+>         raise ValueError("Cannot read first frame")
+>     bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY)
+>     bg_gray = cv2.GaussianBlur(bg_gray, (21, 21), 0)
+>
+>     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+>     kernel = np.ones((5, 5), np.uint8)
+>
+>     # Process all frames sequentially (faster than seeking)
+>     frame_data = []
+>     frame_idx = 0
+>
+>     while True:
+>         ret, frame = cap.read()
+>         if not ret:
+>             break
+>         frame_idx += 1  # frame_idx starts at 1 (frame 0 was background)
+>
+>         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+>         gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+>
+>         # Background subtraction
+>         diff = cv2.absdiff(bg_gray, gray_blur)
+>         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+>
+>         # Morphological operations to clean up
+>         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+>         thresh = cv2.dilate(thresh, kernel, iterations=2)
+>
+>         # Find contours
+>         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+>
+>         # Filter to significant contours (runner body)
+>         big_contours = [c for c in contours if cv2.contourArea(c) > 500]
+>
+>         if big_contours:
+>             area = sum(cv2.contourArea(c) for c in big_contours)
+>             white_rows = np.where(thresh > 0)
+>             if len(white_rows[0]) > 0:
+>                 bottom_y = int(np.max(white_rows[0]))
+>                 top_y = int(np.min(white_rows[0]))
+>
+>                 frame_data.append({
+>                     'frame': frame_idx,
+>                     'bottom_y': bottom_y,
+>                     'top_y': top_y,
+>                     'area': area,
+>                 })
+>
+>     cap.release()
+>
+>     if not frame_data:
+>         raise ValueError("No runner detected in video")
+>
+>     # Filter to frames with significant runner detection
+>     runner_frames = [f for f in frame_data if f['area'] > 1000]
+>
+>     if len(runner_frames) < 5:
+>         raise ValueError("Not enough runner frames detected")
+>
+>     # Find the main sequence of runner frames (consecutive)
+>     # Group into sequences allowing small gaps
+>     sequences = []
+>     current_seq = [runner_frames[0]]
+>     for i in range(1, len(runner_frames)):
+>         if runner_frames[i]['frame'] - runner_frames[i-1]['frame'] <= 3:
+>             current_seq.append(runner_frames[i])
+>         else:
+>             sequences.append(current_seq)
+>             current_seq = [runner_frames[i]]
+>     sequences.append(current_seq)
+>
+>     # Use the longest sequence (main runner passage)
+>     main_seq = max(sequences, key=len)
+>
+>     if len(main_seq) < 5:
+>         raise ValueError("Main runner sequence too short")
+>
+>     # Establish ground level from the frames where runner is on ground
+>     # Ground level is the maximum bottom_y observed
+>     bottom_ys = [f['bottom_y'] for f in main_seq]
+>     ground_level = max(bottom_ys)
+>
+>     # Airborne threshold: bottom_y drops more than 30 pixels below ground
+>     airborne_threshold = ground_level - 30
+>
+>     # Find frames that are clearly airborne
+>     airborne_indices = []
+>     for i, f in enumerate(main_seq):
+>         if f['bottom_y'] < airborne_threshold:
+>             airborne_indices.append(i)
+>
+>     if not airborne_indices:
+>         airborne_threshold = ground_level - 20
+>         airborne_indices = [i for i, f in enumerate(main_seq) if f['bottom_y'] < airborne_threshold]
+>
+>     if not airborne_indices:
+>         airborne_threshold = ground_level - 15
+>         airborne_indices = [i for i, f in enumerate(main_seq) if f['bottom_y'] < airborne_threshold]
+>
+>     if not airborne_indices:
+>         raise ValueError("No airborne phase detected")
+>
+>     # Group consecutive airborne indices
+>     airborne_groups = []
+>     current_group = [airborne_indices[0]]
+>     for i in range(1, len(airborne_indices)):
+>         if airborne_indices[i] - airborne_indices[i-1] <= 2:
+>             current_group.append(airborne_indices[i])
+>         else:
+>             airborne_groups.append(current_group)
+>             current_group = [airborne_indices[i]]
+>     airborne_groups.append(current_group)
+>
+>     # Find the group with the deepest dip (minimum bottom_y)
+>     best_group = None
+>     min_bottom = height
+>     for group in airborne_groups:
+>         for idx in group:
+>             if main_seq[idx]['bottom_y'] < min_bottom:
+>                 min_bottom = main_seq[idx]['bottom_y']
+>                 best_group = group
+>
+>     first_airborne_idx = best_group[0]
+>     last_airborne_idx = best_group[-1]
+>
+>     # Takeoff: scan backwards from first airborne frame
+>     # Find last frame near ground level before the airborne phase
+>     near_ground_threshold = ground_level - 15
+>
+>     takeoff_idx = first_airborne_idx
+>     for i in range(first_airborne_idx - 1, -1, -1):
+>         if main_seq[i]['bottom_y'] >= near_ground_threshold:
+>             takeoff_idx = i + 1
+>             break
+>     else:
+>         takeoff_idx = first_airborne_idx
+>
+>     # Landing: scan forward from last airborne frame
+>     # Find first frame that returns to near-ground level
+>     landing_idx = last_airborne_idx
+>     for i in range(last_airborne_idx + 1, len(main_seq)):
+>         if main_seq[i]['bottom_y'] >= near_ground_threshold:
+>             landing_idx = i
+>             break
+>     else:
+>         landing_idx = last_airborne_idx
+>
+>     takeoff_frame = main_seq[takeoff_idx]['frame']
+>     landing_frame = main_seq[landing_idx]['frame']
+>
+>     return takeoff_frame, landing_frame
+>
+>
+> def main():
+>     if len(sys.argv) < 2:
+>         print("Usage: python jump_analyzer.py <video_path>")
+>         sys.exit(1)
+>
+>     video_path = sys.argv[1]
+>
+>     takeoff_frame, land_frame = analyze_jump(video_path)
+>
+>     output = {
+>         'jump_takeoff_frame_number': takeoff_frame,
+>         'jump_land_frame_number': land_frame
+>     }
+>
+>     with open('/app/output.toml', 'w') as f:
+>         toml.dump(output, f)
+>
+>     print(f"Takeoff frame: {takeoff_frame}")
+>     print(f"Landing frame: {land_frame}")
+>     print("Output written to /app/output.toml")
+>
+>
+> if __name__ == '__main__':
+>     main()
+> PYEOF
+root@d378751b-6e3a-4706-8d9c-f63db41237c5:/app#

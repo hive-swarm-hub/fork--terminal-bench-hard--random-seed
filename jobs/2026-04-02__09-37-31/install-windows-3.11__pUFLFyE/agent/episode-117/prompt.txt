@@ -1,0 +1,55 @@
+New Terminal Output:
+
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# python3 << 'PYEOF'
+> import os
+>
+> # Get QEMU PID
+> pid = None
+> for p in os.listdir('/proc'):
+>     if p.isdigit():
+>         try:
+>             with open(f'/proc/{p}/cmdline', 'rb') as f:
+>                 cmd = f.read()
+>                 if b'qemu-system-i386' in cmd and b'defunct' not in cmd:
+>                     pid = int(p)
+>                     print(f'Found QEMU PID: {pid}')
+>         except:
+>             pass
+>
+> if pid:
+>     # Read current bytes at the JNZ location
+>     # Physical address 0x10D01 in guest maps to QEMU's memory
+>     # We need to find the memory mapping
+>     with open(f'/proc/{pid}/maps', 'r') as f:
+>         for line in f:
+>             if 'anon' in line.lower() or len(line.split()) >= 5:
+>                 parts = line.strip().split()
+>                 if len(parts) >= 1:
+>                     addr_range = parts[0]
+>                     start, end = addr_range.split('-')
+>                     size = int(end, 16) - int(start, 16)
+>                     if size == 32 * 1024 * 1024:  # 32MB = guest RAM
+>                         print(f'Found guest RAM mapping: {line.strip()}')
+>                         ram_start = int(start, 16)
+>                         # Patch the JNZ at guest physical 0x10D01
+>                         host_addr = ram_start + 0x10D01
+>                         print(f'Host address to patch: 0x{host_addr:x}')
+>
+>                         with open(f'/proc/{pid}/mem', 'r+b') as mem:
+>                             mem.seek(host_addr)
+>                             current = mem.read(2)
+>                             print(f'Current bytes: {current.hex()}')
+>                             if current == b'\x75\xfe':
+>                                 mem.seek(host_addr)
+>                                 mem.write(b'\x90\x90')  # NOP NOP
+>                                 print('Patched JNZ to NOP NOP!')
+>                             else:
+>                                 print('Unexpected bytes, not patching')
+>                         break
+> PYEOF
+Found QEMU PID: 7830
+Found guest RAM mapping: 705bb9e00000-705bbbe00000 rw-p 00000000 00:00 0
+Host address to patch: 0x705bb9e10d01
+Current bytes: 75fe
+Patched JNZ to NOP NOP!
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app#

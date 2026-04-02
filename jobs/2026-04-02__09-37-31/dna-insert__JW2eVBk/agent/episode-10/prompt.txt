@@ -1,0 +1,166 @@
+New Terminal Output:
+
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app# cat > /app/design_primers2.py << 'PYEOF'
+> import subprocess
+> import sys
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # The insertion is at position 213 in the input
+> # Inserted sequence: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39 nt)
+> INSERTION_POS = 213
+> INSERTED_SEQ = "AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA"
+>
+> # Verify
+> reconstructed = input_seq[:INSERTION_POS] + INSERTED_SEQ + input_seq[INSERTION_POS:]
+> assert reconstructed == output_seq, "Reconstruction failed!"
+> print("Reconstruction verified!")
+> print(f"Insertion at position {INSERTION_POS}")
+> print(f"Inserted: {INSERTED_SEQ} ({len(INSERTED_SEQ)} nt)")
+> print()
+>
+> # Q5 SDM primer design for insertion:
+> # Forward primer: 5' tail (insertion) + 3' annealing to template downstream of insertion point
+> # Reverse primer: anneals to template upstream of insertion point (RC), back-to-back with fwd
+>
+> MIN_LEN = 15
+> MAX_LEN = 45
+> MIN_TM = 58.0
+> MAX_TM = 72.0
+> MAX_TM_DIFF = 5.0
+>
+> # Forward primer annealing: starts at INSERTION_POS on the input template
+> fwd_candidates = []
+> for length in range(MIN_LEN, MAX_LEN + 1):
+>     anneal_seq = ''
+>     for i in range(length):
+>         pos = (INSERTION_POS + i) % len(input_seq)
+>         anneal_seq += input_seq[pos]
+>     tm = get_tm(anneal_seq)
+>     if MIN_TM <= tm <= MAX_TM:
+>         fwd_candidates.append((length, anneal_seq, tm))
+>
+> print("Forward primer annealing candidates:")
+> for l, s, t in fwd_candidates:
+>     print(f"  len={l}, Tm={t:.2f}, seq={s}")
+> print()
+>
+> # Reverse primer annealing: ends at INSERTION_POS (exclusive) on the top strand
+> # Reverse primer = RC of input[INSERTION_POS-length:INSERTION_POS]
+> rev_candidates = []
+> for length in range(MIN_LEN, MAX_LEN + 1):
+>     anneal_top = ''
+>     for i in range(length):
+>         pos = (INSERTION_POS - length + i) % len(input_seq)
+>         anneal_top += input_seq[pos]
+>     primer_seq = rc(anneal_top)
+>     tm = get_tm(primer_seq)
+>     if MIN_TM <= tm <= MAX_TM:
+>         rev_candidates.append((length, primer_seq, tm))
+>
+> print("Reverse primer annealing candidates:")
+> for l, s, t in rev_candidates:
+>     print(f"  len={l}, Tm={t:.2f}, seq={s}")
+> print()
+>
+> # Find best pair with smallest Tm difference
+> best_pair = None
+> best_diff = float('inf')
+>
+> for fl, fseq, ftm in fwd_candidates:
+>     for rl, rseq, rtm in rev_candidates:
+>         diff = abs(ftm - rtm)
+>         if diff <= MAX_TM_DIFF and diff < best_diff:
+>             best_diff = diff
+>             fwd_primer = INSERTED_SEQ + fseq
+>             rev_primer = rseq
+>             best_pair = (fwd_primer, rev_primer, ftm, rtm, fl, rl, fseq)
+>
+> if best_pair:
+>     fwd_primer, rev_primer, ftm, rtm, fl, rl, fwd_anneal = best_pair
+>     print(f"Best pair:")
+>     print(f"  Forward primer: {fwd_primer}")
+>     print(f"    Tail (insertion): {INSERTED_SEQ}")
+>     print(f"    Annealing: {fwd_anneal} (len={fl}, Tm={ftm:.2f})")
+>     print(f"  Reverse primer: {rev_primer}")
+>     print(f"    Annealing len={rl}, Tm={rtm:.2f}")
+>     print(f"  Tm difference: {abs(ftm-rtm):.2f}")
+>
+>     with open('primers.fasta', 'w') as f:
+>         f.write(f">primer_forward\n{fwd_primer}\n")
+>         f.write(f">primer_reverse\n{rev_primer}\n")
+>     print("\nWritten to primers.fasta")
+> else:
+>     print("ERROR: No valid primer pair found!")
+>     sys.exit(1)
+> PYEOF
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app# python3 /app/design_primers2.py
+Reconstruction verified!
+Insertion at position 213
+Inserted: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA (39 nt)
+
+Forward primer annealing candidates:
+  len=15, Tm=59.54, seq=AGCAAGGGCGAGGAG
+  len=16, Tm=63.48, seq=AGCAAGGGCGAGGAGC
+  len=17, Tm=65.14, seq=AGCAAGGGCGAGGAGCT
+  len=18, Tm=66.27, seq=AGCAAGGGCGAGGAGCTG
+  len=19, Tm=67.95, seq=AGCAAGGGCGAGGAGCTGT
+  len=20, Tm=68.19, seq=AGCAAGGGCGAGGAGCTGTT
+  len=21, Tm=68.71, seq=AGCAAGGGCGAGGAGCTGTTC
+  len=22, Tm=70.07, seq=AGCAAGGGCGAGGAGCTGTTCA
+  len=23, Tm=70.69, seq=AGCAAGGGCGAGGAGCTGTTCAC
+
+Reverse primer annealing candidates:
+  len=30, Tm=58.08, seq=CATATGTATATCTCCTTCTTAAAGTTAAAC
+  len=31, Tm=59.31, seq=CATATGTATATCTCCTTCTTAAAGTTAAACA
+  len=32, Tm=59.74, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAA
+  len=33, Tm=60.15, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAA
+  len=34, Tm=60.53, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAA
+  len=35, Tm=60.76, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAAT
+  len=36, Tm=61.10, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATT
+  len=37, Tm=60.95, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTA
+  len=38, Tm=61.15, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTAT
+  len=39, Tm=61.46, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATT
+  len=40, Tm=61.75, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTT
+  len=41, Tm=62.23, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTC
+  len=42, Tm=62.93, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCT
+  len=43, Tm=62.75, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTA
+  len=44, Tm=63.17, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAG
+  len=45, Tm=63.81, seq=CATATGTATATCTCCTTCTTAAAGTTAAACAAAATTATTTCTAGA
+
+Best pair:
+  Forward primer: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG
+    Tail (insertion): AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+    Annealing: AGCAAGGGCGAGGAG (len=15, Tm=59.54)
+  Reverse primer: CATATGTATATCTCCTTCTTAAAGTTAAACAA
+    Annealing len=32, Tm=59.74
+  Tm difference: 0.21
+
+Written to primers.fasta
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app#

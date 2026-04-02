@@ -1,0 +1,189 @@
+New Terminal Output:
+
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app# python3 << 'PYEOF'
+> import subprocess
+>
+> def parse_fasta(filename):
+>     seqs = {}
+>     current = None
+>     with open(filename) as f:
+>         for line in f:
+>             line = line.strip()
+>             if line.startswith('>'):
+>                 current = line[1:]
+>                 seqs[current] = ''
+>             else:
+>                 seqs[current] += line
+>     return seqs
+>
+> def rc(seq):
+>     comp = {'A':'T','T':'A','G':'C','C':'G'}
+>     return ''.join(comp[b] for b in reversed(seq.upper()))
+>
+> def get_tm(seq):
+>     result = subprocess.run(
+>         ['oligotm', '-tp', '1', '-sc', '1', '-mv', '50', '-dv', '2', '-n', '0.8', '-d', '500', seq.upper()],
+>         capture_output=True, text=True
+>     )
+>     return float(result.stdout.strip())
+>
+> seqs = parse_fasta('sequences.fasta')
+> input_seq = seqs['input'].upper()
+> output_seq = seqs['output'].upper()
+>
+> # Check all valid insertion positions
+> insert_len = len(output_seq) - len(input_seq)  # 39
+> print(f"Insert length: {insert_len}")
+> valid_positions = []
+> for pos in range(len(input_seq) + 1):
+>     inserted = output_seq[pos:pos + insert_len]
+>     reconstructed = input_seq[0:pos] + inserted + input_seq[pos:]
+>     if reconstructed == output_seq:
+>         valid_positions.append((pos, inserted))
+>         print(f"Valid insertion at position {pos}: {inserted}")
+>
+> print(f"\nTotal valid positions: {len(valid_positions)}")
+> print()
+>
+> # For Q5 SDM, the forward primer carries the insertion as a 5' tail
+> # and anneals downstream. The reverse primer anneals upstream (back-to-back).
+> # The product after ligation/KLD will have the insertion between the two annealing regions.
+>
+> # Let's verify our chosen primers produce the correct output
+> fwd_primer = "AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG"
+> rev_primer = "CATATGTATATCTCCTTCTTAAAGTTAAACAA"
+>
+> # The forward primer tail is the insertion
+> tail = "AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA"
+> fwd_anneal = fwd_primer[len(tail):]  # AGCAAGGGCGAGGAG
+>
+> print(f"Forward primer: {fwd_primer}")
+> print(f"  Tail: {tail}")
+> print(f"  Annealing: {fwd_anneal}")
+> print(f"Reverse primer: {rev_primer}")
+>
+> # Where does the forward primer anneal on the input template?
+> fwd_anneal_pos = input_seq.find(fwd_anneal)
+> print(f"\nForward annealing position on input: {fwd_anneal_pos}")
+>
+> # Where does the reverse primer anneal? It's the RC of a region on the top strand
+> rev_rc = rc(rev_primer)  # This is the top strand sequence the reverse primer binds to
+> rev_anneal_pos = input_seq.find(rev_rc)
+> print(f"Reverse primer binds top strand at position: {rev_anneal_pos}")
+> print(f"Reverse primer top strand region: {rev_rc}")
+> print(f"Reverse primer binds: input[{rev_anneal_pos}:{rev_anneal_pos + len(rev_primer)}]")
+>
+> # In Q5 SDM, after PCR:
+> # The forward primer extends from its annealing site, carrying the tail
+> # The reverse primer extends from its annealing site in the opposite direction
+> # After KLD (kinase-ligase-DpnI), the linear PCR product is circularized
+> #
+> # The PCR product (linear) is:
+> # 5': [fwd_tail][fwd_anneal]...[template]...[RC of rev_anneal] 3'
+> #
+> # After circularization, the product is:
+> # ...[rev_anneal region on template]...[fwd_tail][fwd_anneal region on template]...
+> # Which should equal the output plasmid
+>
+> # The forward primer anneals at position 213 (fwd_anneal_pos)
+> # The reverse primer anneals to input[181:213] (rev_anneal_pos to rev_anneal_pos+32)
+> print(f"\nReverse primer covers input[{rev_anneal_pos}:{rev_anneal_pos + len(rev_primer)}]")
+> print(f"Forward primer anneals starting at input[{fwd_anneal_pos}]")
+>
+> # The product after circularization should be:
+> # input[0:rev_anneal_pos+len(rev_primer)] (upstream through rev primer region)
+> # Wait, actually for back-to-back primers in Q5 SDM:
+> # The reverse primer's 5' end is at position rev_anneal_pos+len(rev_primer)-1 (on top strand)
+> # going backwards to rev_anneal_pos
+> # The forward primer's annealing starts at fwd_anneal_pos
+> #
+> # After PCR and KLD, the circular product is:
+> # ...input[fwd_anneal_pos:] + input[0:rev_anneal_pos+len(rev)] + tail + input[fwd_anneal_pos:]...
+> # No wait, let me think more carefully.
+>
+> # The PCR amplifies the entire plasmid. The forward primer anneals at pos 213,
+> # extends through the plasmid. The reverse primer anneals at the RC of pos 181-212,
+> # extends in the other direction through the plasmid.
+> #
+> # The linear product is:
+> # 5'-> tail + input[213:] + input[0:213] (from forward primer extension)
+> # 3'<- input[213:] + input[0:213] (from reverse primer extension)
+> # Wait, the reverse primer anneals at 181-212 on the top strand,
+> # meaning it's on the bottom strand pointing left (5'->3' on bottom = right to left on top)
+> # So it extends leftward on the bottom strand, which means it copies rightward on the top strand.
+>
+> # Actually for a circular template:
+> # Forward primer binds at 213, extends 213->214->...->3590->0->1->...->212
+> # But wait, the reverse primer binds the bottom strand at 181-212
+> # The reverse primer's 3' end corresponds to position 181 on the top strand
+> # So it extends: 181->180->179->...->0->3590->...->213
+> #
+> # The linear PCR product top strand is:
+> # [fwd_tail][input[213:]][input[:181+1]]... no this isn't right for circular
+>
+> # Let me think about it differently. In Q5 SDM with back-to-back primers:
+> # The primers point AWAY from each other on the template
+> # They amplify the entire plasmid
+> # The product is linear with:
+> #   5' end: forward primer (tail + annealing)
+> #   3' end: reverse complement of reverse primer
+> # After KLD, this linear product is circularized
+>
+> # Forward primer anneals at input[213:228] (positions 213-227)
+> # Reverse primer anneals to bottom strand corresponding to input[181:213]
+> # (reverse primer 5' end at position 212 on top strand, 3' end at position 181)
+>
+> # The linear PCR product (top strand, 5' to 3'):
+> # [fwd_primer_full][input[228:]input[0:181]][RC(rev_primer)]
+> # = [tail + fwd_anneal][input[228:] + input[0:181]][RC(rev_primer)]
+>
+> # After circularization (KLD joins the ends):
+> # The circular product = RC(rev_primer) + tail + fwd_anneal + input[228:] + input[0:181]
+> # = RC(rev_primer) + tail + input[213:] + input[0:181]
+> # Wait, fwd_anneal = input[213:228], so tail + fwd_anneal + input[228:] = tail + input[213:]
+>
+> # Hmm, but RC(rev_primer) should match input[181:213]
+> # RC(rev_primer) = rc("CATATGTATATCTCCTTCTTAAAGTTAAACAA")
+> print(f"\nRC of reverse primer: {rc(rev_primer)}")
+> print(f"Input[181:213]: {input_seq[181:213]}")
+> print(f"Match: {rc(rev_primer) == input_seq[181:213]}")
+>
+> # So the circular product is:
+> # input[181:213] + tail + input[213:] + input[0:181]
+> # = input[181:213] + AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA + input[213:] + input[0:181]
+> # Rearranging (circular, start from 0):
+> # = input[0:181] + input[181:213] + tail + input[213:]
+> # = input[0:213] + tail + input[213:]
+> # = input[0:213] + AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA + input[213:]
+>
+> product = input_seq[0:213] + tail + input_seq[213:]
+> print(f"\nProduct matches output: {product == output_seq}")
+> print(f"Product length: {len(product)}, Output length: {len(output_seq)}")
+> PYEOF
+Insert length: 39
+Valid insertion at position 213: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+Valid insertion at position 214: GTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAA
+Valid insertion at position 215: TAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAG
+
+Total valid positions: 3
+
+Forward primer: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAAAGCAAGGGCGAGGAG
+  Tail: AGTAGATTAGAAGAAGAATTAAGAAGAAGATTAACAGAA
+  Annealing: AGCAAGGGCGAGGAG
+Reverse primer: CATATGTATATCTCCTTCTTAAAGTTAAACAA
+
+Forward annealing position on input: 213
+Reverse primer binds top strand at position: 181
+Reverse primer top strand region: TTGTTTAACTTTAAGAAGGAGATATACATATG
+Reverse primer binds: input[181:213]
+
+Reverse primer covers input[181:213]
+Forward primer anneals starting at input[213]
+
+RC of reverse primer: TTGTTTAACTTTAAGAAGGAGATATACATATG
+Input[181:213]: TTGTTTAACTTTAAGAAGGAGATATACATATG
+Match: True
+
+Product matches output: True
+Product length: 3630, Output length: 3630
+root@32f3e1f4-7b95-442b-a903-f5837e282337:/app#

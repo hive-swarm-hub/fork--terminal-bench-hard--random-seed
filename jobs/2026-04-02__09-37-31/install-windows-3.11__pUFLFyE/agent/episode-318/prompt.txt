@@ -1,0 +1,86 @@
+New Terminal Output:
+
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# python3 << 'PYEOF' &
+> import socket, time, struct, json
+>
+> def gdb_checksum(data):
+>     return sum(data) & 0xFF
+>
+> def gdb_send(sock, cmd):
+>     data = cmd.encode()
+>     checksum = gdb_checksum(data)
+>     packet = f'${cmd}#{checksum:02x}'.encode()
+>     sock.sendall(packet)
+>     time.sleep(0.15)
+>     resp = b''
+>     try:
+>         resp = sock.recv(4096)
+>     except:
+>         pass
+>     return resp
+>
+> def gdb_stop(sock):
+>     sock.sendall(b'\x03')
+>     time.sleep(0.3)
+>     try:
+>         return sock.recv(4096)
+>     except:
+>         return b''
+>
+> def gdb_continue(sock):
+>     data = b'c'
+>     checksum = sum(data) & 0xFF
+>     sock.sendall(f'$c#{checksum:02x}'.encode())
+>     time.sleep(0.1)
+>     try:
+>         sock.recv(1)
+>     except:
+>         pass
+>
+> time.sleep(8)  # Wait for initial boot
+>
+> sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+> sock.settimeout(3)
+> sock.connect(('127.0.0.1', 1234))
+> print('GDB connected', flush=True)
+>
+> patched_addrs = set()
+> for attempt in range(60):  # Monitor for up to 5 minutes
+>     gdb_stop(sock)
+>     time.sleep(0.2)
+>
+>     resp = gdb_send(sock, 'g')
+>     hex_data = ''.join(c for c in resp.decode(errors='replace') if c in '0123456789abcdef')
+>
+>     if len(hex_data) >= 72:
+>         eip = struct.unpack('<I', bytes.fromhex(hex_data[64:72]))[0]
+>
+>         if eip == 0x5F1:
+>             # Get CS to calculate physical address
+>             cs = struct.unpack('<I', bytes.fromhex(hex_data[80:88]))[0]
+>             phys = (cs * 16 + eip) & 0xFFFFF
+>
+>             if phys not in patched_addrs:
+>                 print(f'[{attempt}] DOSIDLE at phys 0x{phys:05x}, patching...', flush=True)
+>                 gdb_send(sock, f'M{phys:x},2:9090')
+>                 patched_addrs.add(phys)
+>
+>             # Skip past the NOP
+>             gdb_send(sock, 'P8=f3050000')
+>             gdb_continue(sock)
+>             time.sleep(2)
+>         else:
+>             gdb_continue(sock)
+>             time.sleep(5)
+>     else:
+>         gdb_continue(sock)
+>         time.sleep(5)
+>
+> sock.close()
+> print('GDB patcher done', flush=True)
+> PYEOF
+[1] 19947
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# PATCHER_PID=$!
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# echo "Patcher PID: $PATCHER_PID"
+Patcher PID: 19947
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app#

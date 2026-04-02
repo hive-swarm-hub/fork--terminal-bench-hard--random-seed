@@ -1,0 +1,79 @@
+New Terminal Output:
+
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# kill 17871 2>/dev/null
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app#
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# # Quick inline patch
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app# python3 << 'PYEOF'
+> import os, struct
+>
+> # Find QEMU PID
+> pid = None
+> for p in os.listdir('/proc'):
+>     if p.isdigit():
+>         try:
+>             with open(f'/proc/{p}/cmdline', 'rb') as f:
+>                 cmd = f.read()
+>                 if b'qemu-system-i38' in cmd:
+>                     status = open(f'/proc/{p}/status').read()
+>                     if 'zombie' not in status.lower():
+>                         pid = int(p)
+>                         print(f'Found QEMU PID: {pid}, cmd: {cmd[:100]}')
+>         except:
+>             pass
+>
+> if not pid:
+>     print('No QEMU found!')
+>     exit(1)
+>
+> # Find RAM
+> ram_start = None
+> with open(f'/proc/{pid}/maps', 'r') as f:
+>     for line in f:
+>         parts = line.strip().split()
+>         addr_range = parts[0]
+>         start, end = addr_range.split('-')
+>         size = int(end, 16) - int(start, 16)
+>         if size == 32 * 1024 * 1024:
+>             ram_start = int(start, 16)
+>             print(f'RAM at 0x{ram_start:x}, size={size}')
+>             break
+>
+> if not ram_start:
+>     print('RAM not found!')
+>     exit(1)
+>
+> # Patch the loop at guest physical 0x10D01 (CS=1071, EIP=5F1)
+> guest_addr = 0x10710 + 0x5F1  # = 0x10D01
+> flag_addr = 0x10710 + 0x1A    # = 0x1072A
+>
+> with open(f'/proc/{pid}/mem', 'r+b') as mem:
+>     # Read current bytes at the JNZ location
+>     mem.seek(ram_start + guest_addr)
+>     current = mem.read(2)
+>     print(f'Bytes at 0x{guest_addr:05x}: {current.hex()}')
+>
+>     # Patch JNZ to NOP NOP
+>     mem.seek(ram_start + guest_addr)
+>     mem.write(b'\x90\x90')
+>     print(f'Patched JNZ at 0x{guest_addr:05x}')
+>
+>     # Clear the flag
+>     mem.seek(ram_start + flag_addr)
+>     flag = mem.read(2)
+>     print(f'Flag at 0x{flag_addr:05x}: {flag.hex()}')
+>     mem.seek(ram_start + flag_addr)
+>     mem.write(b'\x00\x00')
+>     print(f'Cleared flag')
+>
+> print('Patch applied!')
+> PYEOF
+Found QEMU PID: 17829, cmd: b'qemu-system-i386\x00-hda\x00/app/isos/win311.img\x00-snapshot\x00-vnc\x00:1\x00-m\x0032\x00-machine\x00acpi=off\x00-monitor\x00tcp
+:12'
+RAM at 0x7a9768e00000, size=33554432
+Bytes at 0x10d01: 9090
+Patched JNZ at 0x10d01
+Flag at 0x1072a: 0000
+Cleared flag
+Patch applied!
+[1]+  Terminated              python3 /tmp/patch_dosidle.py > /tmp/patch_log.txt 2>&1
+root@6d3e5c2e-e147-419b-a28b-8cf03e2a6878:/app#
